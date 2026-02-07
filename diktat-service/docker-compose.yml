@@ -1,0 +1,73 @@
+services:
+  # ============================================
+  # API Gateway / Orchestrator
+  # ============================================
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: diktat-api
+    runtime: runc
+    ports:
+      - "8000:8000"
+    environment:
+      - WHISPER_HOST=faster-whisper
+      - WHISPER_PORT=8000
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - OLLAMA_MODEL=llama3.1:8b
+      - WHISPER_MODEL=large-v3
+      - WHISPER_LANGUAGE=de
+    depends_on:
+      - faster-whisper
+    networks:
+      - diktat-network
+      - caddy-proxy-network
+    restart: unless-stopped
+
+  # ============================================
+  # faster-whisper Container
+  # ============================================
+  faster-whisper:
+    image: fedirz/faster-whisper-server:latest-cuda
+    container_name: diktat-whisper
+    runtime: runc
+    ports:
+      - "8001:8000"
+    environment:
+      - WHISPER__MODEL=large-v3
+      # Alternativen: tiny, small, medium, large-v3
+    volumes:
+      - whisper-models:/root/.cache/huggingface
+    networks:
+      - diktat-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+# ============================================
+# NETZWERK
+# ============================================
+networks:
+  diktat-network:
+    driver: bridge
+    # Verbinde mit bestehendem ollama-Container
+    # Falls ollama in einem anderen Netzwerk läuft:
+    # external: true
+    # name: existing-ollama-network
+
+  caddy-proxy-network:
+    external: true
+    name: caddy-proxy-network
+
+# ============================================
+# VOLUMES
+# ============================================
+volumes:
+  whisper-models:
+    driver: local

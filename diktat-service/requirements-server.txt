@@ -1,0 +1,7 @@
+# KI-Transcribe Server Requirements
+# Für den Docker-Container (server.py)
+
+fastapi>=0.104.0      # Web-Framework
+uvicorn>=0.24.0       # ASGI Server
+requests>=2.31.0      # HTTP-Requests
+python-multipart>=0.0.6  # File-Upload Support
