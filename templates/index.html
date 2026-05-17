@@ -69,10 +69,7 @@
         <div class="tab-content active" id="record">
           <div class="record-area">
             <div id="recordTimer" class="record-timer">00:00</div>
-            <div id="recordViz" class="record-viz">
-              <canvas id="vizCanvas" width="280" height="50"></canvas>
-            </div>
-            <div class="record-buttons">
+<div class="record-buttons">
               <button id="recordBtn" class="btn btn-record" title="Aufnahme starten/beenden">
                 ● Aufnahme starten
               </button>
@@ -106,6 +103,13 @@
             <div class="radio-content">
               <span class="radio-title">🧠 Vollständige Analyse</span>
               <small>Strukturierte Zusammenfassung mit Anamnese, Diagnosen und Empfehlungen</small>
+            </div>
+          </label>
+          <label class="radio-label" id="labelSummary">
+            <input type="radio" name="mode" value="summary">
+            <div class="radio-content">
+              <span class="radio-title">📋 Kurzzusammenfassung</span>
+              <small>Kompakte, allgemeinverständliche Zusammenfassung des Gesprächs</small>
             </div>
           </label>
           <label class="radio-label" id="labelClean">

@@ -263,17 +263,6 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 
 .record-timer.running { color: var(--danger); }
 
-.record-viz {
-  margin: 8px auto;
-  max-width: 280px;
-}
-
-#vizCanvas {
-  width: 100%;
-  height: 50px;
-  border-radius: 6px;
-  background: var(--card-bg);
-}
 
 .record-buttons {
   display: flex;

@@ -78,7 +78,7 @@ ki-transcribe/
 | `WHISPER_PORT` | `8000` | Port |
 | `OLLAMA_HOST` | `ollama` | Hostname des ollama-Containers |
 | `OLLAMA_PORT` | `11434` | Port |
-| `OLLAMA_MODEL` | `qwen2.5:14b` | Standard-Modell |
+| `OLLAMA_MODEL` | `qwen3:8b` | Standard-Modell |
 | `WHISPER_LANGUAGE` | `de` | Sprache für Transkription |
 
 ---

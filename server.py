@@ -12,11 +12,12 @@ import os
 import json
 from pathlib import Path
 import logging
+from prompts import ANALYZE_PROMPT, CLEAN_PROMPT, SUMMARY_PROMPT
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -28,49 +29,6 @@ WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
 app = FastAPI(title="KI-Gesprächsanalyse")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
-
-ANALYZE_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
-
-Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs und erstelle eine strukturierte Zusammenfassung für den Arzt. Halte dich ausschließlich an die Inhalte des Transkripts – keine Annahmen, keine Ergänzungen.
-
-**Transkript:**
-{transcript}
-
----
-
-Erstelle folgende strukturierte Übersicht:
-
-## Zusammenfassung
-(2–3 Sätze zum Kern des Gesprächs)
-
-## Vorstellungsgrund / Hauptbeschwerden
-(Was hat den Patienten in die Praxis geführt?)
-
-## Anamnese
-(Relevante Informationen zur Krankengeschichte, die im Gespräch erwähnt wurden)
-
-## Diagnosen / Verdachtsdiagnosen
-(Falls erwähnt – sonst: Nicht besprochen)
-
-## Maßnahmen und Empfehlungen
-(Untersuchungen, Medikamente, Überweisungen, Folgeberatung – falls besprochen)
-
-## Hinweise für den Arzt
-(Auffälligkeiten, Besonderheiten oder dringender Follow-up-Bedarf)
-
-Antworte vollständig auf Deutsch."""
-
-CLEAN_PROMPT = """Bereinige das folgende medizinische Transkript:
-- Entferne Füllwörter (äh, ähm, hm, sozusagen, halt, ne, also, irgendwie)
-- Korrigiere offensichtliche Transkriptionsfehler
-- Behalte den Inhalt und die Formulierungen exakt bei
-- Keine Umformulierungen, keine Zusammenfassungen
-- Gib NUR den bereinigten Text zurück, ohne Meta-Kommentare
-
-Transkript:
-{transcript}
-
-Bereinigter Text:"""
 
 
 class ThinkingFilter:
@@ -212,7 +170,12 @@ async def analyze(
             yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
             yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
 
-            prompt_template = ANALYZE_PROMPT if mode == "analyze" else CLEAN_PROMPT
+            if mode == "analyze":
+                prompt_template = ANALYZE_PROMPT
+            elif mode == "summary":
+                prompt_template = SUMMARY_PROMPT
+            else:
+                prompt_template = CLEAN_PROMPT
             prompt = prompt_template.format(transcript=transcript)
 
             try:

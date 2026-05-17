@@ -125,9 +125,6 @@ async function startRecording() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-    // Visualizer
-    setupVisualizer(stream);
-
     audioChunks = [];
     isTranscribingLive = false;
 
@@ -237,43 +234,6 @@ function formatTime(s) {
 }
 
 // ============================================================
-// AUDIO-VISUALIZER
-// ============================================================
-function setupVisualizer(stream) {
-  try {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    analyzerCtx = new AudioContext();
-    const source = analyzerCtx.createMediaStreamSource(stream);
-    const analyser = analyzerCtx.createAnalyser();
-    analyser.fftSize = 256;
-    source.connect(analyser);
-
-    const canvas = document.getElementById("vizCanvas");
-    const ctx = canvas.getContext("2d");
-    const bufferLen = analyser.frequencyBinCount;
-    const dataArr = new Uint8Array(bufferLen);
-
-    function draw() {
-      animFrame = requestAnimationFrame(draw);
-      analyser.getByteFrequencyData(dataArr);
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const barW = (canvas.width / bufferLen) * 2.5;
-      let x = 0;
-      for (let i = 0; i < bufferLen; i++) {
-        const h = (dataArr[i] / 255) * canvas.height;
-        ctx.fillStyle = `rgba(16,185,129,${0.5 + dataArr[i] / 510})`;
-        ctx.fillRect(x, canvas.height - h, barW, h);
-        x += barW + 1;
-      }
-    }
-    draw();
-  } catch {
-    // Visualizer ist optional
-  }
-}
-
-// ============================================================
 // UPLOAD
 // ============================================================
 function initUploadZone() {
@@ -331,10 +291,8 @@ async function startAnalysis() {
 
   const model = document.getElementById("modelSelect").value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
-  const isAnalyze = mode === "analyze";
-
   // UI vorbereiten
-  setAnalysisMode(isAnalyze);
+  setAnalysisMode(mode);
   showStatus("Sende Audio...");
   document.getElementById("analyzeBtn").disabled = true;
   document.getElementById("resetBtn").style.display = "none";
@@ -460,11 +418,12 @@ function hideStatus() {
   document.getElementById("statusBox").style.display = "none";
 }
 
-function setAnalysisMode(isAnalyze) {
+function setAnalysisMode(mode) {
   const titleEl = document.getElementById("analysisSectionTitle");
-  if (titleEl) {
-    titleEl.textContent = isAnalyze ? "🧠 Analyse" : "✏️ Bereinigtes Transkript";
-  }
+  if (!titleEl) return;
+  if (mode === "analyze") titleEl.textContent = "🧠 Analyse";
+  else if (mode === "summary") titleEl.textContent = "📋 Zusammenfassung";
+  else titleEl.textContent = "✏️ Bereinigtes Transkript";
 }
 
 function resetAll() {
@@ -486,11 +445,6 @@ function resetAll() {
     "Mikrofon-Zugriff wird beim ersten Klick angefragt.";
   document.getElementById("uploadFileName").textContent = "";
   document.getElementById("fileInput").value = "";
-
-  // Visualizer canvas leeren
-  const canvas = document.getElementById("vizCanvas");
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   // Ergebnisse
   document.getElementById("emptyState").style.display = "block";

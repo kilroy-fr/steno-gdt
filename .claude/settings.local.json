@@ -45,7 +45,10 @@
       "Bash(cmd.exe /c 'wsl -d Debian ls /usr/lib/wsl/lib')",
       "Bash(cmd.exe /c 'wsl -d Debian nvidia-smi')",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(gh repo create:*)",
+      "Bash(gh auth status:*)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Jan.DOMAIN\\caddy-proxy"
