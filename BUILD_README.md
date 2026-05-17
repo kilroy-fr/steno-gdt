@@ -23,7 +23,6 @@ Diese Anleitung zeigt, wie du einen benutzerfreundlichen Windows-Installer für 
 ### Option 1: One-Click Build (empfohlen)
 
 ```cmd
-cd diktat-service
 build_installer.bat
 ```
 
@@ -40,8 +39,6 @@ Das war's! Der Installer wird automatisch erstellt.
 ### Schritt 1: Dependencies installieren
 
 ```cmd
-cd diktat-service
-
 # PyInstaller installieren
 pip install pyinstaller
 
@@ -123,7 +120,7 @@ iscc installer.iss
 ### Icon hinzufügen (optional)
 
 1. Erstelle/beschaffe ein Icon (`icon.ico`, 256x256 px)
-2. Speichere es in `diktat-service\icon.ico`
+2. Speichere es im Repo-Root als `icon.ico`
 3. Bearbeite `diktat_gui.spec`:
    ```python
    exe = EXE(

@@ -3,7 +3,11 @@
     "allow": [
       "Bash(ls \"c:\\\\Users\\\\Jan.DOMAIN\")",
       "Read(//c/Users/Jan.DOMAIN/**)",
-      "Bash(docker restart *)"
+      "Bash(docker restart *)",
+      "PowerShell(nvidia-smi 2>&1)",
+      "Bash(gh api *)",
+      "Bash(python3 -c \"import sys,base64; print\\(base64.b64decode\\(sys.stdin.read\\(\\)\\).decode\\('utf-8','ignore'\\)\\)\")",
+      "Bash(python3 -c \"import sys,json,base64; d=json.load\\(sys.stdin\\); print\\(base64.b64decode\\(d['content']\\).decode\\('utf-8','ignore'\\)\\)\")"
     ]
   }
 }

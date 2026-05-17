@@ -11,6 +11,8 @@ let timerInterval = null;
 let timerSeconds = 0;
 let analyzerCtx = null;
 let animFrame = null;
+let liveTranscriptIntervalId = null;
+let isTranscribingLive = false;
 
 // --- Init ---
 document.addEventListener("DOMContentLoaded", () => {
@@ -21,7 +23,6 @@ document.addEventListener("DOMContentLoaded", () => {
   setInterval(checkHealth, 30000);
 
   document.getElementById("recordBtn").addEventListener("click", toggleRecording);
-  document.getElementById("stopBtn").addEventListener("click", stopRecording);
   document.getElementById("analyzeBtn").addEventListener("click", startAnalysis);
   document.getElementById("resetBtn").addEventListener("click", resetAll);
   initUploadZone();
@@ -128,6 +129,8 @@ async function startRecording() {
     setupVisualizer(stream);
 
     audioChunks = [];
+    isTranscribingLive = false;
+
     const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
       ? "audio/webm;codecs=opus"
       : "audio/webm";
@@ -137,16 +140,25 @@ async function startRecording() {
       if (e.data.size > 0) audioChunks.push(e.data);
     };
     mediaRecorder.onstop = onRecordingStop;
-    mediaRecorder.start(100); // collect every 100ms
+    mediaRecorder.start(500);
+
+    // Live-Transkription alle 30 Sekunden
+    liveTranscriptIntervalId = setInterval(transcribeLiveChunk, 30000);
 
     // UI
     const btn = document.getElementById("recordBtn");
-    btn.textContent = "● Aufnahme läuft...";
+    btn.textContent = "■ Aufnahme beenden";
     btn.classList.add("recording");
-    document.getElementById("stopBtn").disabled = false;
     document.getElementById("recordTimer").classList.add("running");
-    document.getElementById("recordHint").textContent = "Sprechen Sie jetzt. Klicken Sie Stop wenn fertig.";
+    document.getElementById("recordHint").textContent =
+      "Aufnahme läuft... Erneut klicken zum Beenden.";
     document.getElementById("audioPlayback").style.display = "none";
+
+    // Live-Transkript-Bereich vorbereiten
+    document.getElementById("emptyState").style.display = "none";
+    document.getElementById("transcriptSection").style.display = "block";
+    document.getElementById("transcriptText").textContent =
+      "Transkription beginnt nach 30 Sekunden...";
 
     // Timer
     timerSeconds = 0;
@@ -164,13 +176,42 @@ function stopRecording() {
   mediaRecorder.stop();
   mediaRecorder.stream.getTracks().forEach((t) => t.stop());
   clearInterval(timerInterval);
+  clearInterval(liveTranscriptIntervalId);
+  liveTranscriptIntervalId = null;
   cancelAnimationFrame(animFrame);
 
   const btn = document.getElementById("recordBtn");
   btn.textContent = "● Aufnahme starten";
   btn.classList.remove("recording");
-  document.getElementById("stopBtn").disabled = true;
   document.getElementById("recordTimer").classList.remove("running");
+  document.getElementById("recordHint").textContent =
+    "Aufnahme beendet. Analyse wird gestartet...";
+}
+
+async function transcribeLiveChunk() {
+  // Mindestens ~10 Sekunden Audio (500ms-Chunks × 20)
+  if (isTranscribingLive || audioChunks.length < 20) return;
+
+  isTranscribingLive = true;
+  try {
+    const blob = new Blob(audioChunks, { type: "audio/webm" });
+    const formData = new FormData();
+    formData.append("audio", blob, "chunk.webm");
+
+    const r = await fetch("/transcribe-only", { method: "POST", body: formData });
+    if (r.ok) {
+      const data = await r.json();
+      const text = data.transcript || "";
+      if (text) {
+        document.getElementById("transcriptSection").style.display = "block";
+        document.getElementById("transcriptText").textContent = text;
+      }
+    }
+  } catch (e) {
+    console.warn("Live-Transkription fehlgeschlagen:", e);
+  } finally {
+    isTranscribingLive = false;
+  }
 }
 
 function onRecordingStop() {
@@ -179,9 +220,9 @@ function onRecordingStop() {
   const playback = document.getElementById("audioPlayback");
   playback.src = url;
   playback.style.display = "block";
-  document.getElementById("recordHint").textContent =
-    `Aufnahme bereit (${formatTime(timerSeconds)}).`;
-  updateAnalyzeBtn();
+
+  // Sofort Analyse starten
+  startAnalysis();
 }
 
 function updateTimer() {
@@ -429,6 +470,14 @@ function setAnalysisMode(isAnalyze) {
 function resetAll() {
   audioBlob = null;
   uploadedFile = null;
+  isTranscribingLive = false;
+
+  // Laufende Aufnahme abbrechen falls aktiv
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    stopRecording();
+  }
+  clearInterval(liveTranscriptIntervalId);
+  liveTranscriptIntervalId = null;
 
   // Aufnahme-UI
   document.getElementById("recordTimer").textContent = "00:00";

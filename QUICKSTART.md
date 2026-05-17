@@ -9,8 +9,6 @@ Schnellstart-Anleitung für die GUI-Anwendung.
 ### Server (einmalig)
 
 ```bash
-cd diktat-service/
-
 # Netzwerk erstellen
 docker network create diktat-network
 
@@ -27,8 +25,6 @@ docker-compose logs -f
 ### Client (Windows)
 
 ```cmd
-cd diktat-service/
-
 # Dependencies installieren
 pip install -r requirements-client.txt
 
@@ -42,14 +38,14 @@ python diktat_gui.py
 
 ### 1. Server-URL konfigurieren
 
-Öffne `diktat_gui.py` in einem Editor:
+Beim ersten Start der GUI erscheint automatisch ein Dialog. Dort die Server-URL eingeben:
 
-```python
-# Zeile 22 anpassen:
-SERVER_URL = "http://localhost:8000/transcribe"  # Lokaler Server
-# ODER
-SERVER_URL = "http://192.168.1.100:8000/transcribe"  # Server im LAN
 ```
+http://localhost:8000/transcribe-only        # Lokaler Server
+http://transcribe.domain.local/transcribe-only  # Server im LAN (via Caddy)
+```
+
+Die Konfiguration wird in `%APPDATA%\KI-Transcribe-Pro\config.json` gespeichert und kann jederzeit über Menü → Einstellungen → Server-URL ändern angepasst werden.
 
 ### 2. GUI starten
 
@@ -59,8 +55,7 @@ python diktat_gui.py
 
 ### 3. Erstes Diktat
 
-1. Wechsle zum Tab **"Diktat"**
-2. Klicke **"Start"**
+1. Klicke **"Start"**
 3. Sprich einen kurzen Satz
 4. Klicke **"Analyse"**
 5. Warte auf das Ergebnis-Fenster

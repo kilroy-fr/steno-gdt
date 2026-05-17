@@ -196,11 +196,6 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 }
 .btn-record.recording:hover { background: var(--danger-hover); }
 
-.btn-stop {
-  background: var(--card-bg);
-  color: var(--text-muted);
-}
-.btn-stop:not(:disabled) { color: var(--text); }
 
 .btn-small {
   display: inline-block;

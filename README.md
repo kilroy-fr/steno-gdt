@@ -1,28 +1,28 @@
 # KI-Transcribe Pro
 
-Lokales Transkriptions- und Diktiersystem mit automatischer KI-gestützter Textsäuberung.
+Lokales Transkriptions- und Diktiersystem für medizinische Dokumentation. Bestehend aus einem Docker-basierten FastAPI-Server mit Browser-UI für Gesprächsanalyse sowie einem Windows-Desktop-Client für Direktdiktat.
 
 ## 🎯 Features
 
-### 🎙️ Zwei Arbeitsmodi
+### 🌐 Web-UI: Gesprächsanalyse
 
-**Ambient-Modus**
-- Zeichnet Gespräche kontinuierlich auf
-- Ideal für Arzt-Patienten-Gespräche oder Meetings
-- Transkribiert und analysiert das komplette Gespräch
-- Standard-Befunde per Knopfdruck einfügen
+- Audio-Upload oder direkte Aufnahme im Browser
+- Vollständige Transkription via faster-whisper (GPU)
+- KI-gestützte Analyse des Arzt-Patienten-Gesprächs (ollama LLM)
+- Strukturierte Ausgabe: Zusammenfassung, Anamnese, Diagnosen, Maßnahmen
+- Alternative: Bereinigungsmodus (entfernt Füllwörter)
+- Live-Streaming der LLM-Antwort (SSE)
 
-**Diktat-Modus**
+### 🎙️ Windows-Client: Diktat
+
 - Direktes Diktieren mit Live-Transkription
 - Echtzeit-Vorschau des transkribierten Texts
 - Perfekt für schnelle Notizen und Dokumentation
 
-### ✨ Weitere Features
+### ✨ Gemeinsame Features
 
 - 🔄 Kontinuierliche Audio-Aufnahme in 30-Sekunden-Chunks
 - 📝 Live-Transkription während der Aufnahme
-- 🤖 KI-gestützte Textsäuberung (entfernt Füllwörter, korrigiert Fehler)
-- 📋 13 vordefinierte Standard-Befunde
 - ✏️ Editierbares Ergebnisfenster
 - 📎 Automatische Zwischenablage-Integration
 - 💾 Speichert Roh-Transkripte als Backup
@@ -52,8 +52,6 @@ Lokales Transkriptions- und Diktiersystem mit automatischer KI-gestützter Texts
 #### Mit bestehendem ollama Container
 
 ```bash
-cd diktat-service/
-
 # Verbinde ollama mit Diktat-Netzwerk
 docker network create diktat-network
 docker network connect diktat-network <dein-ollama-container-name>
@@ -77,24 +75,23 @@ curl http://localhost:8000/health/ollama
 
 ### 2️⃣ Client Setup (Windows)
 
-```cmd
-cd diktat-service/
+**Option A: Installer (empfohlen)**
 
+Lade `Output\KI-Transcribe-Installer.exe` herunter und führe ihn aus. Keine Admin-Rechte erforderlich.
+
+**Option B: Python direkt**
+
+```cmd
 # Installiere Python-Dependencies
 pip install -r requirements-client.txt
+
+# GUI starten
+python diktat_gui.py
 ```
 
 #### Konfiguration
 
-Öffne `diktat_gui.py` und passe die Server-URL an (Zeile 22):
-
-```python
-# Für lokalen Server:
-SERVER_URL = "http://localhost:8000/transcribe"
-
-# Für Server im LAN:
-SERVER_URL = "http://192.168.1.100:8000/transcribe"
-```
+Beim ersten Start öffnet sich automatisch ein Dialog zur Eingabe der Server-URL. Die Konfiguration wird in `%APPDATA%\KI-Transcribe-Pro\config.json` gespeichert und kann jederzeit über Menü → Einstellungen → Server-URL ändern angepasst werden.
 
 ---
 
@@ -103,30 +100,29 @@ SERVER_URL = "http://192.168.1.100:8000/transcribe"
 ### Starten
 
 1. **Server**: `docker-compose up -d` (einmalig)
-2. **GUI**: `python diktat_gui.py`
+2. **Web-UI**: Browser öffnen → URL des Servers (z.B. `http://transcribe.domain.local`)
+3. **Diktat-Client**: `python diktat_gui.py` oder EXE starten
 
 ### Workflow
 
-#### Ambient-Modus (Gespräche)
+#### Web-UI: Gesprächsanalyse
 
-1. Wechsle zum Tab "Gespräch (Ambient)"
-2. Klicke **Start** → Aufnahme läuft
-3. Während der Aufnahme:
-   - Standard-Befunde per Klick einfügen
-   - Manuelle Notizen hinzufügen
-   - **Pause** für Unterbrechungen
-4. Klicke **Analyse** → Verarbeitung startet
-5. Editierbares Ergebnis-Fenster öffnet sich
-6. Text wird automatisch in Zwischenablage kopiert
+1. Browser öffnen → Server-URL aufrufen
+2. Audio-Datei hochladen oder direkt im Browser aufnehmen
+3. Modus wählen: **Analysieren** (strukturierte Auswertung) oder **Bereinigen** (nur Füllwörter entfernen)
+4. LLM-Modell wählen (falls mehrere verfügbar)
+5. Verarbeitung startet → Transkript und Analyse erscheinen live
+6. Text kopieren oder weiterverarbeiten
 
-#### Diktat-Modus (Live-Transkription)
+#### Diktat-Client (Windows-GUI)
 
-1. Wechsle zum Tab "Diktat"
+1. GUI starten → Server-URL beim ersten Start eingeben
 2. Klicke **Start** → Aufnahme läuft
 3. Sprich dein Diktat
 4. Sieh Live-Transkription im Textfeld
-5. Klicke **Analyse** → Finalisierung
-6. Editiere und kopiere das Ergebnis
+5. Klicke **Analyse** → Finalisierung und Speicherung
+6. Editierbares Ergebnis-Fenster öffnet sich
+7. Text wird automatisch in Zwischenablage kopiert
 
 ### Tastenkombinationen
 
@@ -142,13 +138,20 @@ Bearbeite `docker-compose.yml`:
 
 ```yaml
 environment:
-  # Whisper-Modell (tiny, base, small, medium, large-v3)
-  - WHISPER_MODEL=base
+  # Whisper-Einstellungen
   - WHISPER_LANGUAGE=de
 
-  # Ollama-Modell
-  - OLLAMA_MODEL=llama3.1:8b
+  # Ollama-Modell (Standard-Modell für die Web-UI)
+  - OLLAMA_MODEL=qwen2.5:14b
   - OLLAMA_HOST=ollama
+```
+
+Das Whisper-Modell wird im `faster-whisper` Container konfiguriert:
+
+```yaml
+faster-whisper:
+  environment:
+    - WHISPER__MODEL=large-v3  # tiny, base, small, medium, large-v3
 ```
 
 ### Whisper-Modelle
@@ -174,18 +177,6 @@ ollama pull qwen2.5:7b
 
 # Liste Modelle
 ollama list
-```
-
-### Standard-Befunde anpassen
-
-Bearbeite `diktat_gui.py`, Zeile 24-38:
-
-```python
-STANDARD_FINDINGS = {
-    "Herz": "Cor: Herztöne rein, regelmäßig, rhythmisch.",
-    "Eigener Befund": "Dein Text hier...",
-    # Füge weitere hinzu oder entferne welche
-}
 ```
 
 ### Audio-Einstellungen
@@ -259,21 +250,14 @@ curl http://localhost:11434/api/tags
 
 ### Problem: "Text-Säuberung zu aggressiv/schwach"
 
-Bearbeite `server.py`, Funktion `clean_text_with_llm()`, Zeile 84-99:
+Bearbeite in `server.py` die Konstante `CLEAN_PROMPT` (ca. Zeile 63):
 
 ```python
-# Prompt anpassen:
-prompt = f"""Du bist ein Assistent für Transkriptions-Nachbearbeitung.
-
-Aufgabe: Entferne nur Füllwörter (äh, ähm, hm).
-Behalte ALLES andere bei!
-
+CLEAN_PROMPT = """Bereinige das folgende medizinische Transkript:
+- Entferne Füllwörter (äh, ähm, hm, ...)
 # Hier anpassen für mehr/weniger Säuberung
-
-Transkribierter Text:
-{raw_text}
-
-Gesäuberter Text:"""
+...
+"""
 ```
 
 Danach neu bauen:
@@ -333,18 +317,28 @@ Verknüpfung in Windows-Autostart-Ordner (`Win+R` → `shell:startup`) ablegen.
 
 ```
 ki-transcribe/
-└── diktat-service/
-    ├── diktat_gui.py              # 🆕 GUI-Anwendung (Hauptmethode)
-    ├── server.py                  # FastAPI Server
-    ├── Dockerfile                 # Docker-Build
-    ├── docker-compose.yml         # Docker-Setup
-    ├── requirements-client.txt    # Client-Dependencies
-    ├── requirements-server.txt    # Server-Dependencies
-    ├── README.md                  # Diese Datei
-    ├── QUICKSTART.md              # Schnellstart-Anleitung
-    │
-    ├── diktat_client.py           # (Optional) CLI-Client
-    └── diktat_sox.ahk             # (Optional) AutoHotkey-Script
+├── server.py                  # FastAPI Server (Web-UI + API)
+├── diktat_gui.py              # Windows-GUI-Client (Diktat)
+├── Dockerfile                 # Docker-Build für server.py
+├── docker-compose.yml         # Docker-Setup
+├── requirements-client.txt    # Client-Python-Dependencies
+├── requirements-server.txt    # Server-Python-Dependencies
+├── README.md                  # Diese Datei
+├── QUICKSTART.md              # Schnellstart-Anleitung
+├── BUILD_README.md            # Build-Anleitung für Windows-Installer
+│
+├── templates/index.html       # Web-UI HTML-Template
+├── static/                    # CSS, JS, Favicon
+│
+├── diktat_gui.spec            # PyInstaller-Konfiguration
+├── installer.iss              # Inno Setup Script
+├── build_installer.bat        # One-Click Build
+├── Output/                    # Fertiger Windows-Installer
+├── dist/                      # PyInstaller-Output (EXE)
+│
+└── legacy/                    # Alter AHK+SoX CLI-Client (nur Referenz)
+    ├── diktat_client.py       # CLI-Client (veraltet)
+    └── diktat_sox.ahk         # AutoHotkey-Script (veraltet)
 ```
 
 ---
@@ -396,16 +390,24 @@ docker exec -it diktat-api bash
 
 ## 📝 Changelog
 
-### Version 2.0 (GUI-Release)
-- 🆕 Tkinter-basierte GUI-Anwendung
-- 🆕 Ambient-Modus für Gesprächsaufzeichnung
-- 🆕 Diktat-Modus mit Live-Transkription
-- 🆕 Standard-Befunde (13 vordefinierte)
-- 🆕 Editierbares Ergebnisfenster
-- 🆕 Roh-Transkript-Speicherung
+### Version 0.1.1 (aktuell)
+- Web-UI: Gesprächsanalyse mit LLM-Streaming (SSE)
+- Web-UI: Modellauswahl im Browser
+- Diktat-Client: Config-Dialog beim ersten Start
+- Diktat-Client: Konfiguration über Menü änderbar
 
-### Version 1.0
-- Initiales Release mit AHK-System
+### Version 0.1.0
+- FastAPI-Server mit Jinja2-Templates und Static Files
+- faster-whisper Transkription (GPU)
+- ollama LLM-Analyse (Streaming)
+- Windows-GUI-Client (Diktat-Modus)
+- Tkinter-basierte GUI-Anwendung
+- Editierbares Ergebnisfenster
+- Roh-Transkript-Speicherung
+- Windows-Installer via PyInstaller + Inno Setup
+
+### Version 1.0 (Legacy)
+- Initiales Release mit AHK+SoX-System
 - faster-whisper Integration
 - ollama LLM-Säuberung
 - Docker-Setup
