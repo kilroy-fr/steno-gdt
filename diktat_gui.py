@@ -453,19 +453,6 @@ class ModernRecorder:
     def finalize_transcription(self):
         """Finalisiert Transkription und zeigt Ergebnis"""
         raw_text = "".join(self.full_transcription)
-
-        # Speichere Roh-Transkript
-        output_dir = "Transkripte_Raw"
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        with open(os.path.join(output_dir, f"raw_{timestamp}.txt"), "w", encoding="utf-8") as f:
-            f.write(raw_text)
-
-        self.log(f"Transkript gespeichert: raw_{timestamp}.txt")
-
-        # Zeige editierbares Ergebnis
         self.root.after(0, lambda: self.show_editable_result(raw_text))
 
     def show_editable_result(self, text):

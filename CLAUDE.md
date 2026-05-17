@@ -47,7 +47,6 @@ ki-transcribe/
 ├── dist/                      # PyInstaller-Output: standalone EXE
 │
 ├── legacy/                    # Alter AHK+SoX CLI-Client (nur Referenz)
-├── Transkripte_Raw/           # Vom Client gespeicherte Roh-Transkripte
 │
 ├── README.md                  # Hauptdokumentation
 ├── QUICKSTART.md              # Schnellstart
