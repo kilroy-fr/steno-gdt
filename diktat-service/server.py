@@ -1,217 +1,214 @@
 #!/usr/bin/env python3
 """
-Diktat Server - Orchestriert faster-whisper und ollama
+KI-Gesprächsanalyse – Transkription und strukturierte Analyse von Patientengesprächen
 """
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
-import requests
-import subprocess
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+import httpx
 import tempfile
 import os
+import json
 from pathlib import Path
-from typing import Optional
 import logging
 
-# Logging Setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Diktat-Server")
+VERSION = "0.1.1"
 
-# ============================================
-# KONFIGURATION
-# ============================================
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
-WHISPER_PORT = os.getenv("WHISPER_PORT", "8001")
+WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-
-# Whisper-Modell (tiny, base, small, medium, large-v3)
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
 
+app = FastAPI(title="KI-Gesprächsanalyse")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
-# ============================================
-# HILFSFUNKTIONEN
-# ============================================
+ANALYZE_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
 
-def transcribe_audio(audio_path: str) -> str:
-    """
-    Transkribiert Audio mit faster-whisper Container.
-    """
-    try:
-        # Sende Audio an faster-whisper Container (OpenAI-kompatibles API)
-        with open(audio_path, 'rb') as f:
-            files = {'file': (Path(audio_path).name, f, 'audio/wav')}
-            data = {
-                'language': WHISPER_LANGUAGE,
-                'response_format': 'text'
-            }
+Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs und erstelle eine strukturierte Zusammenfassung für den Arzt. Halte dich ausschließlich an die Inhalte des Transkripts – keine Annahmen, keine Ergänzungen.
 
-            response = requests.post(
-                f"http://{WHISPER_HOST}:{WHISPER_PORT}/v1/audio/transcriptions",
-                files=files,
-                data=data,
-                timeout=300
-            )
-        
-        if response.status_code == 200:
-            # faster-whisper gibt Text direkt zurück
-            return response.text.strip()
-        else:
-            logger.error(f"Whisper-Fehler {response.status_code}: {response.text}")
-            raise HTTPException(status_code=500, detail=f"Whisper-Fehler: {response.status_code}")
-            
-    except requests.exceptions.ConnectionError:
-        logger.error(f"Verbindung zu faster-whisper fehlgeschlagen: {WHISPER_HOST}:{WHISPER_PORT}")
-        raise HTTPException(status_code=503, detail="faster-whisper Container nicht erreichbar")
-    except Exception as e:
-        logger.error(f"Transkriptionsfehler: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+**Transkript:**
+{transcript}
 
+---
 
-def clean_text_with_llm(raw_text: str, model: str = OLLAMA_MODEL) -> str:
-    """
-    Säubert Text mit ollama (entfernt Füllwörter, behält wörtliche Wiedergabe).
-    """
-    if not raw_text or raw_text.strip() == "":
-        return ""
-    
-    # Prompt für Textsäuberung
-    prompt = f"""Du bist ein Assistent für Transkriptions-Nachbearbeitung.
+Erstelle folgende strukturierte Übersicht:
 
-Aufgabe: Entferne Füllwörter und Sprechpausen, aber behalte die wörtliche Wiedergabe bei.
+## Zusammenfassung
+(2–3 Sätze zum Kern des Gesprächs)
 
-Regeln:
-- Entferne: äh, ähm, hm, also, sozusagen, irgendwie, halt, ne, ja also, etc.
-- Behalte: Den genauen Inhalt und die Formulierung bei
-- KEINE Umformulierungen oder Zusammenfassungen
-- KEINE zusätzlichen Erklärungen
+## Vorstellungsgrund / Hauptbeschwerden
+(Was hat den Patienten in die Praxis geführt?)
+
+## Anamnese
+(Relevante Informationen zur Krankengeschichte, die im Gespräch erwähnt wurden)
+
+## Diagnosen / Verdachtsdiagnosen
+(Falls erwähnt – sonst: Nicht besprochen)
+
+## Maßnahmen und Empfehlungen
+(Untersuchungen, Medikamente, Überweisungen, Folgeberatung – falls besprochen)
+
+## Hinweise für den Arzt
+(Auffälligkeiten, Besonderheiten oder dringender Follow-up-Bedarf)
+
+Antworte vollständig auf Deutsch."""
+
+CLEAN_PROMPT = """Bereinige das folgende medizinische Transkript:
+- Entferne Füllwörter (äh, ähm, hm, sozusagen, halt, ne, also, irgendwie)
 - Korrigiere offensichtliche Transkriptionsfehler
-- Gib NUR den gesäuberten Text zurück, keine Meta-Kommentare
+- Behalte den Inhalt und die Formulierungen exakt bei
+- Keine Umformulierungen, keine Zusammenfassungen
+- Gib NUR den bereinigten Text zurück, ohne Meta-Kommentare
 
-Transkribierter Text:
-{raw_text}
+Transkript:
+{transcript}
 
-Gesäuberter Text:"""
+Bereinigter Text:"""
 
-    try:
-        # Sende an ollama
-        response = requests.post(
-            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.3,  # Niedrig für konsistente Ergebnisse
-                    "top_p": 0.9,
-                    "num_predict": 2048
-                }
-            },
-            timeout=120
+
+async def transcribe_audio(audio_path: str, filename: str = "audio.webm") -> str:
+    async with httpx.AsyncClient(timeout=300) as client:
+        with open(audio_path, "rb") as f:
+            ext = Path(filename).suffix.lower() or ".webm"
+            mime = "audio/webm" if ext == ".webm" else "audio/mpeg" if ext == ".mp3" else "audio/wav"
+            response = await client.post(
+                f"http://{WHISPER_HOST}:{WHISPER_PORT}/v1/audio/transcriptions",
+                files={"file": (filename, f, mime)},
+                data={"language": WHISPER_LANGUAGE, "response_format": "text"},
+            )
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=500, detail=f"Whisper-Fehler {response.status_code}: {response.text[:200]}"
         )
-        
-        if response.status_code == 200:
-            result = response.json()
-            cleaned = result.get('response', '').strip()
-            return cleaned
-        else:
-            logger.error(f"Ollama-Fehler {response.status_code}: {response.text}")
-            # Fallback: Gib rohen Text zurück
-            return raw_text
-            
-    except requests.exceptions.ConnectionError:
-        logger.error(f"Verbindung zu ollama fehlgeschlagen: {OLLAMA_HOST}:{OLLAMA_PORT}")
-        # Fallback: Gib rohen Text zurück
-        return raw_text
-    except Exception as e:
-        logger.error(f"LLM-Säuberungsfehler: {e}")
-        # Fallback: Gib rohen Text zurück
-        return raw_text
+    return response.text.strip()
 
 
-# ============================================
-# API ENDPOINTS
-# ============================================
-
-@app.get("/")
-async def root():
-    """Health Check"""
-    return {
-        "status": "online",
-        "whisper_host": f"{WHISPER_HOST}:{WHISPER_PORT}",
-        "ollama_host": f"{OLLAMA_HOST}:{OLLAMA_PORT}",
-        "ollama_model": OLLAMA_MODEL
-    }
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"version": VERSION, "default_model": OLLAMA_MODEL},
+    )
 
 
-@app.post("/transcribe")
-async def transcribe(audio: UploadFile = File(...)):
-    """
-    Hauptendpoint: Nimmt Audio entgegen, transkribiert und säubert Text.
-    """
-    logger.info(f"Empfange Audio-Datei: {audio.filename}")
-    
-    # Speichere temporär
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp:
-        content = await audio.read()
-        tmp.write(content)
-        tmp_path = tmp.name
-    
+@app.get("/models")
+async def get_models():
     try:
-        # 1. Transkribiere mit faster-whisper
-        logger.info("Transkribiere mit faster-whisper...")
-        raw_text = transcribe_audio(tmp_path)
-        logger.info(f"Roher Text: {raw_text[:100]}...")
-        
-        # 2. Säubere mit LLM
-        logger.info("Säubere Text mit LLM...")
-        cleaned_text = clean_text_with_llm(raw_text, OLLAMA_MODEL)
-        logger.info(f"Gesäuberter Text: {cleaned_text[:100]}...")
-        
-        return JSONResponse({
-            "raw_text": raw_text,
-            "cleaned_text": cleaned_text,
-            "model": OLLAMA_MODEL
-        })
-        
-    except HTTPException as e:
-        raise e
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags")
+        models = r.json().get("models", [])
+        return {"models": [m["name"] for m in models], "default": OLLAMA_MODEL}
     except Exception as e:
-        logger.error(f"Unerwarteter Fehler: {e}")
+        return {"models": [OLLAMA_MODEL], "default": OLLAMA_MODEL, "error": str(e)}
+
+
+@app.get("/health")
+async def health():
+    result: dict = {"version": VERSION, "whisper": "error", "ollama": "error"}
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            await client.get(f"http://{WHISPER_HOST}:{WHISPER_PORT}/")
+        result["whisper"] = "ok"
+    except Exception:
+        pass
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            await client.get(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags")
+        result["ollama"] = "ok"
+    except Exception:
+        pass
+    return result
+
+
+@app.post("/transcribe-only")
+async def transcribe_only(audio: UploadFile = File(...)):
+    """Nur Transkription ohne LLM-Verarbeitung."""
+    ext = Path(audio.filename or "audio.webm").suffix or ".webm"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp.write(await audio.read())
+        tmp_path = tmp.name
+    try:
+        transcript = await transcribe_audio(tmp_path, audio.filename or "audio.webm")
+        return {"transcript": transcript}
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Lösche temporäre Datei
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 
-@app.get("/health/whisper")
-async def health_whisper():
-    """Prüfe faster-whisper Container"""
-    try:
-        response = requests.get(f"http://{WHISPER_HOST}:{WHISPER_PORT}/", timeout=5)
-        return {"status": "ok", "code": response.status_code}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+@app.post("/analyze")
+async def analyze(
+    audio: UploadFile = File(...),
+    model: str = Form(default=None),
+    mode: str = Form(default="analyze"),  # "analyze" | "clean"
+):
+    """Transkription + LLM-Analyse als SSE-Stream."""
+    used_model = model or OLLAMA_MODEL
+    original_name = audio.filename or "audio.webm"
+    ext = Path(original_name).suffix or ".webm"
 
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp.write(await audio.read())
+        tmp_path = tmp.name
 
-@app.get("/health/ollama")
-async def health_ollama():
-    """Prüfe ollama Container"""
-    try:
-        response = requests.get(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags", timeout=5)
-        models = response.json().get('models', [])
-        model_names = [m['name'] for m in models]
-        return {
-            "status": "ok",
-            "models": model_names,
-            "configured_model": OLLAMA_MODEL
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    async def event_stream():
+        try:
+            yield f"data: {json.dumps({'type': 'status', 'text': 'Transkribiere Audio...'})}\n\n"
+
+            try:
+                transcript = await transcribe_audio(tmp_path, original_name)
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
+                return
+
+            yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
+            yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
+
+            prompt_template = ANALYZE_PROMPT if mode == "analyze" else CLEAN_PROMPT
+            prompt = prompt_template.format(transcript=transcript)
+
+            try:
+                async with httpx.AsyncClient(timeout=300) as client:
+                    async with client.stream(
+                        "POST",
+                        f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+                        json={
+                            "model": used_model,
+                            "prompt": prompt,
+                            "stream": True,
+                            "options": {"temperature": 0.3, "top_p": 0.9, "num_predict": 4096},
+                        },
+                    ) as r:
+                        async for line in r.aiter_lines():
+                            if line:
+                                data = json.loads(line)
+                                token = data.get("response", "")
+                                if token:
+                                    yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+                                if data.get("done"):
+                                    break
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'text': f'KI-Fehler: {e}'})}\n\n"
+                return
+
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Diktat GUI - Medizinisches Transkriptions- und Diktiersystem
+Diktat GUI - Medizinisches Diktiersystem (Diktat-Only Fork)
 Basierend auf Asklaion, adaptiert für ki-transcribe Server
+Nur Diktat-Modus, ohne Ambient-Funktion
 """
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import messagebox, scrolledtext
 import sounddevice as sd
 import numpy as np
 import threading
@@ -181,29 +182,14 @@ def show_config_dialog(parent=None):
     return result
 
 
-# Standard-Befunde (können angepasst werden)
-STANDARD_FINDINGS = {
-    "Herz": "Cor: Herztöne rein, regelmäßig, rhythmisch.",
-    "Lunge": "Pulmo: Vesikuläratmen bds., keine Rasselgeräusche.",
-    "Abdomen": "Abdomen: Bauchdecke weich, kein Druckschmerz.",
-    "Rachen": "Rachen: Schleimhaut feucht, rosig, reizlos.",
-    "Ohren": "Otoscopie: Trommelfelle intakt, Lichtreflex erhalten.",
-    "Wirbelsäule": "WS: Lotgerecht, kein Klopfschmerz.",
-    "Niere": "Nierenlager beidseits indolent.",
-    "Lymphknoten": "LK: Zervikal/axillär nicht vergrößert.",
-    "Beine": "Extremitäten: Keine Ödeme, Pulse tastbar.",
-    "Neuro": "Neuro: Isokor, Stand/Gang sicher.",
-    "Haut": "Haut: Warm, Turgor normal.",
-    "Schilddrüse": "Schilddrüse: Schluckverschieblich.",
-    "Psyche": "Psych/AZ: Wach, orientiert, AZ gut."
-}
+# Standard-Befunde wurden entfernt (nur im Ambient-Modus verwendet)
 
 
 class ModernRecorder:
     def __init__(self, root, config):
         self.root = root
-        self.root.title("KI-Transcribe Pro")
-        self.root.geometry("500x920")
+        self.root.title("KI-Transcribe Pro - Diktat")
+        self.root.geometry("500x700")
         self.root.configure(bg="#f5f7f9")
 
         # Config
@@ -214,10 +200,6 @@ class ModernRecorder:
         self.is_paused = False
         self.audio_buffer = []
         self.full_transcription = []
-
-        self.finding_buttons_amb = []
-        self.control_buttons_amb = []
-        self.control_buttons_diktat = []
 
         self._setup_ui()
         self._add_menu()
@@ -233,132 +215,54 @@ class ModernRecorder:
         self.status_label = tk.Label(header, text="Bereit", font=("Segoe UI", 9), bg="#f5f7f9", fg="#7f8c8d")
         self.status_label.pack(side="left", padx=5)
 
-        # Notebook (Tabs)
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
+        # Diktat-UI direkt im Hauptfenster (kein Notebook mehr)
+        self._build_diktat_ui()
 
-        self.tab_ambient = tk.Frame(self.notebook, bg="#f5f7f9")
-        self.tab_diktat = tk.Frame(self.notebook, bg="#f5f7f9")
-
-        self.notebook.add(self.tab_ambient, text="  Gespräch (Ambient)  ")
-        self.notebook.add(self.tab_diktat, text="  Diktat  ")
-
-        self._build_ambient_tab()
-        self._build_diktat_tab()
-
-    def _build_ambient_tab(self):
-        """Ambient-Modus: Gespräche aufzeichnen und analysieren"""
+    def _build_diktat_ui(self):
+        """Diktat-UI: Direktes Diktieren mit Live-Transkription"""
         # Control-Frame
-        ctrl = tk.Frame(self.tab_ambient, bg="white", highlightthickness=1, highlightbackground="#e0e6ed")
+        ctrl = tk.Frame(self.root, bg="white", highlightthickness=1, highlightbackground="#e0e6ed")
         ctrl.pack(fill="x", padx=10, pady=10)
         btn_f = tk.Frame(ctrl, bg="white")
         btn_f.pack(pady=10)
 
-        self.amb_start = tk.Button(
+        self.start_btn = tk.Button(
             btn_f, text="Start", bg="#2ecc71", fg="white",
             font=("Segoe UI", 9, "bold"), relief="flat", width=10, pady=6,
             command=self.start_recording
         )
-        self.amb_pause = tk.Button(
+        self.pause_btn = tk.Button(
             btn_f, text="Pause", bg="#f39c12", fg="white",
             font=("Segoe UI", 9, "bold"), relief="flat", width=10, pady=6,
             state="disabled", command=self.toggle_pause
         )
-        self.amb_stop = tk.Button(
+        self.stop_btn = tk.Button(
             btn_f, text="Analyse", bg="#e74c3c", fg="white",
             font=("Segoe UI", 9, "bold"), relief="flat", width=10, pady=6,
             state="disabled", command=self.stop_recording
         )
 
-        for b in [self.amb_start, self.amb_pause, self.amb_stop]:
+        for b in [self.start_btn, self.pause_btn, self.stop_btn]:
             b.pack(side="left", padx=3)
-            self.control_buttons_amb.append(b)
-
-        # Manuelle Notizen
-        tk.Label(
-            self.tab_ambient, text="MANUELLE NOTIZEN",
-            font=("Segoe UI", 7, "bold"), bg="#f5f7f9", fg="#95a5a6"
-        ).pack(anchor="w", padx=10, pady=(5,0))
-
-        self.note_ambient = tk.Text(
-            self.tab_ambient, height=4, font=("Segoe UI", 10), bd=1, relief="solid"
-        )
-        self.note_ambient.pack(fill="x", padx=10, pady=5)
-
-        # Standard-Befunde
-        tk.Label(
-            self.tab_ambient, text="NORMBEFUNDE SCHNELLEINFÜGUNG",
-            font=("Segoe UI", 7, "bold"), bg="#f5f7f9", fg="#95a5a6"
-        ).pack(anchor="w", padx=10)
-
-        grid = tk.Frame(self.tab_ambient, bg="white", bd=1, relief="solid")
-        grid.pack(fill="both", expand=True, padx=10, pady=5)
-
-        for i, (name, text) in enumerate(STANDARD_FINDINGS.items()):
-            btn = tk.Button(
-                grid, text=name,
-                command=lambda t=text, n=name: self.insert_finding(t, n),
-                bg="#ffffff", fg="#34495e", font=("Segoe UI", 8),
-                relief="flat", bd=0, highlightthickness=1,
-                highlightbackground="#f0f2f5", state="disabled"
-            )
-            btn.grid(row=i // 2, column=i % 2, padx=2, pady=2, sticky="nsew")
-            grid.grid_columnconfigure(i % 2, weight=1)
-            self.finding_buttons_amb.append(btn)
-
-        # Log-Bereich
-        self.log_ambient = scrolledtext.ScrolledText(
-            self.tab_ambient, height=5, bg="#1e272e", fg="#ecf0f1",
-            font=("Consolas", 8), borderwidth=0
-        )
-        self.log_ambient.pack(fill="x", padx=10, pady=10)
-
-    def _build_diktat_tab(self):
-        """Diktat-Modus: Direktes Diktieren mit Live-Transkription"""
-        # Control-Frame
-        ctrl = tk.Frame(self.tab_diktat, bg="white", highlightthickness=1, highlightbackground="#e0e6ed")
-        ctrl.pack(fill="x", padx=10, pady=10)
-        btn_f = tk.Frame(ctrl, bg="white")
-        btn_f.pack(pady=10)
-
-        self.dik_start = tk.Button(
-            btn_f, text="Start", bg="#2ecc71", fg="white",
-            font=("Segoe UI", 9, "bold"), relief="flat", width=10, pady=6,
-            command=self.start_recording
-        )
-        self.dik_pause = tk.Button(
-            btn_f, text="Pause", bg="#f39c12", fg="white",
-            font=("Segoe UI", 9, "bold"), relief="flat", width=10, pady=6,
-            state="disabled", command=self.toggle_pause
-        )
-        self.dik_stop = tk.Button(
-            btn_f, text="Analyse", bg="#e74c3c", fg="white",
-            font=("Segoe UI", 9, "bold"), relief="flat", width=10, pady=6,
-            state="disabled", command=self.stop_recording
-        )
-
-        for b in [self.dik_start, self.dik_pause, self.dik_stop]:
-            b.pack(side="left", padx=3)
-            self.control_buttons_diktat.append(b)
 
         # Live-Transkript
         tk.Label(
-            self.tab_diktat, text="LIVE-TRANSKRIPT",
+            self.root, text="LIVE-TRANSKRIPT",
             font=("Segoe UI", 7, "bold"), bg="#f5f7f9", fg="#95a5a6"
         ).pack(anchor="w", padx=10, pady=(5,0))
 
         self.live_text = scrolledtext.ScrolledText(
-            self.tab_diktat, height=22, font=("Segoe UI", 11),
+            self.root, height=22, font=("Segoe UI", 11),
             bg="white", bd=1, relief="solid", padx=10, pady=10
         )
         self.live_text.pack(fill="both", expand=True, padx=10, pady=5)
 
         # Log-Bereich
-        self.log_diktat = scrolledtext.ScrolledText(
-            self.tab_diktat, height=5, bg="#1e272e", fg="#ecf0f1",
+        self.log_text = scrolledtext.ScrolledText(
+            self.root, height=5, bg="#1e272e", fg="#ecf0f1",
             font=("Consolas", 8), borderwidth=0
         )
-        self.log_diktat.pack(fill="x", padx=10, pady=10)
+        self.log_text.pack(fill="x", padx=10, pady=10)
 
     def _add_menu(self):
         """Fügt Menüleiste hinzu"""
@@ -413,11 +317,10 @@ class ModernRecorder:
         )
 
     def log(self, message):
-        """Schreibt Log-Nachricht in beide Tabs"""
+        """Schreibt Log-Nachricht"""
         ts = datetime.now().strftime('%H:%M:%S')
-        for logger in [self.log_ambient, self.log_diktat]:
-            logger.insert(tk.END, f"[{ts}] {message}\n")
-            logger.see(tk.END)
+        self.log_text.insert(tk.END, f"[{ts}] {message}\n")
+        self.log_text.see(tk.END)
 
     def toggle_pause(self):
         """Pausiert/Fortsetzt Aufnahme"""
@@ -429,15 +332,9 @@ class ModernRecorder:
         self.status_dot.config(fg=color)
 
         btn_text = "Weiter" if self.is_paused else "Pause"
-        self.amb_pause.config(text=btn_text)
-        self.dik_pause.config(text=btn_text)
+        self.pause_btn.config(text=btn_text)
 
         self.log(f"Aufnahme {status.lower()}.")
-
-    def insert_finding(self, text, name):
-        """Fügt Standard-Befund zur Transkription hinzu"""
-        self.full_transcription.append(f"\n[BEFUND {name.upper()}: {text}]\n")
-        self.log(f"-> {name} zugefügt.")
 
     def audio_callback(self, indata, frames, time, status):
         """Callback für Audio-Stream"""
@@ -493,10 +390,9 @@ class ModernRecorder:
                 if text:
                     self.full_transcription.append(text + " ")
 
-                    # Im Diktat-Modus: Live-Anzeige
-                    if self.notebook.index(self.notebook.select()) == 1:
-                        self.root.after(0, lambda t=text: self.live_text.insert(tk.END, t + " "))
-                        self.root.after(0, lambda: self.live_text.see(tk.END))
+                    # Live-Anzeige im Diktat-Text
+                    self.root.after(0, lambda t=text: self.live_text.insert(tk.END, t + " "))
+                    self.root.after(0, lambda: self.live_text.see(tk.END))
             else:
                 self.log(f"Server-Fehler: {response.status_code}")
 
@@ -517,12 +413,9 @@ class ModernRecorder:
         self.live_text.delete("1.0", tk.END)
 
         # UI-Updates
-        for b in [self.amb_start, self.dik_start]:
-            b.config(state="disabled", bg="#bdc3c7")
-        for b in [self.amb_pause, self.dik_pause, self.amb_stop, self.dik_stop]:
-            b.config(state="normal")
-        for b in self.finding_buttons_amb:
-            b.config(state="normal")
+        self.start_btn.config(state="disabled", bg="#bdc3c7")
+        self.pause_btn.config(state="normal")
+        self.stop_btn.config(state="normal")
 
         self.status_dot.config(fg="#e74c3c")
         self.status_label.config(text="AKTIV", fg="#e74c3c")
@@ -542,27 +435,15 @@ class ModernRecorder:
 
     def stop_recording(self):
         """Stoppt Aufnahme und startet Analyse"""
-        current_tab = self.notebook.index(self.notebook.select())
-
-        # Im Ambient-Modus: Manuelle Notizen hinzufügen
-        if current_tab == 0:
-            manual_text = self.note_ambient.get("1.0", tk.END).strip()
-            if manual_text:
-                self.full_transcription.append(f"\n[MANUELLE NOTIZ: {manual_text}]\n")
-                self.note_ambient.delete("1.0", tk.END)
-
         # Stoppe Aufnahme
         self.is_recording = False
         self.stream.stop()
         self.stream.close()
 
         # UI-Updates
-        for b in [self.amb_start, self.dik_start]:
-            b.config(state="normal", bg="#2ecc71")
-        for b in [self.amb_pause, self.dik_pause, self.amb_stop, self.dik_stop]:
-            b.config(state="disabled")
-        for b in self.finding_buttons_amb:
-            b.config(state="disabled")
+        self.start_btn.config(state="normal", bg="#2ecc71")
+        self.pause_btn.config(state="disabled")
+        self.stop_btn.config(state="disabled")
 
         self.status_label.config(text="VERARBEITE...", fg="#3498db")
 
@@ -647,10 +528,6 @@ def main():
 
     # Erstelle Hauptfenster
     root = tk.Tk()
-
-    # Style
-    s = ttk.Style()
-    s.configure('TNotebook.Tab', padding=[15, 5], font=('Segoe UI', 9))
 
     # App starten
     app = ModernRecorder(root, config)

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KI-Gesprächsanalyse</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='favicon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+
+  <!-- ============================================================ -->
+  <!-- HEADER                                                        -->
+  <!-- ============================================================ -->
+  <div class="page-header">
+    <div class="header-container">
+      <div class="header-left">
+        <svg class="header-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="24" cy="24" r="22" fill="#10b981" opacity="0.15"/>
+          <path d="M24 10 C18 10 14 15 14 21 C14 27 18 31 24 31 C30 31 34 27 34 21 C34 15 30 10 24 10Z" stroke="#10b981" stroke-width="2.5" fill="none"/>
+          <rect x="21" y="31" width="6" height="6" rx="1" fill="#10b981"/>
+          <path d="M18 37 L30 37" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M20 20 L20 22 M24 18 L24 24 M28 20 L28 22" stroke="#10b981" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <div>
+          <h1>KI-Gesprächsanalyse</h1>
+          <p class="page-subtitle">Transkription und Analyse von Patientengesprächen</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="health-panel">
+          <div class="health-item">
+            <span class="health-dot" id="whisperDot" title="Whisper (Transkription)"></span>
+            <span class="health-label">Whisper</span>
+          </div>
+          <div class="health-item">
+            <span class="health-dot" id="ollamaDot" title="Ollama (KI)"></span>
+            <span class="health-label">Ollama</span>
+          </div>
+        </div>
+        <div class="model-control">
+          <label for="modelSelect">Modell:</label>
+          <select id="modelSelect" class="btn"></select>
+        </div>
+        <span class="version-badge">v{{ version }}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- HAUPTBEREICH                                                   -->
+  <!-- ============================================================ -->
+  <div class="main-layout">
+
+    <!-- LINKE SPALTE: Eingabe -->
+    <div class="panel panel-input">
+
+      <!-- Audio-Eingabe -->
+      <div class="section">
+        <h2>🎙️ Audio-Eingabe</h2>
+
+        <!-- Tabs -->
+        <div class="tabs">
+          <button class="tab-button active" data-tab="record">Aufnehmen</button>
+          <button class="tab-button" data-tab="upload">Datei hochladen</button>
+        </div>
+
+        <!-- Aufnahme-Tab -->
+        <div class="tab-content active" id="record">
+          <div class="record-area">
+            <div id="recordTimer" class="record-timer">00:00</div>
+            <div id="recordViz" class="record-viz">
+              <canvas id="vizCanvas" width="280" height="50"></canvas>
+            </div>
+            <div class="record-buttons">
+              <button id="recordBtn" class="btn btn-record" title="Aufnahme starten">
+                ● Aufnahme starten
+              </button>
+              <button id="stopBtn" class="btn btn-stop" disabled title="Aufnahme beenden">
+                ■ Stop
+              </button>
+            </div>
+            <audio id="audioPlayback" controls style="display:none; width:100%; margin-top:12px;"></audio>
+            <p id="recordHint" class="hint-text">
+              Mikrofon-Zugriff wird beim ersten Klick angefragt.
+            </p>
+          </div>
+        </div>
+
+        <!-- Upload-Tab -->
+        <div class="tab-content" id="upload">
+          <div class="upload-area" id="dropZone">
+            <div class="upload-icon">📁</div>
+            <p>Audiodatei hierher ziehen</p>
+            <p class="hint-text">oder</p>
+            <label class="btn" for="fileInput">Datei auswählen</label>
+            <input type="file" id="fileInput" accept="audio/*,.webm,.ogg,.mp3,.wav,.m4a,.flac" style="display:none;">
+            <p id="uploadFileName" class="upload-filename"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Analyse-Optionen -->
+      <div class="section">
+        <h2>⚙️ Analyse-Modus</h2>
+        <div class="radio-group">
+          <label class="radio-label active" id="labelAnalyze">
+            <input type="radio" name="mode" value="analyze" checked>
+            <div class="radio-content">
+              <span class="radio-title">🧠 Vollständige Analyse</span>
+              <small>Strukturierte Zusammenfassung mit Anamnese, Diagnosen und Empfehlungen</small>
+            </div>
+          </label>
+          <label class="radio-label" id="labelClean">
+            <input type="radio" name="mode" value="clean">
+            <div class="radio-content">
+              <span class="radio-title">✏️ Nur Bereinigung</span>
+              <small>Transkript säubern – Füllwörter entfernen, Fehler korrigieren</small>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <!-- Start-Button + Status -->
+      <button id="analyzeBtn" class="btn btn-analyze" disabled>
+        🔍 Analysieren
+      </button>
+
+      <div id="statusBox" class="status-box" style="display:none;">
+        <div class="spinner-small"></div>
+        <span id="statusText">Verarbeitung läuft...</span>
+      </div>
+
+      <button id="resetBtn" class="btn btn-secondary" style="display:none; margin-top:10px;">
+        ↺ Neue Aufnahme
+      </button>
+    </div>
+
+    <!-- RECHTE SPALTE: Ergebnisse -->
+    <div class="panel panel-results">
+
+      <!-- Leer-Zustand -->
+      <div id="emptyState" class="empty-state">
+        <div class="empty-icon">🎙️</div>
+        <p>Starten Sie eine Aufnahme oder laden Sie eine Audiodatei hoch,<br>um eine KI-Analyse zu erhalten.</p>
+      </div>
+
+      <!-- Transkript -->
+      <div id="transcriptSection" class="result-section" style="display:none;">
+        <div class="result-header">
+          <h2>📝 Transkript</h2>
+          <div class="result-actions">
+            <button class="btn-small" onclick="copySection('transcriptText')">Kopieren</button>
+          </div>
+        </div>
+        <div id="transcriptText" class="result-text"></div>
+      </div>
+
+      <!-- Analyse -->
+      <div id="analysisSection" class="result-section" style="display:none;">
+        <div class="result-header">
+          <h2 id="analysisSectionTitle">🧠 Analyse</h2>
+          <div class="result-actions">
+            <button class="btn-small" onclick="copySection('analysisText', true)">Kopieren</button>
+          </div>
+        </div>
+        <div id="analysisText" class="result-text markdown-body streaming"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SCRIPTS                                                        -->
+  <!-- ============================================================ -->
+  <script>
+    window.APP_CONFIG = {
+      defaultModel: "{{ default_model }}",
+      version: "{{ version }}"
+    };
+  </script>
+  <!-- marked.js für Markdown-Rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script src="{{ url_for('static', path='app.js') }}"></script>
+
+</body>
+</html>

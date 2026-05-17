@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"c:\\\\Users\\\\Jan.DOMAIN\")",
+      "Read(//c/Users/Jan.DOMAIN/**)",
+      "Bash(docker restart *)"
+    ]
+  }
+}
