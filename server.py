@@ -16,7 +16,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
