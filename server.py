@@ -16,13 +16,13 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
 
 app = FastAPI(title="KI-Gesprächsanalyse")
@@ -71,6 +71,43 @@ Transkript:
 {transcript}
 
 Bereinigter Text:"""
+
+
+class ThinkingFilter:
+    """Strips <think>...</think> blocks from a streamed token sequence."""
+
+    def __init__(self):
+        self._in_think = False
+        self._buf = ""
+
+    def feed(self, token: str) -> str:
+        self._buf += token
+        out = ""
+        tag_open, tag_close = "<think>", "</think>"
+        while True:
+            if self._in_think:
+                pos = self._buf.find(tag_close)
+                if pos == -1:
+                    self._buf = self._buf[-(len(tag_close) - 1):]
+                    break
+                self._buf = self._buf[pos + len(tag_close):]
+                self._in_think = False
+            else:
+                pos = self._buf.find(tag_open)
+                if pos == -1:
+                    safe = max(0, len(self._buf) - len(tag_open) + 1)
+                    out += self._buf[:safe]
+                    self._buf = self._buf[safe:]
+                    break
+                out += self._buf[:pos]
+                self._buf = self._buf[pos + len(tag_open):]
+                self._in_think = True
+        return out
+
+    def flush(self) -> str:
+        result = "" if self._in_think else self._buf
+        self._buf = ""
+        return result
 
 
 async def transcribe_audio(audio_path: str, filename: str = "audio.webm") -> str:
@@ -179,6 +216,7 @@ async def analyze(
             prompt = prompt_template.format(transcript=transcript)
 
             try:
+                thinking_filter = ThinkingFilter()
                 async with httpx.AsyncClient(timeout=300) as client:
                     async with client.stream(
                         "POST",
@@ -187,16 +225,22 @@ async def analyze(
                             "model": used_model,
                             "prompt": prompt,
                             "stream": True,
+                            "think": False,
                             "options": {"temperature": 0.3, "top_p": 0.9, "num_predict": 4096},
                         },
                     ) as r:
                         async for line in r.aiter_lines():
                             if line:
                                 data = json.loads(line)
-                                token = data.get("response", "")
-                                if token:
-                                    yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+                                raw = data.get("response", "")
+                                if raw:
+                                    token = thinking_filter.feed(raw)
+                                    if token:
+                                        yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
                                 if data.get("done"):
+                                    remainder = thinking_filter.flush()
+                                    if remainder:
+                                        yield f"data: {json.dumps({'type': 'token', 'text': remainder})}\n\n"
                                     break
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'text': f'KI-Fehler: {e}'})}\n\n"
