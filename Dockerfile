@@ -6,6 +6,7 @@ COPY requirements-server.txt .
 RUN pip install --no-cache-dir -r requirements-server.txt
 
 COPY server.py .
+COPY prompts.py .
 COPY templates/ templates/
 COPY static/ static/
 

@@ -1,10 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
-  <circle cx="24" cy="24" r="22" fill="#111827"/>
-  <circle cx="24" cy="24" r="22" fill="#10b981" opacity="0.15"/>
-  <path d="M24 10 C18 10 14 15 14 21 C14 27 18 31 24 31 C30 31 34 27 34 21 C34 15 30 10 24 10Z"
-        stroke="#10b981" stroke-width="2.5" fill="none"/>
-  <rect x="21" y="31" width="6" height="6" rx="1" fill="#10b981"/>
-  <path d="M18 37 L30 37" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M20 20 L20 22 M24 18 L24 24 M28 20 L28 22"
-        stroke="#10b981" stroke-width="2" stroke-linecap="round"/>
+<!--?xml version="1.0" encoding="UTF-8"?-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Hintergrund -->
+  <rect width="64" height="64" fill="#ffffff"></rect>
+
+  <!-- Praxis-Kreuz -->
+  <rect x="28" y="14" width="8" height="36" fill="#984649"></rect>
+  <rect x="14" y="28" width="36" height="8" fill="#984649"></rect>
+
+  <!-- T im Arial-/Sans-Style -->
+  <path d="
+      M41 34
+      L60 34
+      L60 39
+      L53 39
+      L53 60
+      L48 60
+      L48 39
+      L41 39
+      Z
+    " fill="#555555"></path>
 </svg>

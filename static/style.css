@@ -61,6 +61,13 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
   gap: 1rem;
 }
 
+.logo {
+  height: 60px;
+  width: auto;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
 .header-icon {
   width: 52px;
   height: 52px;

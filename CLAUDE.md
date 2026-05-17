@@ -43,10 +43,6 @@ ki-transcribe/
 ├── diktat_gui.spec            # PyInstaller-Config für EXE-Build
 ├── installer.iss              # Inno Setup Script für Windows-Installer
 ├── build_installer.bat        # One-Click Build: EXE + Installer
-├── Output/                    # Build-Output: KI-Transcribe-Installer.exe
-├── dist/                      # PyInstaller-Output: standalone EXE
-│
-├── legacy/                    # Alter AHK+SoX CLI-Client (nur Referenz)
 │
 ├── README.md                  # Hauptdokumentation
 ├── QUICKSTART.md              # Schnellstart
@@ -130,4 +126,3 @@ iscc installer.iss
 - **Diktat-Client vs. Web-UI sind unabhängig:** Der Windows-Client (`diktat_gui.py`) sendet Audio direkt an den Endpunkt `/transcribe-only` des Servers. Die Web-UI (`/`) ist ein separates Interface für ausführlichere Gesprächsanalyse mit LLM.
 - **Ollama ist external:** Der ollama-Container wird nicht in dieser `docker-compose.yml` definiert — er muss bereits laufen und mit `ollama-net` verbunden sein.
 - **GPU erforderlich für faster-whisper:** Der Container nutzt `runtime: nvidia`. Ohne GPU muss das Image auf `latest-cpu` geändert werden.
-- **Diktat-Variante:** Es existiert eine zweite Variante der Build-Dateien (`*_diktat.*`) — diese sind identisch zur Hauptvariante und dienen als separate Distribution unter dem Namen "Diktat".
