@@ -30,7 +30,8 @@ Erstelle folgende strukturierte Übersicht:
 Antworte vollständig auf Deutsch."""
 
 SUMMARY_PROMPT = """Erstelle eine kurze, allgemeinverständliche Zusammenfassung des folgenden Gesprächs.
-- 3–5 Sätze, keine Fachbegriffe, kein Schema
+- 5–8 Sätze, keine Fachbegriffe, kein Schema
+- Trenne unterschiedliche Themen durch einen Zeilenumbruch voneinander
 - Nur die wichtigsten Punkte, die im Gespräch besprochen wurden
 - Gib NUR die Zusammenfassung zurück, ohne Überschriften oder Meta-Kommentare
 

@@ -17,7 +17,7 @@ from prompts import ANALYZE_PROMPT, CLEAN_PROMPT, SUMMARY_PROMPT
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.3.9"
+VERSION = "0.3.10"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -25,6 +25,19 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
+
+# Only these model families are shown in the frontend dropdown.
+# Prefix-matched against model names returned by ollama.
+MODEL_WHITELIST = [
+    "qwen3:",
+    "qwen2.5:",
+    "phi4",
+    "mistral-nemo",
+    "deepseek-r1:14b",
+    "gemma4:26b",
+    "llama3.1:",
+    "meditron",
+]
 
 app = FastAPI(title="KI-Gesprächsanalyse")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -99,8 +112,9 @@ async def get_models():
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             r = await client.get(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags")
-        models = r.json().get("models", [])
-        return {"models": [m["name"] for m in models], "default": OLLAMA_MODEL}
+        all_models = [m["name"] for m in r.json().get("models", [])]
+        allowed = [m for m in all_models if any(m.startswith(p) for p in MODEL_WHITELIST)]
+        return {"models": allowed or all_models, "default": OLLAMA_MODEL}
     except Exception as e:
         return {"models": [OLLAMA_MODEL], "default": OLLAMA_MODEL, "error": str(e)}
 

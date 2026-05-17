@@ -15,7 +15,7 @@ services:
       - WHISPER_PORT=8000
       - OLLAMA_HOST=ollama
       - OLLAMA_PORT=11434
-      - OLLAMA_MODEL=qwen2.5:14b
+      - OLLAMA_MODEL=qwen3:14b
       - WHISPER_LANGUAGE=de
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
