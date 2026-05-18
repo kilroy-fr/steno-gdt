@@ -31,14 +31,16 @@ Windows-PC ──► diktat_gui.exe ──► http://transcribe.domain.local/tra
 ```
 ki-transcribe/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
+├── prompts.py                 # LLM-Prompts: ANALYZE_PROMPT, SUMMARY_PROMPT, CLEAN_PROMPT
 ├── diktat_gui.py              # Windows-GUI-Client (Diktat)
+├── benchmark_summary.py       # Speed-Benchmark: SUMMARY_PROMPT gegen alle Whitelist-Modelle
 ├── Dockerfile                 # Docker-Image für server.py
 ├── docker-compose.yml         # Docker-Setup (gespraech-web + faster-whisper)
 ├── requirements-server.txt    # Server-Python-Dependencies
 ├── requirements-client.txt    # Client-Python-Dependencies (für EXE-Build)
 │
 ├── templates/index.html       # Jinja2-Template für Web-UI
-├── static/                    # CSS, JS, SVG für Web-UI
+├── static/                    # CSS, JS, SVG, logo.jpg für Web-UI
 │
 ├── diktat_gui.spec            # PyInstaller-Config für EXE-Build
 ├── installer.iss              # Inno Setup Script für Windows-Installer
@@ -56,12 +58,26 @@ ki-transcribe/
 | Methode | Pfad | Beschreibung |
 |---------|------|--------------|
 | GET | `/` | Web-UI (Jinja2-Template) |
-| GET | `/health` | Status whisper + ollama |
-| GET | `/models` | Liste verfügbarer ollama-Modelle |
+| GET | `/health` | Status whisper + ollama (inkl. `version`) |
+| GET | `/models` | Liste erlaubter ollama-Modelle (gefiltert per `MODEL_WHITELIST`) |
 | POST | `/transcribe-only` | Nur Transkription via faster-whisper |
-| POST | `/analyze` | Transkription + LLM (SSE-Stream) |
+| POST | `/analyze` | Transkription + LLM (SSE-Stream), Parameter: `model`, `mode` |
 
 **`/analyze` SSE-Event-Typen:** `status`, `transcript`, `token`, `error`, `done`
+
+**`/analyze` Modi (`mode`-Parameter):**
+
+| Wert | Prompt | Beschreibung |
+|------|--------|--------------|
+| `analyze` | `ANALYZE_PROMPT` | Strukturierte Arzt-Dokumentation (Anamnese, Diagnose, …) |
+| `summary` | `SUMMARY_PROMPT` | Kurze, allgemeinverständliche Zusammenfassung; Themen durch Leerzeile getrennt |
+| `clean` | `CLEAN_PROMPT` | Transkript bereinigen (Füllwörter entfernen, Fehler korrigieren) |
+
+**LLM-Prompts** sind zentral in `prompts.py` definiert und werden von `server.py` und `benchmark_summary.py` gleichlautend verwendet.
+
+**`MODEL_WHITELIST`** in `server.py`: Nur Modelle mit passendem Präfix werden im Frontend-Dropdown angezeigt (z. B. `qwen3:`, `phi4`, `mistral-nemo`).
+
+**`ThinkingFilter`** in `server.py`: Filtert `<think>…</think>`-Blöcke aus dem SSE-Stream (für Reasoning-Modelle wie qwen3).
 
 ---
 

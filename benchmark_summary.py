@@ -20,7 +20,7 @@ AUDIO    = "example/9CE89D4F_2.mp3"
 # ── SUMMARY_PROMPT (identisch mit prompts.py) ────────────────────────────────
 SUMMARY_PROMPT = """Erstelle eine kurze, allgemeinverständliche Zusammenfassung des folgenden Gesprächs.
 - 5–8 Sätze, keine Fachbegriffe, kein Schema
-- Trenne unterschiedliche Themen durch einen Zeilenumbruch voneinander
+- Trenne jedes Thema durch eine Leerzeile (doppelter Zeilenumbruch) vom nächsten
 - Nur die wichtigsten Punkte, die im Gespräch besprochen wurden
 - Gib NUR die Zusammenfassung zurück, ohne Überschriften oder Meta-Kommentare
 

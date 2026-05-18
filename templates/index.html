@@ -70,7 +70,10 @@
                 ● Aufnahme starten
               </button>
             </div>
-            <audio id="audioPlayback" controls style="display:none; width:100%; margin-top:12px;"></audio>
+<div id="micSelectWrapper" style="display:none; align-items:center; margin-top:10px;">
+              <label for="micSelect" style="font-size:0.85em; color:var(--text-muted); margin-right:6px;">Mikrofon:</label>
+              <select id="micSelect" class="btn" style="font-size:0.85em; padding:4px 28px 4px 10px;"></select>
+            </div>
             <p id="recordHint" class="hint-text">
               Mikrofon-Zugriff wird beim ersten Klick angefragt.
             </p>
@@ -99,6 +102,13 @@
             <div class="radio-content">
               <span class="radio-title">🧠 Vollständige medizinische Analyse</span>
               <small>Strukturierte Zusammenfassung mit Anamnese, Diagnosen und Empfehlungen</small>
+            </div>
+          </label>
+          <label class="radio-label" id="labelAbpro">
+            <input type="radio" name="mode" value="abpro">
+            <div class="radio-content">
+              <span class="radio-title">📝 A/B/PRO-Dokumentation</span>
+              <small>Kompakte Gliederung: Anamnese · Befund · Procedere</small>
             </div>
           </label>
           <label class="radio-label" id="labelSummary">
@@ -151,6 +161,14 @@
           </div>
         </div>
         <div id="transcriptText" class="result-text"></div>
+      </div>
+
+      <!-- Verlauf -->
+      <div id="historySection" class="result-section" style="display:none;">
+        <div class="result-header">
+          <h2>🕐 Verlauf</h2>
+        </div>
+        <div id="historyGrid" class="history-grid"></div>
       </div>
 
       <!-- Analyse -->

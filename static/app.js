@@ -13,6 +13,12 @@ let analyzerCtx = null;
 let animFrame = null;
 let liveTranscriptIntervalId = null;
 let isTranscribingLive = false;
+let liveTranscriptText = null;
+let liveTranscriptParts = [];
+let lastTranscribedChunkIndex = 0;
+let recordingStartTime = null;
+let analysisHistory = [];
+let currentTranscript = "";
 
 // --- Init ---
 document.addEventListener("DOMContentLoaded", () => {
@@ -26,7 +32,31 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("analyzeBtn").addEventListener("click", startAnalysis);
   document.getElementById("resetBtn").addEventListener("click", resetAll);
   initUploadZone();
+  populateMicrophoneList();
 });
+
+// ============================================================
+// MIKROFON-AUSWAHL
+// ============================================================
+async function populateMicrophoneList() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const mics = devices.filter(d => d.kind === "audioinput");
+  const wrapper = document.getElementById("micSelectWrapper");
+  const select = document.getElementById("micSelect");
+
+  // Weniger als 2 Geräte → Dropdown unnötig
+  if (mics.length < 2) { wrapper.style.display = "none"; return; }
+
+  // Labels leer? (Noch keine Permission) → Platzhalter zeigen
+  const hasLabels = mics.some(d => d.label);
+  select.innerHTML = mics.map((d, i) => {
+    const label = d.label || `Mikrofon ${i + 1}`;
+    return `<option value="${d.deviceId}">${label}</option>`;
+  }).join("");
+
+  wrapper.style.display = hasLabels ? "flex" : "none";
+}
 
 // ============================================================
 // MODELLE LADEN
@@ -123,10 +153,18 @@ async function toggleRecording() {
 
 async function startRecording() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const selectedMic = document.getElementById("micSelect")?.value;
+    const audioConstraints = selectedMic ? { deviceId: { exact: selectedMic } } : true;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    // Labels sind jetzt verfügbar — Liste mit echten Namen füllen
+    await populateMicrophoneList();
 
     audioChunks = [];
     isTranscribingLive = false;
+    liveTranscriptText = null;
+    liveTranscriptParts = [];
+    lastTranscribedChunkIndex = 0;
+    recordingStartTime = new Date();
 
     const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
       ? "audio/webm;codecs=opus"
@@ -139,8 +177,8 @@ async function startRecording() {
     mediaRecorder.onstop = onRecordingStop;
     mediaRecorder.start(500);
 
-    // Live-Transkription alle 30 Sekunden
-    liveTranscriptIntervalId = setInterval(transcribeLiveChunk, 30000);
+    // Live-Transkription: erst 30s nach Abschluss des vorherigen Chunks starten
+    liveTranscriptIntervalId = setTimeout(runLiveTranscriptionLoop, 30000);
 
     // UI
     const btn = document.getElementById("recordBtn");
@@ -149,8 +187,6 @@ async function startRecording() {
     document.getElementById("recordTimer").classList.add("running");
     document.getElementById("recordHint").textContent =
       "Aufnahme läuft... Erneut klicken zum Beenden.";
-    document.getElementById("audioPlayback").style.display = "none";
-
     // Live-Transkript-Bereich vorbereiten
     document.getElementById("emptyState").style.display = "none";
     document.getElementById("transcriptSection").style.display = "block";
@@ -173,7 +209,7 @@ function stopRecording() {
   mediaRecorder.stop();
   mediaRecorder.stream.getTracks().forEach((t) => t.stop());
   clearInterval(timerInterval);
-  clearInterval(liveTranscriptIntervalId);
+  clearTimeout(liveTranscriptIntervalId);
   liveTranscriptIntervalId = null;
   cancelAnimationFrame(animFrame);
 
@@ -185,23 +221,40 @@ function stopRecording() {
     "Aufnahme beendet. Analyse wird gestartet...";
 }
 
+async function runLiveTranscriptionLoop() {
+  await transcribeLiveChunk();
+  // Nächsten Chunk erst 30s NACH Abschluss planen (nicht nach Start)
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    liveTranscriptIntervalId = setTimeout(runLiveTranscriptionLoop, 30000);
+  }
+}
+
 async function transcribeLiveChunk() {
-  // Mindestens ~10 Sekunden Audio (500ms-Chunks × 20)
-  if (isTranscribingLive || audioChunks.length < 20) return;
+  // Mindestens ~10 Sekunden neues Audio (500ms-Chunks × 20)
+  if (isTranscribingLive || audioChunks.length - lastTranscribedChunkIndex < 20) return;
 
   isTranscribingLive = true;
+  const capturedIndex = audioChunks.length;
   try {
-    const blob = new Blob(audioChunks, { type: "audio/webm" });
+    // Nur neue Chunks senden; Chunk 0 (WebM-Header) immer voranstellen
+    const newChunks = lastTranscribedChunkIndex === 0
+      ? audioChunks.slice(0, capturedIndex)
+      : [audioChunks[0], ...audioChunks.slice(lastTranscribedChunkIndex, capturedIndex)];
+
+    const blob = new Blob(newChunks, { type: "audio/webm" });
     const formData = new FormData();
     formData.append("audio", blob, "chunk.webm");
 
     const r = await fetch("/transcribe-only", { method: "POST", body: formData });
     if (r.ok) {
       const data = await r.json();
-      const text = data.transcript || "";
+      const text = (data.transcript || "").trim();
       if (text) {
+        lastTranscribedChunkIndex = capturedIndex;
+        liveTranscriptParts.push(text);
+        liveTranscriptText = liveTranscriptParts.join(" ");
         document.getElementById("transcriptSection").style.display = "block";
-        document.getElementById("transcriptText").textContent = text;
+        document.getElementById("transcriptText").textContent = liveTranscriptText;
       }
     }
   } catch (e) {
@@ -211,14 +264,37 @@ async function transcribeLiveChunk() {
   }
 }
 
-function onRecordingStop() {
+async function onRecordingStop() {
   audioBlob = new Blob(audioChunks, { type: "audio/webm" });
-  const url = URL.createObjectURL(audioBlob);
-  const playback = document.getElementById("audioPlayback");
-  playback.src = url;
-  playback.style.display = "block";
 
-  // Sofort Analyse starten
+  // Wait for any in-progress live transcription to finish
+  while (isTranscribingLive) {
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // Transcribe remaining tail (chunks not yet covered by live transcription)
+  if (lastTranscribedChunkIndex > 0 && lastTranscribedChunkIndex < audioChunks.length) {
+    document.getElementById("recordHint").textContent = "Transkribiere verbleibende Aufnahme...";
+    const tailChunks = [audioChunks[0], ...audioChunks.slice(lastTranscribedChunkIndex)];
+    const tailBlob = new Blob(tailChunks, { type: "audio/webm" });
+    const formData = new FormData();
+    formData.append("audio", tailBlob, "chunk.webm");
+    try {
+      const r = await fetch("/transcribe-only", { method: "POST", body: formData });
+      if (r.ok) {
+        const data = await r.json();
+        const text = (data.transcript || "").trim();
+        if (text) {
+          liveTranscriptParts.push(text);
+          liveTranscriptText = liveTranscriptParts.join(" ");
+          document.getElementById("transcriptText").textContent = liveTranscriptText;
+        }
+      }
+    } catch (e) {
+      console.warn("Rest-Transkription fehlgeschlagen:", e);
+    }
+  }
+
   startAnalysis();
 }
 
@@ -286,11 +362,20 @@ function getActiveAudioBlob() {
 // ANALYSE STARTEN
 // ============================================================
 async function startAnalysis() {
+  // Wenn ein Live-Transkript aus der Aufnahme vorliegt, Whisper-Schritt überspringen
+  const activeTab = document.querySelector(".tab-button.active").dataset.tab;
+  if (activeTab === "record" && liveTranscriptText) {
+    await startAnalysisFromTranscript(liveTranscriptText);
+    return;
+  }
+
   const blob = getActiveAudioBlob();
   if (!blob) return;
 
   const model = document.getElementById("modelSelect").value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
+  if (activeTab !== "record") recordingStartTime = new Date();
+  document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
   // UI vorbereiten
   setAnalysisMode(mode);
   showStatus("Sende Audio...");
@@ -350,6 +435,71 @@ async function startAnalysis() {
   }
 
   // Fertig
+  if (analysisRaw) finishAnalysis(analysisRaw, currentTranscript, mode, model);
+  hideStatus();
+  analysisEl.classList.remove("streaming");
+  analysisEl.classList.add("done");
+  document.getElementById("analyzeBtn").disabled = false;
+  document.getElementById("resetBtn").style.display = "block";
+}
+
+async function startAnalysisFromTranscript(transcript) {
+  const model = document.getElementById("modelSelect").value;
+  const mode = document.querySelector('input[name="mode"]:checked').value;
+  document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
+  setAnalysisMode(mode);
+  showStatus("Analysiere Transkript (Whisper-Schritt übersprungen)...");
+  document.getElementById("analyzeBtn").disabled = true;
+  document.getElementById("resetBtn").style.display = "none";
+  document.getElementById("emptyState").style.display = "none";
+  document.getElementById("analysisSection").style.display = "none";
+  document.getElementById("analysisText").innerHTML = "";
+  document.getElementById("analysisText").dataset.raw = "";
+
+  const analysisEl = document.getElementById("analysisText");
+  analysisEl.classList.add("streaming");
+  analysisEl.classList.remove("done");
+
+  const formData = new FormData();
+  formData.append("transcript", transcript);
+  formData.append("model", model);
+  formData.append("mode", mode);
+
+  let analysisRaw = "";
+
+  try {
+    const response = await fetch("/analyze-text", { method: "POST", body: formData });
+    if (!response.ok) {
+      showStatus(`Fehler: HTTP ${response.status}`, true);
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop();
+      for (const part of parts) {
+        if (!part.startsWith("data: ")) continue;
+        try {
+          const evt = JSON.parse(part.slice(6));
+          handleSSE(evt);
+          if (evt.type === "token") analysisRaw += evt.text;
+        } catch {
+          // ignore malformed
+        }
+      }
+    }
+  } catch (e) {
+    showStatus(`Verbindungsfehler: ${e.message}`, true);
+  }
+
+  if (analysisRaw) finishAnalysis(analysisRaw, transcript, mode, model);
   hideStatus();
   analysisEl.classList.remove("streaming");
   analysisEl.classList.add("done");
@@ -367,6 +517,7 @@ function handleSSE(evt) {
       break;
 
     case "transcript":
+      currentTranscript = evt.text;
       document.getElementById("transcriptSection").style.display = "block";
       transcriptEl.textContent = evt.text;
       break;
@@ -422,6 +573,7 @@ function setAnalysisMode(mode) {
   const titleEl = document.getElementById("analysisSectionTitle");
   if (!titleEl) return;
   if (mode === "analyze") titleEl.textContent = "🧠 Analyse";
+  else if (mode === "abpro") titleEl.textContent = "📝 A/B/PRO-Dokumentation";
   else if (mode === "summary") titleEl.textContent = "📋 Zusammenfassung";
   else titleEl.textContent = "✏️ Bereinigtes Transkript";
 }
@@ -430,6 +582,9 @@ function resetAll() {
   audioBlob = null;
   uploadedFile = null;
   isTranscribingLive = false;
+  liveTranscriptText = null;
+  liveTranscriptParts = [];
+  lastTranscribedChunkIndex = 0;
 
   // Laufende Aufnahme abbrechen falls aktiv
   if (mediaRecorder && mediaRecorder.state === "recording") {
@@ -440,14 +595,13 @@ function resetAll() {
 
   // Aufnahme-UI
   document.getElementById("recordTimer").textContent = "00:00";
-  document.getElementById("audioPlayback").style.display = "none";
   document.getElementById("recordHint").textContent =
     "Mikrofon-Zugriff wird beim ersten Klick angefragt.";
   document.getElementById("uploadFileName").textContent = "";
   document.getElementById("fileInput").value = "";
 
   // Ergebnisse
-  document.getElementById("emptyState").style.display = "block";
+  document.getElementById("emptyState").style.display = analysisHistory.length ? "none" : "block";
   document.getElementById("transcriptSection").style.display = "none";
   document.getElementById("analysisSection").style.display = "none";
   document.getElementById("transcriptText").textContent = "";
@@ -458,6 +612,74 @@ function resetAll() {
   hideStatus();
   updateAnalyzeBtn();
   document.getElementById("resetBtn").style.display = "none";
+}
+
+// ============================================================
+// HISTORY
+// ============================================================
+function finishAnalysis(analysisRaw, transcript, mode, model) {
+  const time = recordingStartTime || new Date();
+  const timeStr = time.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+  const entry = { id: Date.now(), timeStr, transcript, analysisRaw, mode };
+  analysisHistory.push(entry);
+  addHistoryButton(entry, model);
+}
+
+function addHistoryButton(entry, model) {
+  const grid = document.getElementById("historyGrid");
+  const section = document.getElementById("historySection");
+
+  const btn = document.createElement("button");
+  btn.className = "history-btn loading";
+  btn.dataset.id = entry.id;
+  btn.textContent = entry.timeStr;
+  btn.title = "Betreff wird ermittelt…";
+  btn.addEventListener("click", () => restoreHistory(entry));
+
+  grid.appendChild(btn);
+  section.style.display = "block";
+
+  fetchSubjectForEntry(entry, model, btn);
+}
+
+async function fetchSubjectForEntry(entry, model, btn) {
+  try {
+    const fd = new FormData();
+    fd.append("transcript", entry.transcript.slice(0, 2000));
+    fd.append("model", model);
+    const r = await fetch("/subject", { method: "POST", body: fd });
+    if (r.ok) {
+      const data = await r.json();
+      entry.subject = data.subject || "—";
+      btn.title = entry.subject;
+    }
+  } catch {
+    btn.title = "—";
+  } finally {
+    btn.classList.remove("loading");
+  }
+}
+
+function restoreHistory(entry) {
+  document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
+  const activeBtn = document.querySelector(`.history-btn[data-id="${entry.id}"]`);
+  if (activeBtn) activeBtn.classList.add("active");
+
+  document.getElementById("emptyState").style.display = "none";
+  document.getElementById("transcriptSection").style.display = "block";
+  document.getElementById("transcriptText").textContent = entry.transcript;
+
+  setAnalysisMode(entry.mode);
+  document.getElementById("analysisSection").style.display = "block";
+  const analysisEl = document.getElementById("analysisText");
+  analysisEl.dataset.raw = entry.analysisRaw;
+  analysisEl.classList.remove("streaming");
+  analysisEl.classList.add("done");
+  try {
+    analysisEl.innerHTML = marked.parse(entry.analysisRaw);
+  } catch {
+    analysisEl.textContent = entry.analysisRaw;
+  }
 }
 
 // ============================================================

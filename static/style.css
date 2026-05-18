@@ -454,6 +454,47 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 }
 
 /* ============================================================
+   HISTORY
+   ============================================================ */
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+  gap: 6px;
+}
+
+.history-btn {
+  padding: 6px 4px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-family: monospace;
+  text-align: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-btn:hover {
+  background: var(--secondary);
+  color: var(--text);
+  border-color: var(--secondary-hover);
+}
+
+.history-btn.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.history-btn.loading {
+  opacity: 0.6;
+}
+
+/* ============================================================
    ANIMATIONEN
    ============================================================ */
 @keyframes spin {

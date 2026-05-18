@@ -9,15 +9,16 @@ from fastapi.templating import Jinja2Templates
 import httpx
 import tempfile
 import os
+import re
 import json
 from pathlib import Path
 import logging
-from prompts import ANALYZE_PROMPT, CLEAN_PROMPT, SUMMARY_PROMPT
+from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, SUMMARY_PROMPT
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.3.14"
+VERSION = "0.3.15"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -79,6 +80,49 @@ class ThinkingFilter:
         result = "" if self._in_think else self._buf
         self._buf = ""
         return result
+
+
+async def _stream_llm(prompt: str, model: str):
+    """Yields SSE event data strings for a streamed LLM response."""
+    thinking_filter = ThinkingFilter()
+    async with httpx.AsyncClient(timeout=300) as client:
+        async with client.stream(
+            "POST",
+            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": True,
+                "think": False,
+                "options": {"temperature": 0.3, "top_p": 0.9, "num_predict": 4096},
+            },
+        ) as r:
+            async for line in r.aiter_lines():
+                if not line:
+                    continue
+                data = json.loads(line)
+                raw = data.get("response", "")
+                if raw:
+                    token = thinking_filter.feed(raw)
+                    if token:
+                        yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+                if data.get("done"):
+                    remainder = thinking_filter.flush()
+                    if remainder:
+                        yield f"data: {json.dumps({'type': 'token', 'text': remainder})}\n\n"
+                    break
+
+
+async def _call_llm_sync(prompt: str, model: str) -> str:
+    """Single non-streaming LLM call, returns complete response with thinking blocks stripped."""
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False, "think": False,
+                  "options": {"temperature": 0.1, "num_predict": 150}},
+        )
+    text = r.json().get("response", "").strip()
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 async def transcribe_audio(audio_path: str, filename: str = "audio.webm") -> str:
@@ -182,10 +226,17 @@ async def analyze(
                 return
 
             yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
+
+            if len(transcript.strip()) < 10:
+                yield f"data: {json.dumps({'type': 'error', 'text': 'Transkript ist leer oder zu kurz – bitte erneut aufnehmen.'})}\n\n"
+                return
+
             yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
 
             if mode == "analyze":
                 prompt_template = ANALYZE_PROMPT
+            elif mode == "abpro":
+                prompt_template = ABPRO_PROMPT
             elif mode == "summary":
                 prompt_template = SUMMARY_PROMPT
             else:
@@ -193,32 +244,8 @@ async def analyze(
             prompt = prompt_template.format(transcript=transcript)
 
             try:
-                thinking_filter = ThinkingFilter()
-                async with httpx.AsyncClient(timeout=300) as client:
-                    async with client.stream(
-                        "POST",
-                        f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
-                        json={
-                            "model": used_model,
-                            "prompt": prompt,
-                            "stream": True,
-                            "think": False,
-                            "options": {"temperature": 0.3, "top_p": 0.9, "num_predict": 4096},
-                        },
-                    ) as r:
-                        async for line in r.aiter_lines():
-                            if line:
-                                data = json.loads(line)
-                                raw = data.get("response", "")
-                                if raw:
-                                    token = thinking_filter.feed(raw)
-                                    if token:
-                                        yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
-                                if data.get("done"):
-                                    remainder = thinking_filter.flush()
-                                    if remainder:
-                                        yield f"data: {json.dumps({'type': 'token', 'text': remainder})}\n\n"
-                                    break
+                async for chunk in _stream_llm(prompt, used_model):
+                    yield chunk
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'text': f'KI-Fehler: {e}'})}\n\n"
                 return
@@ -230,6 +257,59 @@ async def analyze(
                 os.unlink(tmp_path)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/analyze-text")
+async def analyze_text(
+    transcript: str = Form(...),
+    model: str = Form(default=None),
+    mode: str = Form(default="analyze"),
+):
+    """LLM-Analyse eines bereits vorhandenen Transkripts – kein Whisper-Schritt."""
+    used_model = model or OLLAMA_MODEL
+
+    if mode == "analyze":
+        prompt_template = ANALYZE_PROMPT
+    elif mode == "abpro":
+        prompt_template = ABPRO_PROMPT
+    elif mode == "summary":
+        prompt_template = SUMMARY_PROMPT
+    else:
+        prompt_template = CLEAN_PROMPT
+    prompt = prompt_template.format(transcript=transcript)
+
+    async def event_stream():
+        yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
+
+        if len(transcript.strip()) < 10:
+            yield f"data: {json.dumps({'type': 'error', 'text': 'Transkript ist leer oder zu kurz – bitte erneut aufnehmen.'})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
+        try:
+            async for chunk in _stream_llm(prompt, used_model):
+                yield chunk
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'text': f'KI-Fehler: {e}'})}\n\n"
+            return
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/subject")
+async def get_subject(transcript: str = Form(...), model: str = Form(default=None)):
+    """Returns a short subject line (max 100 chars) derived from the transcript."""
+    used_model = model or OLLAMA_MODEL
+    prompt = SUBJECT_PROMPT.format(transcript=transcript[:2000])
+    try:
+        subject = await _call_llm_sync(prompt, used_model)
+        if len(subject) > 100:
+            subject = subject[:97] + "…"
+        return {"subject": subject}
+    except Exception as e:
+        logger.error(f"Subject generation failed: {e}")
+        return {"subject": "—", "error": str(e)}
 
 
 if __name__ == "__main__":
