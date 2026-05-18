@@ -18,7 +18,7 @@ from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -125,6 +125,20 @@ async def _call_llm_sync(prompt: str, model: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
+def _gender_context(gender: str) -> dict:
+    if gender == "male":
+        return {
+            "gender_instruction": 'Bezeichne die behandelte Person im gesamten Text als "Der Patient" (Pronomen: er/ihm/ihn/sein/seine).',
+            "patient_label": "der Patient",
+        }
+    if gender == "female":
+        return {
+            "gender_instruction": 'Bezeichne die behandelte Person im gesamten Text als "Die Patientin" (Pronomen: sie/ihr/ihre).',
+            "patient_label": "die Patientin",
+        }
+    return {"gender_instruction": "", "patient_label": "die Person"}
+
+
 async def transcribe_audio(audio_path: str, filename: str = "audio.webm") -> str:
     async with httpx.AsyncClient(timeout=300) as client:
         with open(audio_path, "rb") as f:
@@ -204,7 +218,8 @@ async def transcribe_only(audio: UploadFile = File(...)):
 async def analyze(
     audio: UploadFile = File(...),
     model: str = Form(default=None),
-    mode: str = Form(default="analyze"),  # "analyze" | "clean"
+    mode: str = Form(default="analyze"),
+    gender: str = Form(default="neutral"),
 ):
     """Transkription + LLM-Analyse als SSE-Stream."""
     used_model = model or OLLAMA_MODEL
@@ -241,7 +256,7 @@ async def analyze(
                 prompt_template = SUMMARY_PROMPT
             else:
                 prompt_template = CLEAN_PROMPT
-            prompt = prompt_template.format(transcript=transcript)
+            prompt = prompt_template.format(transcript=transcript, **_gender_context(gender))
 
             try:
                 async for chunk in _stream_llm(prompt, used_model):
@@ -264,6 +279,7 @@ async def analyze_text(
     transcript: str = Form(...),
     model: str = Form(default=None),
     mode: str = Form(default="analyze"),
+    gender: str = Form(default="neutral"),
 ):
     """LLM-Analyse eines bereits vorhandenen Transkripts – kein Whisper-Schritt."""
     used_model = model or OLLAMA_MODEL
@@ -276,7 +292,7 @@ async def analyze_text(
         prompt_template = SUMMARY_PROMPT
     else:
         prompt_template = CLEAN_PROMPT
-    prompt = prompt_template.format(transcript=transcript)
+    prompt = prompt_template.format(transcript=transcript, **_gender_context(gender))
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"

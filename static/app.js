@@ -19,18 +19,19 @@ let lastTranscribedChunkIndex = 0;
 let recordingStartTime = null;
 let analysisHistory = [];
 let currentTranscript = "";
+let selectedGender = "neutral";
 
 // --- Init ---
 document.addEventListener("DOMContentLoaded", () => {
   initTabs();
   initRadioHighlight();
+  initGenderButtons();
   loadModels();
   checkHealth();
   setInterval(checkHealth, 30000);
 
   document.getElementById("recordBtn").addEventListener("click", toggleRecording);
   document.getElementById("analyzeBtn").addEventListener("click", startAnalysis);
-  document.getElementById("resetBtn").addEventListener("click", resetAll);
   initUploadZone();
   populateMicrophoneList();
 });
@@ -137,6 +138,32 @@ function initRadioHighlight() {
       document.querySelectorAll(".radio-label").forEach((l) => l.classList.remove("active"));
       radio.closest(".radio-label").classList.add("active");
     });
+  });
+}
+
+// ============================================================
+// GESCHLECHT
+// ============================================================
+function initGenderButtons() {
+  document.getElementById("genderGroup").addEventListener("click", (e) => {
+    const btn = e.target.closest(".gender-btn");
+    if (!btn) return;
+    setGender(btn.dataset.gender);
+  });
+
+  document.getElementById("genderRerun").addEventListener("click", (e) => {
+    const btn = e.target.closest(".gender-btn");
+    if (!btn) return;
+    setGender(btn.dataset.gender);
+    if (currentTranscript) startAnalysisFromTranscript(currentTranscript);
+  });
+}
+
+function setGender(gender) {
+  selectedGender = gender;
+  // sync both gender groups
+  document.querySelectorAll(".gender-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.gender === gender);
   });
 }
 
@@ -380,10 +407,10 @@ async function startAnalysis() {
   setAnalysisMode(mode);
   showStatus("Sende Audio...");
   document.getElementById("analyzeBtn").disabled = true;
-  document.getElementById("resetBtn").style.display = "none";
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("transcriptSection").style.display = "none";
   document.getElementById("analysisSection").style.display = "none";
+  document.getElementById("genderRerun").style.display = "none";
   document.getElementById("transcriptText").textContent = "";
   document.getElementById("analysisText").innerHTML = "";
 
@@ -396,6 +423,7 @@ async function startAnalysis() {
   formData.append("audio", blob, filename);
   formData.append("model", model);
   formData.append("mode", mode);
+  formData.append("gender", selectedGender);
 
   let analysisRaw = "";
 
@@ -435,12 +463,14 @@ async function startAnalysis() {
   }
 
   // Fertig
-  if (analysisRaw) finishAnalysis(analysisRaw, currentTranscript, mode, model);
+  if (analysisRaw) {
+    finishAnalysis(analysisRaw, currentTranscript, mode, model, selectedGender);
+    document.getElementById("genderRerun").style.display = "flex";
+  }
   hideStatus();
   analysisEl.classList.remove("streaming");
   analysisEl.classList.add("done");
   document.getElementById("analyzeBtn").disabled = false;
-  document.getElementById("resetBtn").style.display = "block";
 }
 
 async function startAnalysisFromTranscript(transcript) {
@@ -450,7 +480,6 @@ async function startAnalysisFromTranscript(transcript) {
   setAnalysisMode(mode);
   showStatus("Analysiere Transkript (Whisper-Schritt übersprungen)...");
   document.getElementById("analyzeBtn").disabled = true;
-  document.getElementById("resetBtn").style.display = "none";
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("analysisSection").style.display = "none";
   document.getElementById("analysisText").innerHTML = "";
@@ -464,6 +493,7 @@ async function startAnalysisFromTranscript(transcript) {
   formData.append("transcript", transcript);
   formData.append("model", model);
   formData.append("mode", mode);
+  formData.append("gender", selectedGender);
 
   let analysisRaw = "";
 
@@ -499,12 +529,14 @@ async function startAnalysisFromTranscript(transcript) {
     showStatus(`Verbindungsfehler: ${e.message}`, true);
   }
 
-  if (analysisRaw) finishAnalysis(analysisRaw, transcript, mode, model);
+  if (analysisRaw) {
+    finishAnalysis(analysisRaw, transcript, mode, model, selectedGender);
+    document.getElementById("genderRerun").style.display = "flex";
+  }
   hideStatus();
   analysisEl.classList.remove("streaming");
   analysisEl.classList.add("done");
   document.getElementById("analyzeBtn").disabled = false;
-  document.getElementById("resetBtn").style.display = "block";
 }
 
 function handleSSE(evt) {
@@ -611,16 +643,15 @@ function resetAll() {
 
   hideStatus();
   updateAnalyzeBtn();
-  document.getElementById("resetBtn").style.display = "none";
 }
 
 // ============================================================
 // HISTORY
 // ============================================================
-function finishAnalysis(analysisRaw, transcript, mode, model) {
+function finishAnalysis(analysisRaw, transcript, mode, model, gender = "neutral") {
   const time = recordingStartTime || new Date();
   const timeStr = time.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
-  const entry = { id: Date.now(), timeStr, transcript, analysisRaw, mode };
+  const entry = { id: Date.now(), timeStr, transcript, analysisRaw, mode, gender };
   analysisHistory.push(entry);
   addHistoryButton(entry, model);
 }
@@ -665,12 +696,16 @@ function restoreHistory(entry) {
   const activeBtn = document.querySelector(`.history-btn[data-id="${entry.id}"]`);
   if (activeBtn) activeBtn.classList.add("active");
 
+  currentTranscript = entry.transcript;
+  setGender(entry.gender || "neutral");
+
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("transcriptSection").style.display = "block";
   document.getElementById("transcriptText").textContent = entry.transcript;
 
   setAnalysisMode(entry.mode);
   document.getElementById("analysisSection").style.display = "block";
+  document.getElementById("genderRerun").style.display = "flex";
   const analysisEl = document.getElementById("analysisText");
   analysisEl.dataset.raw = entry.analysisRaw;
   analysisEl.classList.remove("streaming");

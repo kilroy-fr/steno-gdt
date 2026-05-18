@@ -1,5 +1,5 @@
 ANALYZE_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
-
+{gender_instruction}
 Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs und erstelle eine strukturierte Zusammenfassung für den Arzt. Halte dich ausschließlich an die Inhalte des Transkripts – keine Annahmen, keine Ergänzungen.
 
 **Transkript:**
@@ -13,7 +13,7 @@ Erstelle folgende strukturierte Übersicht:
 (2–3 Sätze zum Kern des Gesprächs)
 
 ## Vorstellungsgrund / Hauptbeschwerden
-(Was hat die Person in die Praxis geführt?)
+(Was hat {patient_label} in die Praxis geführt?)
 
 ## Anamnese
 (Relevante Informationen zur Krankengeschichte, die im Gespräch erwähnt wurden)
@@ -30,7 +30,7 @@ Erstelle folgende strukturierte Übersicht:
 Antworte vollständig auf Deutsch."""
 
 ABPRO_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
-
+{gender_instruction}
 Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs. Halte dich ausschließlich an die Inhalte des Transkripts – keine Annahmen, keine Ergänzungen. Antworte vollständig auf Deutsch.
 
 **Transkript:**

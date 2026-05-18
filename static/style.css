@@ -346,6 +346,54 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 .radio-label small { color: var(--text-muted); font-size: 0.8rem; margin-top: 2px; }
 
 /* ============================================================
+   GENDER TOGGLE
+   ============================================================ */
+.gender-group {
+  display: flex;
+  gap: 6px;
+}
+
+.gender-btn {
+  flex: 1;
+  padding: 7px 10px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+  cursor: pointer;
+  font-size: 0.83rem;
+  font-family: var(--font);
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.gender-btn:hover { background: var(--secondary); color: var(--text); }
+
+.gender-btn.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.gender-rerun {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gender-rerun-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.gender-rerun .gender-btn {
+  flex: none;
+  padding: 4px 9px;
+  font-size: 0.78rem;
+}
+
+/* ============================================================
    STATUS BOX
    ============================================================ */
 .status-box {
@@ -392,7 +440,7 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
   margin-bottom: 10px;
 }
 
-.result-actions { display: flex; gap: 8px; }
+.result-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 .result-text {
   background: var(--card-bg);
