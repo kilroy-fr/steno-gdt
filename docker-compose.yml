@@ -31,19 +31,13 @@ services:
     restart: unless-stopped
 
   # ============================================================
-  # faster-whisper (Transkription, GPU)
+  # faster-whisper (Transkription, GPU) – geteilt mit ki-atteste
   # ============================================================
   faster-whisper:
     image: fedirz/faster-whisper-server:latest-cuda
     container_name: diktat-whisper
-    runtime: nvidia
-    environment:
-      - WHISPER__MODEL=large-v3
-    volumes:
-      - whisper-models:/root/.cache/huggingface
-    networks:
-      - diktat-network
-    restart: unless-stopped
+    expose:
+      - "8000"
     deploy:
       resources:
         reservations:
@@ -51,6 +45,18 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    environment:
+      - WHISPER__MODEL=large-v3
+      - WHISPER__INFERENCE_DEVICE=cuda
+      - WHISPER__COMPUTE_TYPE=float16
+      - TZ=Europe/Berlin
+    volumes:
+      - whisper-models:/root/.cache/huggingface
+    networks:
+      - diktat-network
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
 # ============================================================
 # NETZWERKE
@@ -58,6 +64,7 @@ services:
 networks:
   diktat-network:
     driver: bridge
+    name: diktat-network
 
   ollama-network:
     external: true
@@ -72,4 +79,3 @@ networks:
 # ============================================================
 volumes:
   whisper-models:
-    driver: local
