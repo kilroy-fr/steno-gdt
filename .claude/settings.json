@@ -23,7 +23,11 @@
       "Bash(Get-ChildItem \"c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\\\\Transkripte_Raw\" -ErrorAction SilentlyContinue)",
       "Bash(Select-Object Name)",
       "Bash(cd \"c:/Users/Jan.DOMAIN/ki-transcribe\" && rm -rf build/ dist/ fileslegacy/ legacy/ nul BUILD_README_DIKTAT.md QUICKSTART_DIKTAT.md build_installer_diktat.bat diktat_gui_diktat.spec installer_diktat.iss && echo \"Done\")",
-      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ollama reachable,', len\\(d.get\\('models',[]\\)\\), 'models'\\)\")"
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('ollama reachable,', len\\(d.get\\('models',[]\\)\\), 'models'\\)\")",
+      "Bash(cat .bumpversion.cfg)",
+      "Bash(cat setup.cfg)",
+      "Bash(cat .bumpversion.toml)",
+      "Bash(git fetch *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Jan.DOMAIN\\ki-transcribe\\build"

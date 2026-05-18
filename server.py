@@ -18,7 +18,7 @@ from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.5.7"
+VERSION = "0.5.8"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")

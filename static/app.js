@@ -26,6 +26,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initTabs();
   initRadioHighlight();
   initGenderButtons();
+  initSettings();
   loadModels();
   checkHealth();
   setInterval(checkHealth, 30000);
@@ -35,6 +36,25 @@ document.addEventListener("DOMContentLoaded", () => {
   initUploadZone();
   populateMicrophoneList();
 });
+
+// ============================================================
+// EINSTELLUNGEN-MODAL
+// ============================================================
+function initSettings() {
+  const overlay = document.getElementById("settingsModal");
+  document.getElementById("settingsBtn").addEventListener("click", () => {
+    overlay.style.display = "flex";
+  });
+  document.getElementById("settingsClose").addEventListener("click", () => {
+    overlay.style.display = "none";
+  });
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.style.display = "none";
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") overlay.style.display = "none";
+  });
+}
 
 // ============================================================
 // MIKROFON-AUSWAHL

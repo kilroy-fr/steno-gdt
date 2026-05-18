@@ -567,6 +567,93 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 ::-webkit-scrollbar-thumb { background: var(--card-bg); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--secondary); }
 
+/* ============================================================
+   ZAHNRAD-BUTTON
+   ============================================================ */
+.btn-gear {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: var(--border-radius);
+  width: 36px;
+  height: 36px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.2s, color 0.2s, transform 0.3s;
+}
+.btn-gear:hover {
+  background: var(--secondary);
+  color: var(--text);
+  transform: rotate(45deg);
+}
+
+/* ============================================================
+   EINSTELLUNGEN-MODAL
+   ============================================================ */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-panel {
+  background: var(--container-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+  padding: 20px 24px;
+  min-width: 300px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 18px;
+}
+
+.settings-header span {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.settings-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 2px 7px;
+  border-radius: 4px;
+  line-height: 1;
+  font-family: var(--font);
+  transition: background 0.15s, color 0.15s;
+}
+.settings-close:hover { background: var(--card-bg); color: var(--text); }
+
+.settings-body { display: flex; flex-direction: column; gap: 14px; }
+
+.settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-row label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.settings-select { width: 100%; }
+
 /* select */
 select.btn {
   appearance: none;
