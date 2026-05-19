@@ -39,8 +39,7 @@ Analysiere das folgende Transkript. Nur Transkript-Inhalte – keine Annahmen, k
 ---
 
 Erstelle eine extrem kompakte Dokumentation im Telegrammstil:
-- Keine ganzen Sätze, nur Stichpunkte
-- Maximal 3 Stichpunkte pro Abschnitt
+
 - Keine einleitenden Floskeln, keine Erläuterungen
 - Verwende exakt diese Abschnitte, ohne die Klammertexte zu wiederholen:
 
