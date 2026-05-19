@@ -68,10 +68,9 @@
               <button id="recordBtn" class="btn btn-record" title="Aufnahme starten/beenden">
                 ● Aufnahme starten
               </button>
-            </div>
-<div id="micSelectWrapper" style="display:none; align-items:center; margin-top:10px;">
-              <label for="micSelect" style="font-size:0.85em; color:var(--text-muted); margin-right:6px;">Mikrofon:</label>
-              <select id="micSelect" class="btn" style="font-size:0.85em; padding:4px 28px 4px 10px;"></select>
+              <button id="nextPatientBtn" class="btn btn-next-patient" style="display:none;" title="Aufnahme beenden, Analyse starten und sofort neue Aufnahme beginnen">
+                ⏭ Nächster Patient
+              </button>
             </div>
             <p id="recordHint" class="hint-text">
               Mikrofon-Zugriff wird beim ersten Klick angefragt.
@@ -92,19 +91,29 @@
         </div>
       </div>
 
+      <!-- Geschlecht -->
+      <div class="section">
+        <h2>👤 Geschlecht der Person</h2>
+        <div class="gender-group" id="genderGroup">
+          <button class="gender-btn active" data-gender="neutral">Neutral</button>
+          <button class="gender-btn" data-gender="male">Patient (m)</button>
+          <button class="gender-btn" data-gender="female">Patientin (w)</button>
+        </div>
+      </div>
+
       <!-- Analyse-Optionen -->
       <div class="section">
         <h2>⚙️ Analyse-Modus</h2>
         <div class="radio-group">
-          <label class="radio-label active" id="labelAnalyze">
-            <input type="radio" name="mode" value="analyze" checked>
+          <label class="radio-label" id="labelAnalyze" style="display:none;">
+            <input type="radio" name="mode" value="analyze">
             <div class="radio-content">
               <span class="radio-title">🧠 Vollständige medizinische Analyse</span>
               <small>Strukturierte Zusammenfassung mit Anamnese, Diagnosen und Empfehlungen</small>
             </div>
           </label>
-          <label class="radio-label" id="labelAbpro">
-            <input type="radio" name="mode" value="abpro">
+          <label class="radio-label active" id="labelAbpro">
+            <input type="radio" name="mode" value="abpro" checked>
             <div class="radio-content">
               <span class="radio-title">📝 A/B/PRO-Dokumentation</span>
               <small>Kompakte Gliederung: Anamnese · Befund · Procedere</small>
@@ -124,16 +133,6 @@
               <small>Transkript säubern – Füllwörter entfernen, Fehler korrigieren</small>
             </div>
           </label>
-        </div>
-      </div>
-
-      <!-- Geschlecht -->
-      <div class="section">
-        <h2>👤 Geschlecht der Person</h2>
-        <div class="gender-group" id="genderGroup">
-          <button class="gender-btn active" data-gender="neutral">Neutral</button>
-          <button class="gender-btn" data-gender="male">Patient (m)</button>
-          <button class="gender-btn" data-gender="female">Patientin (w)</button>
         </div>
       </div>
 
@@ -192,6 +191,49 @@
           </div>
         </div>
         <div id="analysisText" class="result-text markdown-body streaming"></div>
+
+        <!-- A/B/PRO-Karten (nur für Modus abpro) -->
+        <div id="abproCards" class="abpro-cards" style="display:none;">
+          <div class="abpro-card">
+            <div class="abpro-card-header">
+              <div class="abpro-card-label-row">
+                <span class="abpro-key">A</span>
+                <span class="abpro-card-title">Anamnese</span>
+              </div>
+              <button class="btn-abpro-copy" onclick="copyAbproField('abproA')" title="Kopieren">
+                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                Kopieren
+              </button>
+            </div>
+            <div id="abproA" class="abpro-content markdown-body"></div>
+          </div>
+          <div class="abpro-card">
+            <div class="abpro-card-header">
+              <div class="abpro-card-label-row">
+                <span class="abpro-key">B</span>
+                <span class="abpro-card-title">Befund</span>
+              </div>
+              <button class="btn-abpro-copy" onclick="copyAbproField('abproB')" title="Kopieren">
+                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                Kopieren
+              </button>
+            </div>
+            <div id="abproB" class="abpro-content markdown-body"></div>
+          </div>
+          <div class="abpro-card">
+            <div class="abpro-card-header">
+              <div class="abpro-card-label-row">
+                <span class="abpro-key">PRO</span>
+                <span class="abpro-card-title">Procedere</span>
+              </div>
+              <button class="btn-abpro-copy" onclick="copyAbproField('abproPro')" title="Kopieren">
+                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                Kopieren
+              </button>
+            </div>
+            <div id="abproPro" class="abpro-content markdown-body"></div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -210,6 +252,10 @@
         <div class="settings-row">
           <label for="modelSelect">KI-Modell</label>
           <select id="modelSelect" class="btn settings-select"></select>
+        </div>
+        <div class="settings-row" id="micSettingsRow" style="display:none;">
+          <label for="micSelect">Mikrofon</label>
+          <select id="micSelect" class="btn settings-select"></select>
         </div>
       </div>
     </div>

@@ -203,6 +203,13 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 }
 .btn-record.recording:hover { background: var(--danger-hover); }
 
+.btn-next-patient {
+  background: var(--warning);
+  color: #111827;
+  font-weight: 600;
+}
+.btn-next-patient:hover:not(:disabled) { background: #d97706; }
+
 
 .btn-small {
   display: inline-block;
@@ -669,3 +676,83 @@ select.btn {
 }
 
 select.btn:hover { background-color: var(--secondary); }
+
+/* ============================================================
+   ABPRO-KARTEN
+   ============================================================ */
+.abpro-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.abpro-card {
+  background: var(--card-bg);
+  border-radius: var(--border-radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.abpro-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 12px;
+  background: rgba(0,0,0,0.18);
+  border-bottom: 1px solid var(--border);
+}
+
+.abpro-card-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.abpro-key {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--primary);
+  font-family: monospace;
+  letter-spacing: 0.04em;
+  min-width: 28px;
+}
+
+.abpro-card-title {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.btn-abpro-copy {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 5px;
+  padding: 3px 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  font-family: var(--font);
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.btn-abpro-copy:hover {
+  background: var(--secondary);
+  color: var(--text);
+}
+
+.abpro-content {
+  padding: 12px 14px;
+  font-size: 0.92rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 36px;
+}
+
+.abpro-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}

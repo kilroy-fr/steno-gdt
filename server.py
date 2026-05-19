@@ -18,7 +18,7 @@ from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.5.9"
+VERSION = "0.5.10"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -39,6 +39,23 @@ MODEL_WHITELIST = [
     "llama3.1:",
     "meditron",
 ]
+
+# Known Whisper hallucinations generated for silence or noise — suppress them entirely.
+WHISPER_HALLUCINATIONS = {
+    "vielen dank.", "vielen dank!", "vielen dank",
+    "danke.", "danke!", "danke",
+    "danke schön.", "danke schön!", "danke schön",
+    "thank you.", "thank you!", "thank you",
+    "thanks.", "thanks!",
+    "untertitel der amara.org-community",
+    "untertitel von stephanie geiges",
+    "[musik]", "[applaus]", "♪",
+}
+
+
+def _is_hallucination(transcript: str) -> bool:
+    return transcript.strip().lower() in WHISPER_HALLUCINATIONS
+
 
 app = FastAPI(title="KI-Gesprächsanalyse")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -204,6 +221,8 @@ async def transcribe_only(audio: UploadFile = File(...)):
         tmp_path = tmp.name
     try:
         transcript = await transcribe_audio(tmp_path, audio.filename or "audio.webm")
+        if _is_hallucination(transcript):
+            transcript = ""
         return {"transcript": transcript}
     except HTTPException:
         raise
@@ -240,11 +259,11 @@ async def analyze(
                 yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
                 return
 
-            yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
-
-            if len(transcript.strip()) < 10:
-                yield f"data: {json.dumps({'type': 'error', 'text': 'Transkript ist leer oder zu kurz – bitte erneut aufnehmen.'})}\n\n"
+            if _is_hallucination(transcript) or len(transcript.strip()) < 10:
+                yield f"data: {json.dumps({'type': 'error', 'text': 'Kein Audioinhalt erkannt – bitte erneut aufnehmen.'})}\n\n"
                 return
+
+            yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
 
             yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
 

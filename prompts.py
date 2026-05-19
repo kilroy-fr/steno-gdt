@@ -31,20 +31,24 @@ Antworte vollständig auf Deutsch."""
 
 ABPRO_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
 {gender_instruction}
-Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs. Halte dich ausschließlich an die Inhalte des Transkripts – keine Annahmen, keine Ergänzungen. Antworte vollständig auf Deutsch.
+Analysiere das folgende Transkript. Nur Transkript-Inhalte – keine Annahmen, keine Ergänzungen. Antwort auf Deutsch.
 
 **Transkript:**
 {transcript}
 
 ---
 
-Erstelle eine kompakte Dokumentation in folgendem Format:
+Erstelle eine extrem kompakte Dokumentation im Telegrammstil:
+- Keine ganzen Sätze, nur Stichpunkte
+- Maximal 3 Stichpunkte pro Abschnitt
+- Keine einleitenden Floskeln, keine Erläuterungen
+- Verwende exakt diese Abschnitte, ohne die Klammertexte zu wiederholen:
 
-A: <Anamnese: Anlass des Besuchs und relevante Informationen zur Krankengeschichte, die im Gespräch erwähnt wurden>
+A: (Besuchsanlass + Anamnese – nur das Wesentliche)
 
-B: <Befund: Erkennbarer objektivierbarer Befund, sofern vorhanden (z.B. Blutdruckwerte, körperliche Befunde) – andernfalls weglassen>
+B: (Messwerte / körperlicher Befund – weglassen falls nicht vorhanden)
 
-PRO: <Procedere: Zusammenfassung der Empfehlungen und des weiteren Verlaufs, anstehende Behandlungen und Termine, Überweisungen, Kontrolltermine>"""
+PRO: (Maßnahmen, Überweisungen, Kontrolltermine)"""
 
 SUMMARY_PROMPT = """Erstelle eine kurze, allgemeinverständliche Zusammenfassung des folgenden Gesprächs.
 - 5–8 Sätze, keine Fachbegriffe, kein Schema

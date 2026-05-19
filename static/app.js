@@ -18,8 +18,11 @@ let liveTranscriptParts = [];
 let lastTranscribedChunkIndex = 0;
 let recordingStartTime = null;
 let analysisHistory = [];
+let nextPatientPending = false;
+let stopHandled = false;
 let currentTranscript = "";
-let selectedGender = "neutral";
+let selectedGender = "neutral";   // Geschlecht für die laufende Aufnahme (linke Spalte)
+let analysisGender = "neutral";   // Geschlecht der angezeigten Analyse (rechte Spalte)
 
 // --- Init ---
 document.addEventListener("DOMContentLoaded", () => {
@@ -32,6 +35,10 @@ document.addEventListener("DOMContentLoaded", () => {
   setInterval(checkHealth, 30000);
 
   document.getElementById("recordBtn").addEventListener("click", toggleRecording);
+  document.getElementById("nextPatientBtn").addEventListener("click", () => {
+    nextPatientPending = true;
+    stopRecording();
+  });
   document.getElementById("analyzeBtn").addEventListener("click", startAnalysis);
   initUploadZone();
   populateMicrophoneList();
@@ -63,20 +70,21 @@ async function populateMicrophoneList() {
   if (!navigator.mediaDevices?.enumerateDevices) return;
   const devices = await navigator.mediaDevices.enumerateDevices();
   const mics = devices.filter(d => d.kind === "audioinput");
-  const wrapper = document.getElementById("micSelectWrapper");
+  const row = document.getElementById("micSettingsRow");
   const select = document.getElementById("micSelect");
 
   // Weniger als 2 Geräte → Dropdown unnötig
-  if (mics.length < 2) { wrapper.style.display = "none"; return; }
+  if (mics.length < 2) { row.style.display = "none"; return; }
 
-  // Labels leer? (Noch keine Permission) → Platzhalter zeigen
+  // Labels leer? (Noch keine Permission) → nicht anzeigen
   const hasLabels = mics.some(d => d.label);
   select.innerHTML = mics.map((d, i) => {
     const label = d.label || `Mikrofon ${i + 1}`;
-    return `<option value="${d.deviceId}">${label}</option>`;
+    const short = label.length > 45 ? label.slice(0, 43) + "…" : label;
+    return `<option value="${d.deviceId}" title="${label}">${short}</option>`;
   }).join("");
 
-  wrapper.style.display = hasLabels ? "flex" : "none";
+  row.style.display = hasLabels ? "flex" : "none";
 }
 
 // ============================================================
@@ -168,21 +176,27 @@ function initGenderButtons() {
   document.getElementById("genderGroup").addEventListener("click", (e) => {
     const btn = e.target.closest(".gender-btn");
     if (!btn) return;
-    setGender(btn.dataset.gender);
+    setRecordingGender(btn.dataset.gender);
   });
 
   document.getElementById("genderRerun").addEventListener("click", (e) => {
     const btn = e.target.closest(".gender-btn");
     if (!btn) return;
-    setGender(btn.dataset.gender);
-    if (currentTranscript) startAnalysisFromTranscript(currentTranscript);
+    setAnalysisGender(btn.dataset.gender);
+    if (currentTranscript) startAnalysisFromTranscript(currentTranscript, btn.dataset.gender);
   });
 }
 
-function setGender(gender) {
+function setRecordingGender(gender) {
   selectedGender = gender;
-  // sync both gender groups
-  document.querySelectorAll(".gender-btn").forEach((b) => {
+  document.querySelectorAll("#genderGroup .gender-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.gender === gender);
+  });
+}
+
+function setAnalysisGender(gender) {
+  analysisGender = gender;
+  document.querySelectorAll("#genderRerun .gender-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.gender === gender);
   });
 }
@@ -211,6 +225,7 @@ async function startRecording() {
     liveTranscriptText = null;
     liveTranscriptParts = [];
     lastTranscribedChunkIndex = 0;
+    stopHandled = false;
     recordingStartTime = new Date();
 
     const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
@@ -231,6 +246,7 @@ async function startRecording() {
     const btn = document.getElementById("recordBtn");
     btn.textContent = "■ Aufnahme beenden";
     btn.classList.add("recording");
+    document.getElementById("nextPatientBtn").style.display = "";
     document.getElementById("recordTimer").classList.add("running");
     document.getElementById("recordHint").textContent =
       "Aufnahme läuft... Erneut klicken zum Beenden.";
@@ -263,9 +279,10 @@ function stopRecording() {
   const btn = document.getElementById("recordBtn");
   btn.textContent = "● Aufnahme starten";
   btn.classList.remove("recording");
+  document.getElementById("nextPatientBtn").style.display = "none";
   document.getElementById("recordTimer").classList.remove("running");
   document.getElementById("recordHint").textContent =
-    "Aufnahme beendet. Analyse wird gestartet...";
+    nextPatientPending ? "Analyse läuft... Neue Aufnahme startet danach automatisch." : "Aufnahme beendet. Analyse wird gestartet...";
 }
 
 async function runLiveTranscriptionLoop() {
@@ -312,6 +329,8 @@ async function transcribeLiveChunk() {
 }
 
 async function onRecordingStop() {
+  if (stopHandled) return;
+  stopHandled = true;
   audioBlob = new Blob(audioChunks, { type: "audio/webm" });
 
   // Wait for any in-progress live transcription to finish
@@ -433,6 +452,8 @@ async function startAnalysis() {
   document.getElementById("genderRerun").style.display = "none";
   document.getElementById("transcriptText").textContent = "";
   document.getElementById("analysisText").innerHTML = "";
+  document.getElementById("analysisText").style.display = "";
+  document.getElementById("abproCards").style.display = "none";
 
   const analysisEl = document.getElementById("analysisText");
   analysisEl.classList.add("streaming");
@@ -452,6 +473,7 @@ async function startAnalysis() {
 
     if (!response.ok) {
       showStatus(`Fehler: HTTP ${response.status}`, true);
+      nextPatientPending = false;
       return;
     }
 
@@ -486,14 +508,24 @@ async function startAnalysis() {
   if (analysisRaw) {
     finishAnalysis(analysisRaw, currentTranscript, mode, model, selectedGender);
     document.getElementById("genderRerun").style.display = "flex";
+    if (mode === "abpro") showAbproCards(analysisRaw);
   }
   hideStatus();
   analysisEl.classList.remove("streaming");
   analysisEl.classList.add("done");
   document.getElementById("analyzeBtn").disabled = false;
+
+  if (nextPatientPending && analysisRaw) {
+    nextPatientPending = false;
+    resetAll();
+    await startRecording();
+  } else {
+    nextPatientPending = false;
+  }
 }
 
-async function startAnalysisFromTranscript(transcript) {
+async function startAnalysisFromTranscript(transcript, gender = null) {
+  const useGender = gender !== null ? gender : selectedGender;
   const model = document.getElementById("modelSelect").value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
   document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
@@ -504,6 +536,8 @@ async function startAnalysisFromTranscript(transcript) {
   document.getElementById("analysisSection").style.display = "none";
   document.getElementById("analysisText").innerHTML = "";
   document.getElementById("analysisText").dataset.raw = "";
+  document.getElementById("analysisText").style.display = "";
+  document.getElementById("abproCards").style.display = "none";
 
   const analysisEl = document.getElementById("analysisText");
   analysisEl.classList.add("streaming");
@@ -513,7 +547,7 @@ async function startAnalysisFromTranscript(transcript) {
   formData.append("transcript", transcript);
   formData.append("model", model);
   formData.append("mode", mode);
-  formData.append("gender", selectedGender);
+  formData.append("gender", useGender);
 
   let analysisRaw = "";
 
@@ -521,6 +555,7 @@ async function startAnalysisFromTranscript(transcript) {
     const response = await fetch("/analyze-text", { method: "POST", body: formData });
     if (!response.ok) {
       showStatus(`Fehler: HTTP ${response.status}`, true);
+      nextPatientPending = false;
       return;
     }
 
@@ -550,13 +585,22 @@ async function startAnalysisFromTranscript(transcript) {
   }
 
   if (analysisRaw) {
-    finishAnalysis(analysisRaw, transcript, mode, model, selectedGender);
+    finishAnalysis(analysisRaw, transcript, mode, model, useGender);
     document.getElementById("genderRerun").style.display = "flex";
+    if (mode === "abpro") showAbproCards(analysisRaw);
   }
   hideStatus();
   analysisEl.classList.remove("streaming");
   analysisEl.classList.add("done");
   document.getElementById("analyzeBtn").disabled = false;
+
+  if (nextPatientPending && analysisRaw) {
+    nextPatientPending = false;
+    resetAll();
+    await startRecording();
+  } else {
+    nextPatientPending = false;
+  }
 }
 
 function handleSSE(evt) {
@@ -660,6 +704,8 @@ function resetAll() {
   const ae = document.getElementById("analysisText");
   ae.innerHTML = "";
   ae.dataset.raw = "";
+  ae.style.display = "";
+  document.getElementById("abproCards").style.display = "none";
 
   hideStatus();
   updateAnalyzeBtn();
@@ -674,6 +720,7 @@ function finishAnalysis(analysisRaw, transcript, mode, model, gender = "neutral"
   const entry = { id: Date.now(), timeStr, transcript, analysisRaw, mode, gender };
   analysisHistory.push(entry);
   addHistoryButton(entry, model);
+  setAnalysisGender(gender);
 }
 
 function addHistoryButton(entry, model) {
@@ -717,7 +764,7 @@ function restoreHistory(entry) {
   if (activeBtn) activeBtn.classList.add("active");
 
   currentTranscript = entry.transcript;
-  setGender(entry.gender || "neutral");
+  setAnalysisGender(entry.gender || "neutral");
 
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("transcriptSection").style.display = "block";
@@ -730,10 +777,17 @@ function restoreHistory(entry) {
   analysisEl.dataset.raw = entry.analysisRaw;
   analysisEl.classList.remove("streaming");
   analysisEl.classList.add("done");
-  try {
-    analysisEl.innerHTML = marked.parse(entry.analysisRaw);
-  } catch {
-    analysisEl.textContent = entry.analysisRaw;
+  if (entry.mode === "abpro") {
+    analysisEl.style.display = "none";
+    showAbproCards(entry.analysisRaw);
+  } else {
+    analysisEl.style.display = "";
+    document.getElementById("abproCards").style.display = "none";
+    try {
+      analysisEl.innerHTML = marked.parse(entry.analysisRaw);
+    } catch {
+      analysisEl.textContent = entry.analysisRaw;
+    }
   }
 }
 
@@ -757,5 +811,48 @@ function copySection(id, isMarkdown = false) {
         setTimeout(() => (b.textContent = orig), 1500);
       }
     });
+  });
+}
+
+// ============================================================
+// ABPRO-KARTEN
+// ============================================================
+function parseAbproSections(raw) {
+  const result = { A: "", B: "", PRO: "" };
+  const parts = raw.split(/^(?=A:|B:|PRO:)/m);
+  for (const part of parts) {
+    const m = part.match(/^(A|B|PRO):\s*([\s\S]*)/);
+    if (m) result[m[1]] = m[2].trim();
+  }
+  return result;
+}
+
+function showAbproCards(raw) {
+  const sections = parseAbproSections(raw);
+  const map = { A: "abproA", B: "abproB", PRO: "abproPro" };
+  for (const [key, id] of Object.entries(map)) {
+    const el = document.getElementById(id);
+    const text = sections[key];
+    el.dataset.raw = text;
+    try {
+      el.innerHTML = text ? marked.parse(text) : '<span class="abpro-empty">—</span>';
+    } catch {
+      el.textContent = text || "—";
+    }
+  }
+  document.getElementById("analysisText").style.display = "none";
+  document.getElementById("abproCards").style.display = "flex";
+}
+
+function copyAbproField(id) {
+  const el = document.getElementById(id);
+  const text = el.dataset.raw || el.textContent || "";
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector(`[onclick="copyAbproField('${id}')"]`);
+    if (!btn) return;
+    const svg = btn.querySelector("svg");
+    const origLabel = btn.lastChild?.textContent?.trim() || "Kopieren";
+    btn.lastChild.textContent = " ✓";
+    setTimeout(() => { btn.lastChild.textContent = " " + origLabel; }, 1500);
   });
 }
