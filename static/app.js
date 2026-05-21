@@ -183,7 +183,11 @@ function initGenderButtons() {
     const btn = e.target.closest(".gender-btn");
     if (!btn) return;
     setAnalysisGender(btn.dataset.gender);
-    if (currentTranscript) startAnalysisFromTranscript(currentTranscript, btn.dataset.gender);
+    if (currentTranscript) {
+      const activeBtn = document.querySelector(".history-btn.active");
+      const rerunId = activeBtn ? parseInt(activeBtn.dataset.id) : null;
+      startAnalysisFromTranscript(currentTranscript, btn.dataset.gender, rerunId);
+    }
   });
 }
 
@@ -250,6 +254,15 @@ async function startRecording() {
     document.getElementById("recordTimer").classList.add("running");
     document.getElementById("recordHint").textContent =
       "Aufnahme läuft... Erneut klicken zum Beenden.";
+    // Vorherige Analyse ausblenden – bleibt über History-Buttons abrufbar
+    document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
+    document.getElementById("analysisSection").style.display = "none";
+    document.getElementById("abproCards").style.display = "none";
+    document.getElementById("genderRerun").style.display = "none";
+    const prevAe = document.getElementById("analysisText");
+    prevAe.innerHTML = "";
+    prevAe.dataset.raw = "";
+
     // Live-Transkript-Bereich vorbereiten
     document.getElementById("emptyState").style.display = "none";
     document.getElementById("transcriptSection").style.display = "block";
@@ -524,7 +537,7 @@ async function startAnalysis() {
   }
 }
 
-async function startAnalysisFromTranscript(transcript, gender = null) {
+async function startAnalysisFromTranscript(transcript, gender = null, rerunId = null) {
   const useGender = gender !== null ? gender : selectedGender;
   const model = document.getElementById("modelSelect").value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
@@ -585,7 +598,7 @@ async function startAnalysisFromTranscript(transcript, gender = null) {
   }
 
   if (analysisRaw) {
-    finishAnalysis(analysisRaw, transcript, mode, model, useGender);
+    finishAnalysis(analysisRaw, transcript, mode, model, useGender, rerunId);
     document.getElementById("genderRerun").style.display = "flex";
     if (mode === "abpro") showAbproCards(analysisRaw);
   }
@@ -714,7 +727,19 @@ function resetAll() {
 // ============================================================
 // HISTORY
 // ============================================================
-function finishAnalysis(analysisRaw, transcript, mode, model, gender = "neutral") {
+function finishAnalysis(analysisRaw, transcript, mode, model, gender = "neutral", rerunId = null) {
+  if (rerunId !== null) {
+    const entry = analysisHistory.find(e => e.id === rerunId);
+    if (entry) {
+      entry.analysisRaw = analysisRaw;
+      entry.gender = gender;
+      entry.mode = mode;
+      setAnalysisGender(gender);
+      const existingBtn = document.querySelector(`.history-btn[data-id="${rerunId}"]`);
+      if (existingBtn) existingBtn.classList.add("active");
+      return;
+    }
+  }
   const time = recordingStartTime || new Date();
   const timeStr = time.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
   const entry = { id: Date.now(), timeStr, transcript, analysisRaw, mode, gender };
@@ -819,7 +844,9 @@ function copySection(id, isMarkdown = false) {
 // ============================================================
 function parseAbproSections(raw) {
   const result = { A: "", B: "", PRO: "" };
-  const parts = raw.split(/^(?=A:|B:|PRO:)/m);
+  // Normalize bold markdown headers (**A:** → A:) that LLMs sometimes emit
+  const normalized = raw.replace(/^\*+(A|B|PRO)\*+:/gm, "$1:");
+  const parts = normalized.split(/^(?=A:|B:|PRO:)/m);
   for (const part of parts) {
     const m = part.match(/^(A|B|PRO):\s*([\s\S]*)/);
     if (m) result[m[1]] = m[2].trim();
