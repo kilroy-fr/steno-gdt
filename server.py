@@ -12,13 +12,14 @@ import os
 import re
 import json
 from pathlib import Path
+from datetime import datetime
 import logging
 from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, SUMMARY_PROMPT
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.5.15"
+VERSION = "0.5.16"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -26,6 +27,9 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
+LOG_DIR = os.getenv("LOG_DIR", "/logs")
+
+logging_enabled = False
 
 # Only these model families are shown in the frontend dropdown.
 # Prefix-matched against model names returned by ollama.
@@ -35,7 +39,7 @@ MODEL_WHITELIST = [
     "phi4",
     "mistral-nemo",
     "deepseek-r1:14b",
-    "gemma4:26b",
+    "gemma4:",
     "llama3.1:",
     "meditron",
 ]
@@ -156,6 +160,26 @@ def _gender_context(gender: str) -> dict:
     return {"gender_instruction": "", "patient_label": "die Person"}
 
 
+def _save_log(transcript: str, analysis: str, mode: str, model: str, gender: str) -> None:
+    try:
+        log_dir = Path(LOG_DIR)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now()
+        filename = ts.strftime("%Y%m%d_%H%M%S") + f"_{mode}.json"
+        data = {
+            "timestamp": ts.isoformat(),
+            "mode": mode,
+            "model": model,
+            "gender": gender,
+            "transcript": transcript,
+            "analysis": analysis,
+        }
+        (log_dir / filename).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(f"Log saved: {filename}")
+    except Exception as e:
+        logger.error(f"Log save failed: {e}")
+
+
 async def transcribe_audio(audio_path: str, filename: str = "audio.webm") -> str:
     async with httpx.AsyncClient(timeout=300) as client:
         with open(audio_path, "rb") as f:
@@ -210,6 +234,20 @@ async def health():
     except Exception:
         pass
     return result
+
+
+@app.get("/logging-mode")
+async def get_logging_mode():
+    return {"enabled": logging_enabled}
+
+
+@app.post("/logging-mode")
+async def set_logging_mode(request: Request):
+    global logging_enabled
+    body = await request.json()
+    logging_enabled = bool(body.get("enabled", False))
+    logger.info(f"Logging mode set to: {logging_enabled}")
+    return {"enabled": logging_enabled}
 
 
 @app.post("/transcribe-only")
@@ -277,12 +315,22 @@ async def analyze(
                 prompt_template = CLEAN_PROMPT
             prompt = prompt_template.format(transcript=transcript, **_gender_context(gender))
 
+            analysis_tokens = []
             try:
                 async for chunk in _stream_llm(prompt, used_model):
                     yield chunk
+                    try:
+                        payload = json.loads(chunk[6:].strip())
+                        if payload.get("type") == "token":
+                            analysis_tokens.append(payload["text"])
+                    except Exception:
+                        pass
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'text': f'KI-Fehler: {e}'})}\n\n"
                 return
+
+            if logging_enabled and analysis_tokens:
+                _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender)
 
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
@@ -321,12 +369,23 @@ async def analyze_text(
             return
 
         yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
+        analysis_tokens = []
         try:
             async for chunk in _stream_llm(prompt, used_model):
                 yield chunk
+                try:
+                    payload = json.loads(chunk[6:].strip())
+                    if payload.get("type") == "token":
+                        analysis_tokens.append(payload["text"])
+                except Exception:
+                    pass
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'text': f'KI-Fehler: {e}'})}\n\n"
             return
+
+        if logging_enabled and analysis_tokens:
+            _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender)
+
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

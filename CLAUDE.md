@@ -31,7 +31,7 @@ Windows-PC ──► diktat_gui.exe ──► http://transcribe.domain.local/tra
 ```
 ki-transcribe/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
-├── prompts.py                 # LLM-Prompts: ANALYZE_PROMPT, SUMMARY_PROMPT, CLEAN_PROMPT
+├── prompts.py                 # LLM-Prompts: ANALYZE_PROMPT, ABPRO_PROMPT, SUMMARY_PROMPT, SUBJECT_PROMPT, CLEAN_PROMPT
 ├── diktat_gui.py              # Windows-GUI-Client (Diktat)
 ├── benchmark_summary.py       # Speed-Benchmark: SUMMARY_PROMPT gegen alle Whitelist-Modelle
 ├── Dockerfile                 # Docker-Image für server.py
@@ -61,21 +61,28 @@ ki-transcribe/
 | GET | `/health` | Status whisper + ollama (inkl. `version`) |
 | GET | `/models` | Liste erlaubter ollama-Modelle (gefiltert per `MODEL_WHITELIST`) |
 | POST | `/transcribe-only` | Nur Transkription via faster-whisper |
-| POST | `/analyze` | Transkription + LLM (SSE-Stream), Parameter: `model`, `mode` |
+| POST | `/analyze` | Transkription + LLM (SSE-Stream), Parameter: `model`, `mode`, `gender` |
+| POST | `/analyze-text` | LLM-Analyse eines vorhandenen Transkripts – kein Whisper-Schritt, SSE-Stream |
+| POST | `/subject` | Betreffzeile (max. 100 Zeichen) für ein Transkript per LLM generieren |
 
-**`/analyze` SSE-Event-Typen:** `status`, `transcript`, `token`, `error`, `done`
+**`/analyze` und `/analyze-text` SSE-Event-Typen:** `status`, `transcript`, `token`, `error`, `done`
 
-**`/analyze` Modi (`mode`-Parameter):**
+**Modi (`mode`-Parameter) für `/analyze` und `/analyze-text`:**
 
 | Wert | Prompt | Beschreibung |
 |------|--------|--------------|
 | `analyze` | `ANALYZE_PROMPT` | Strukturierte Arzt-Dokumentation (Anamnese, Diagnose, …) |
+| `abpro` | `ABPRO_PROMPT` | Kompakte Dokumentation im Telegrammstil (A/B/PRO-Schema) |
 | `summary` | `SUMMARY_PROMPT` | Kurze, allgemeinverständliche Zusammenfassung; Themen durch Leerzeile getrennt |
 | `clean` | `CLEAN_PROMPT` | Transkript bereinigen (Füllwörter entfernen, Fehler korrigieren) |
 
+**`gender`-Parameter** (`neutral` / `male` / `female`): Steuert Patientenbezeichnung im LLM-Output (`_gender_context()` in `server.py`).
+
 **LLM-Prompts** sind zentral in `prompts.py` definiert und werden von `server.py` und `benchmark_summary.py` gleichlautend verwendet.
 
-**`MODEL_WHITELIST`** in `server.py`: Nur Modelle mit passendem Präfix werden im Frontend-Dropdown angezeigt (z. B. `qwen3:`, `phi4`, `mistral-nemo`).
+**`MODEL_WHITELIST`** in `server.py`: Nur Modelle mit passendem Präfix werden im Frontend-Dropdown angezeigt (`qwen3:`, `qwen2.5:`, `phi4`, `mistral-nemo`, `deepseek-r1:14b`, `gemma4:26b`, `llama3.1:`, `meditron`).
+
+**`WHISPER_HALLUCINATIONS`** in `server.py`: Set bekannter Whisper-Halluzinationen (z. B. „Vielen Dank.", Musikzeichen) — werden in `/transcribe-only` und `/analyze` unterdrückt.
 
 **`ThinkingFilter`** in `server.py`: Filtert `<think>…</think>`-Blöcke aus dem SSE-Stream (für Reasoning-Modelle wie qwen3).
 

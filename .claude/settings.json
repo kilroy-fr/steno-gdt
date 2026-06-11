@@ -27,7 +27,15 @@
       "Bash(cat .bumpversion.cfg)",
       "Bash(cat setup.cfg)",
       "Bash(cat .bumpversion.toml)",
-      "Bash(git fetch *)"
+      "Bash(git fetch *)",
+      "Bash(ollama pull *)",
+      "Bash(Start-Sleep -Seconds 5)",
+      "Bash(Get-Content \"C:\\\\Users\\\\JAN~1.DOM\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-Jan-DOMAIN-ki-transcribe\\\\e6e1f5c2-487a-4ce4-aa73-f3f383508b46\\\\tasks\\\\b85utigwe.output\" -Tail 5)",
+      "Bash(git -C \"c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\" status)",
+      "Bash(git -C \"c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\" diff)",
+      "Bash(git -C \"c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\" log --oneline -5)",
+      "Bash(git -C \"c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\" add CLAUDE.md README.md docker-compose.yml server.py static/app.js static/style.css templates/index.html .claude/settings.json)",
+      "Bash(git -C 'c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe' commit -m ' *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Jan.DOMAIN\\ki-transcribe\\build"

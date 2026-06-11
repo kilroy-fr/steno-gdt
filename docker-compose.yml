@@ -17,11 +17,13 @@ services:
       - OLLAMA_PORT=11434
       - OLLAMA_MODEL=qwen3:14b
       - WHISPER_LANGUAGE=de
+      - LOG_DIR=/logs
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
       - ./server.py:/app/server.py:ro
       - ./templates:/app/templates:ro
       - ./static:/app/static:ro
+      - ./logs:/logs
     depends_on:
       - faster-whisper
     networks:

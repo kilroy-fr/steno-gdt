@@ -7,7 +7,7 @@
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v={{ version }}">
 </head>
 <body>
 
@@ -257,6 +257,16 @@
           <label for="micSelect">Mikrofon</label>
           <select id="micSelect" class="btn settings-select"></select>
         </div>
+        <div class="settings-row settings-toggle-row">
+          <label>Logging-Modus</label>
+          <div class="toggle-wrapper">
+            <span id="loggingStatus" class="toggle-status">Aus</span>
+            <label class="toggle-switch" title="Transkripte und Analysen in /logs speichern">
+              <input type="checkbox" id="loggingToggle">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -272,7 +282,7 @@
   </script>
   <!-- marked.js für Markdown-Rendering -->
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v={{ version }}"></script>
 
 </body>
 </html>

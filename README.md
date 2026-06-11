@@ -10,7 +10,9 @@ Lokales Transkriptions- und Diktiersystem für medizinische Dokumentation. Beste
 - Vollständige Transkription via faster-whisper (GPU)
 - KI-gestützte Analyse des Arzt-Patienten-Gesprächs (ollama LLM)
 - Strukturierte Ausgabe: Zusammenfassung, Anamnese, Diagnosen, Maßnahmen
-- Alternative: Bereinigungsmodus (entfernt Füllwörter)
+- Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO), Zusammenfassung, Bereinigung
+- Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe
+- Automatische Betreffzeile per KI
 - Live-Streaming der LLM-Antwort (SSE)
 
 ### 🎙️ Windows-Client: Diktat
@@ -66,9 +68,8 @@ docker-compose up -d
 # Status prüfen
 curl http://localhost:8000/
 
-# Health-Checks
-curl http://localhost:8000/health/whisper
-curl http://localhost:8000/health/ollama
+# Health-Check (whisper + ollama + version)
+curl http://localhost:8000/health
 ```
 
 ---
@@ -109,10 +110,11 @@ Beim ersten Start öffnet sich automatisch ein Dialog zur Eingabe der Server-URL
 
 1. Browser öffnen → Server-URL aufrufen
 2. Audio-Datei hochladen oder direkt im Browser aufnehmen
-3. Modus wählen: **Analysieren** (strukturierte Auswertung) oder **Bereinigen** (nur Füllwörter entfernen)
-4. LLM-Modell wählen (falls mehrere verfügbar)
-5. Verarbeitung startet → Transkript und Analyse erscheinen live
-6. Text kopieren oder weiterverarbeiten
+3. Modus wählen: **Analysieren**, **Kompakt (A/B/PRO)**, **Zusammenfassung** oder **Bereinigen**
+4. Geschlecht wählen (Patient / Patientin / neutral)
+5. LLM-Modell wählen (falls mehrere verfügbar)
+6. Verarbeitung startet → Transkript und Analyse erscheinen live
+7. Text kopieren oder weiterverarbeiten
 
 #### Diktat-Client (Windows-GUI)
 
@@ -250,7 +252,7 @@ curl http://localhost:11434/api/tags
 
 ### Problem: "Text-Säuberung zu aggressiv/schwach"
 
-Bearbeite in `server.py` die Konstante `CLEAN_PROMPT` (ca. Zeile 63):
+Bearbeite in `prompts.py` die Konstante `CLEAN_PROMPT`:
 
 ```python
 CLEAN_PROMPT = """Bereinige das folgende medizinische Transkript:
@@ -318,7 +320,9 @@ Verknüpfung in Windows-Autostart-Ordner (`Win+R` → `shell:startup`) ablegen.
 ```
 ki-transcribe/
 ├── server.py                  # FastAPI Server (Web-UI + API)
+├── prompts.py                 # LLM-Prompts (ANALYZE, ABPRO, SUMMARY, SUBJECT, CLEAN)
 ├── diktat_gui.py              # Windows-GUI-Client (Diktat)
+├── benchmark_summary.py       # Speed-Benchmark: Prompts gegen alle Whitelist-Modelle
 ├── Dockerfile                 # Docker-Build für server.py
 ├── docker-compose.yml         # Docker-Setup
 ├── requirements-client.txt    # Client-Python-Dependencies
@@ -390,20 +394,24 @@ docker exec -it diktat-api bash
 
 ## 📝 Changelog
 
-### Version 0.1.1 (aktuell)
+### Version 0.5.x (aktuell)
+- Neuer Modus **Kompakt (A/B/PRO)** (`abpro`) für Telegrammstil-Dokumentation
+- Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Output
+- Automatische KI-Betreffzeile (`/subject`-Endpoint)
+- Endpoint `/analyze-text`: LLM-Analyse ohne Whisper-Schritt (Direkteingabe)
+- Unterdrückung bekannter Whisper-Halluzinationen (Stille-Artefakte)
+- Alle LLM-Prompts in separater `prompts.py`
+- `benchmark_summary.py` für Modell-Benchmarks
+
+### Version 0.1.x
 - Web-UI: Gesprächsanalyse mit LLM-Streaming (SSE)
 - Web-UI: Modellauswahl im Browser
 - Diktat-Client: Config-Dialog beim ersten Start
 - Diktat-Client: Konfiguration über Menü änderbar
-
-### Version 0.1.0
 - FastAPI-Server mit Jinja2-Templates und Static Files
 - faster-whisper Transkription (GPU)
 - ollama LLM-Analyse (Streaming)
 - Windows-GUI-Client (Diktat-Modus)
-- Tkinter-basierte GUI-Anwendung
-- Editierbares Ergebnisfenster
-- Roh-Transkript-Speicherung
 - Windows-Installer via PyInstaller + Inno Setup
 
 ### Version 1.0 (Legacy)

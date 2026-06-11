@@ -61,6 +61,26 @@ function initSettings() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") overlay.style.display = "none";
   });
+
+  // Logging-Toggle: initialen Zustand vom Server laden
+  fetch("/logging-mode").then(r => r.json()).then(data => {
+    const toggle = document.getElementById("loggingToggle");
+    toggle.checked = data.enabled;
+    document.getElementById("loggingStatus").textContent = data.enabled ? "An" : "Aus";
+  }).catch(() => {});
+
+  document.getElementById("loggingToggle").addEventListener("change", (e) => {
+    const enabled = e.target.checked;
+    document.getElementById("loggingStatus").textContent = enabled ? "An" : "Aus";
+    fetch("/logging-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    }).catch(() => {
+      e.target.checked = !enabled;
+      document.getElementById("loggingStatus").textContent = enabled ? "Aus" : "An";
+    });
+  });
 }
 
 // ============================================================
