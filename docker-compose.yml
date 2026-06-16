@@ -17,6 +17,7 @@ services:
       - OLLAMA_PORT=11434
       - OLLAMA_MODEL=qwen3:14b
       - WHISPER_LANGUAGE=de
+      - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
       - LOG_DIR=/logs
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
@@ -51,6 +52,7 @@ services:
       - WHISPER__MODEL=large-v3
       - WHISPER__INFERENCE_DEVICE=cuda
       - WHISPER__COMPUTE_TYPE=float16
+      - WHISPER__ALLOW_DOWNLOADS=true
       - TZ=Europe/Berlin
     volumes:
       - whisper-models:/root/.cache/huggingface

@@ -19,7 +19,7 @@ from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.5.18"
+VERSION = "0.5.19"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -27,6 +27,7 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
+WHISPER_MEDICAL_MODEL = os.getenv("WHISPER_MEDICAL_MODEL", "jimmymeister/whisper-large-v3-turbo-german-ct2")
 LOG_DIR = os.getenv("LOG_DIR", "/logs")
 
 logging_enabled = False
@@ -180,15 +181,19 @@ def _save_log(transcript: str, analysis: str, mode: str, model: str, gender: str
         logger.error(f"Log save failed: {e}")
 
 
-async def transcribe_audio(audio_path: str, filename: str = "audio.webm") -> str:
+async def transcribe_audio(audio_path: str, filename: str = "audio.webm", lang_mode: str = "de") -> str:
     async with httpx.AsyncClient(timeout=300) as client:
         with open(audio_path, "rb") as f:
             ext = Path(filename).suffix.lower() or ".webm"
             mime = "audio/webm" if ext == ".webm" else "audio/mpeg" if ext == ".mp3" else "audio/wav"
+            data: dict = {"response_format": "text"}
+            if lang_mode == "de":
+                data["model"] = WHISPER_MEDICAL_MODEL
+                data["language"] = WHISPER_LANGUAGE
             response = await client.post(
                 f"http://{WHISPER_HOST}:{WHISPER_PORT}/v1/audio/transcriptions",
                 files={"file": (filename, f, mime)},
-                data={"language": WHISPER_LANGUAGE, "response_format": "text"},
+                data=data,
             )
     if response.status_code != 200:
         raise HTTPException(
@@ -251,14 +256,14 @@ async def set_logging_mode(request: Request):
 
 
 @app.post("/transcribe-only")
-async def transcribe_only(audio: UploadFile = File(...)):
+async def transcribe_only(audio: UploadFile = File(...), lang_mode: str = Form(default="de")):
     """Nur Transkription ohne LLM-Verarbeitung."""
     ext = Path(audio.filename or "audio.webm").suffix or ".webm"
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
         tmp.write(await audio.read())
         tmp_path = tmp.name
     try:
-        transcript = await transcribe_audio(tmp_path, audio.filename or "audio.webm")
+        transcript = await transcribe_audio(tmp_path, audio.filename or "audio.webm", lang_mode)
         if _is_hallucination(transcript):
             transcript = ""
         return {"transcript": transcript}
@@ -277,6 +282,7 @@ async def analyze(
     model: str = Form(default=None),
     mode: str = Form(default="analyze"),
     gender: str = Form(default="neutral"),
+    lang_mode: str = Form(default="de"),
 ):
     """Transkription + LLM-Analyse als SSE-Stream."""
     used_model = model or OLLAMA_MODEL
@@ -289,10 +295,11 @@ async def analyze(
 
     async def event_stream():
         try:
-            yield f"data: {json.dumps({'type': 'status', 'text': 'Transkribiere Audio...'})}\n\n"
+            model_label = "DE-Medizin" if lang_mode == "de" else "Sprache Auto"
+            yield f"data: {json.dumps({'type': 'status', 'text': f'Transkribiere Audio ({model_label})...'})}\n\n"
 
             try:
-                transcript = await transcribe_audio(tmp_path, original_name)
+                transcript = await transcribe_audio(tmp_path, original_name, lang_mode)
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
                 return

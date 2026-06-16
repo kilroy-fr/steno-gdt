@@ -86,6 +86,8 @@ ki-transcribe/
 
 **`ThinkingFilter`** in `server.py`: Filtert `<think>…</think>`-Blöcke aus dem SSE-Stream (für Reasoning-Modelle wie qwen3).
 
+**Sprachmodell-Auswahl:** `transcribe_audio()` akzeptiert `lang_mode` (`"de"` / `"auto"`). Bei `"de"` wird `WHISPER_MEDICAL_MODEL` mit `language=de` verwendet; bei `"auto"` läuft das Standard-Modell mit automatischer Spracherkennung. Das Frontend zeigt einen Toggle „Gespräch nicht auf Deutsch" am Ende der Audio-Sektion.
+
 ---
 
 ## Konfiguration (Umgebungsvariablen)
@@ -97,7 +99,14 @@ ki-transcribe/
 | `OLLAMA_HOST` | `ollama` | Hostname des ollama-Containers |
 | `OLLAMA_PORT` | `11434` | Port |
 | `OLLAMA_MODEL` | `qwen3:8b` | Standard-Modell |
-| `WHISPER_LANGUAGE` | `de` | Sprache für Transkription |
+| `WHISPER_LANGUAGE` | `de` | Sprache für Transkription (bei `lang_mode=de`) |
+| `WHISPER_MEDICAL_MODEL` | `jimmymeister/whisper-large-v3-turbo-german-ct2` | Whisper-Modell für deutsche Aufnahmen |
+
+**Whisper-Container-Variable** (in `docker-compose.yml` unter `faster-whisper`):
+
+| Variable | Default | Beschreibung |
+|----------|---------|--------------|
+| `WHISPER__ALLOW_DOWNLOADS` | `false` | Muss `true` sein, damit On-Demand-Modelle geladen werden |
 
 ---
 

@@ -341,6 +341,7 @@ async function transcribeLiveChunk() {
     const blob = new Blob(newChunks, { type: "audio/webm" });
     const formData = new FormData();
     formData.append("audio", blob, "chunk.webm");
+    formData.append("lang_mode", getLangMode());
 
     const r = await fetch("/transcribe-only", { method: "POST", body: formData });
     if (r.ok) {
@@ -378,6 +379,7 @@ async function onRecordingStop() {
     const tailBlob = new Blob(tailChunks, { type: "audio/webm" });
     const formData = new FormData();
     formData.append("audio", tailBlob, "chunk.webm");
+    formData.append("lang_mode", getLangMode());
     try {
       const r = await fetch("/transcribe-only", { method: "POST", body: formData });
       if (r.ok) {
@@ -457,6 +459,10 @@ function getActiveAudioBlob() {
   return uploadedFile || null;
 }
 
+function getLangMode() {
+  return document.getElementById("langAutoToggle")?.checked ? "auto" : "de";
+}
+
 // ============================================================
 // ANALYSE STARTEN
 // ============================================================
@@ -498,6 +504,7 @@ async function startAnalysis() {
   formData.append("model", model);
   formData.append("mode", mode);
   formData.append("gender", selectedGender);
+  formData.append("lang_mode", getLangMode());
 
   let analysisRaw = "";
 

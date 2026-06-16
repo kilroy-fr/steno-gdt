@@ -8,6 +8,8 @@ Lokales Transkriptions- und Diktiersystem für medizinische Dokumentation. Beste
 
 - Audio-Upload oder direkte Aufnahme im Browser
 - Vollständige Transkription via faster-whisper (GPU)
+- **Deutsches Medizin-Modell** (`jimmymeister/whisper-large-v3-turbo-german-ct2`) für bessere Fachbegriff-Erkennung
+- Sprachschalter im Frontend: „Gespräch nicht auf Deutsch" wechselt auf Standard-Modell mit Auto-Spracherkennung
 - KI-gestützte Analyse des Arzt-Patienten-Gesprächs (ollama LLM)
 - Strukturierte Ausgabe: Zusammenfassung, Anamnese, Diagnosen, Maßnahmen
 - Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO), Zusammenfassung, Bereinigung
@@ -153,8 +155,15 @@ Das Whisper-Modell wird im `faster-whisper` Container konfiguriert:
 ```yaml
 faster-whisper:
   environment:
-    - WHISPER__MODEL=large-v3  # tiny, base, small, medium, large-v3
+    - WHISPER__MODEL=large-v3          # Standard-Modell (Fallback / Auto-Sprache)
+    - WHISPER__ALLOW_DOWNLOADS=true    # Erlaubt Download zusätzlicher Modelle
+
+gespraech-web:
+  environment:
+    - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2  # Deutsches Medizin-Modell
 ```
+
+Das Medizin-Modell wird beim ersten deutschen Aufruf automatisch von HuggingFace heruntergeladen (~3 GB) und danach im Volume gecacht. Im Frontend schaltet „Gespräch nicht auf Deutsch" auf das Standard-Modell mit automatischer Spracherkennung zurück.
 
 ### Whisper-Modelle
 
@@ -394,7 +403,14 @@ docker exec -it diktat-api bash
 
 ## 📝 Changelog
 
-### Version 0.5.x (aktuell)
+### Version 0.6.1 (aktuell)
+- **Deutsches Medizin-Whisper-Modell** (`jimmymeister/whisper-large-v3-turbo-german-ct2`) für bessere Erkennung medizinischer Fachbegriffe
+- **Sprachschalter** im Frontend: „Gespräch nicht auf Deutsch" wechselt auf Standard-`large-v3` mit Auto-Spracherkennung
+- Neuer Env-Var `WHISPER_MEDICAL_MODEL` für konfigurierbares Medizin-Modell
+- `WHISPER__ALLOW_DOWNLOADS=true` im Whisper-Container für On-Demand-Modell-Download
+- Statusmeldung zeigt aktives Modell: „Transkribiere Audio (DE-Medizin)..." / „(Sprache Auto)..."
+
+### Version 0.5.x
 - Neuer Modus **Kompakt (A/B/PRO)** (`abpro`) für Telegrammstil-Dokumentation
 - Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Output
 - Automatische KI-Betreffzeile (`/subject`-Endpoint)
