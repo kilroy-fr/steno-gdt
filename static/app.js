@@ -41,7 +41,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.getElementById("analyzeBtn").addEventListener("click", startAnalysis);
   initUploadZone();
-  populateMicrophoneList();
+  requestMicPermissionOnLoad();
 });
 
 // ============================================================
@@ -86,6 +86,21 @@ function initSettings() {
 // ============================================================
 // MIKROFON-AUSWAHL
 // ============================================================
+async function requestMicPermissionOnLoad() {
+  if (!navigator.mediaDevices?.getUserMedia) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop());
+    await populateMicrophoneList();
+    const hint = document.getElementById("recordHint");
+    if (hint && hint.textContent.includes("beim ersten Klick")) {
+      hint.textContent = "Klicken um die Aufnahme zu starten.";
+    }
+  } catch {
+    // Berechtigung verweigert — wird beim ersten Klick erneut angefragt
+  }
+}
+
 async function populateMicrophoneList() {
   if (!navigator.mediaDevices?.enumerateDevices) return;
   const devices = await navigator.mediaDevices.enumerateDevices();
@@ -900,7 +915,9 @@ function showAbproCards(raw) {
 
 function copyAbproField(id) {
   const el = document.getElementById(id);
-  const text = el.dataset.raw || el.textContent || "";
+  const raw = el.dataset.raw || el.textContent || "";
+  const prefix = { abproA: "A:", abproB: "B:", abproPro: "PRO:" }[id] ?? "";
+  const text = prefix ? prefix + raw : raw;
   navigator.clipboard.writeText(text).then(() => {
     const btn = document.querySelector(`[onclick="copyAbproField('${id}')"]`);
     if (!btn) return;

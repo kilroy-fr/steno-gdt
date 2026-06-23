@@ -19,13 +19,13 @@ from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
 WHISPER_MEDICAL_MODEL = os.getenv("WHISPER_MEDICAL_MODEL", "jimmymeister/whisper-large-v3-turbo-german-ct2")
 LOG_DIR = os.getenv("LOG_DIR", "/logs")

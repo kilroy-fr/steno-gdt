@@ -1,8 +1,0 @@
-# KI-Transcribe Client Requirements
-# Für die GUI-Anwendung (diktat_gui.py)
-
-sounddevice>=0.4.6    # Audio-Aufnahme
-numpy>=1.24.0         # Audio-Verarbeitung
-scipy>=1.10.0         # WAV-Dateien
-requests>=2.31.0      # Server-Kommunikation
-pyperclip>=1.8.2      # Zwischenablage-Integration

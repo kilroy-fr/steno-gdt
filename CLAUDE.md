@@ -2,10 +2,7 @@
 
 ## Projektübersicht
 
-Medizinisches Transkriptions- und Diktiersystem, bestehend aus zwei unabhängigen Komponenten:
-
-1. **Web-App / FastAPI-Server** (`server.py`) — läuft als Docker-Container, bietet eine Browser-UI für Arzt-Patienten-Gesprächsanalyse sowie eine REST-API für Transkription und LLM-Analyse.
-2. **Windows-Desktop-Client** (`diktat_gui.py`) — tkinter-GUI für Live-Diktat, verteilt als standalone EXE per Windows-Installer.
+Medizinisches Transkriptions-System als Web-App / FastAPI-Server (`server.py`) — läuft als Docker-Container, bietet eine Browser-UI für Arzt-Patienten-Gesprächsanalyse sowie eine REST-API für Transkription und LLM-Analyse.
 
 ---
 
@@ -15,8 +12,6 @@ Medizinisches Transkriptions- und Diktiersystem, bestehend aus zwei unabhängige
 Browser ──► Caddy (Reverse Proxy) ──► gespraech-web (FastAPI, Port 8000)
                                            ├── faster-whisper (Transkription, GPU)
                                            └── ollama (LLM, externer Container)
-
-Windows-PC ──► diktat_gui.exe ──► http://transcribe.domain.local/transcribe-only
 ```
 
 **Netzwerke (Docker):**
@@ -32,23 +27,15 @@ Windows-PC ──► diktat_gui.exe ──► http://transcribe.domain.local/tra
 ki-transcribe/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
 ├── prompts.py                 # LLM-Prompts: ANALYZE_PROMPT, ABPRO_PROMPT, SUMMARY_PROMPT, SUBJECT_PROMPT, CLEAN_PROMPT
-├── diktat_gui.py              # Windows-GUI-Client (Diktat)
-├── benchmark_summary.py       # Speed-Benchmark: SUMMARY_PROMPT gegen alle Whitelist-Modelle
 ├── Dockerfile                 # Docker-Image für server.py
 ├── docker-compose.yml         # Docker-Setup (gespraech-web + faster-whisper)
 ├── requirements-server.txt    # Server-Python-Dependencies
-├── requirements-client.txt    # Client-Python-Dependencies (für EXE-Build)
 │
 ├── templates/index.html       # Jinja2-Template für Web-UI
 ├── static/                    # CSS, JS, SVG, logo.jpg für Web-UI
 │
-├── diktat_gui.spec            # PyInstaller-Config für EXE-Build
-├── installer.iss              # Inno Setup Script für Windows-Installer
-├── build_installer.bat        # One-Click Build: EXE + Installer
-│
 ├── README.md                  # Hauptdokumentation
-├── QUICKSTART.md              # Schnellstart
-└── BUILD_README.md            # Build-Anleitung für Windows-Installer
+└── QUICKSTART.md              # Schnellstart
 ```
 
 ---
@@ -78,7 +65,7 @@ ki-transcribe/
 
 **`gender`-Parameter** (`neutral` / `male` / `female`): Steuert Patientenbezeichnung im LLM-Output (`_gender_context()` in `server.py`).
 
-**LLM-Prompts** sind zentral in `prompts.py` definiert und werden von `server.py` und `benchmark_summary.py` gleichlautend verwendet.
+**LLM-Prompts** sind zentral in `prompts.py` definiert und werden von `server.py` verwendet.
 
 **`MODEL_WHITELIST`** in `server.py`: Nur Modelle mit passendem Präfix werden im Frontend-Dropdown angezeigt (`qwen3:`, `qwen2.5:`, `phi4`, `mistral-nemo`, `deepseek-r1:14b`, `gemma4:26b`, `llama3.1:`, `meditron`).
 
@@ -128,33 +115,7 @@ docker-compose logs -f gespraech-web
 
 ---
 
-## Windows-Client bauen (EXE + Installer)
-
-Voraussetzungen: Python 3.8+, Inno Setup 6.x
-
-```cmd
-# One-Click Build (aus dem Repo-Root)
-build_installer.bat
-```
-
-Manuell:
-```cmd
-pip install pyinstaller
-pip install -r requirements-client.txt
-pyinstaller diktat_gui.spec --clean
-iscc installer.iss
-```
-
-**Output:**
-- `dist\KI-Transcribe-Pro\KI-Transcribe-Pro.exe` — standalone EXE
-- `Output\KI-Transcribe-Installer.exe` — Windows-Installer (keine Admin-Rechte nötig)
-
-**Client-Konfiguration** wird beim ersten Start via Dialog abgefragt und in `%APPDATA%\KI-Transcribe-Pro\config.json` gespeichert. Änderbar über Menü → Einstellungen → Server-URL.
-
----
-
 ## Wichtige Hinweise
 
-- **Diktat-Client vs. Web-UI sind unabhängig:** Der Windows-Client (`diktat_gui.py`) sendet Audio direkt an den Endpunkt `/transcribe-only` des Servers. Die Web-UI (`/`) ist ein separates Interface für ausführlichere Gesprächsanalyse mit LLM.
 - **Ollama ist external:** Der ollama-Container wird nicht in dieser `docker-compose.yml` definiert — er muss bereits laufen und mit `ollama-net` verbunden sein.
 - **GPU erforderlich für faster-whisper:** Der Container nutzt `runtime: nvidia`. Ohne GPU muss das Image auf `latest-cpu` geändert werden.

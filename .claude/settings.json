@@ -35,7 +35,23 @@
       "Bash(git -C \"c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\" diff)",
       "Bash(git -C \"c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\" log --oneline -5)",
       "Bash(git -C \"c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\" add CLAUDE.md README.md docker-compose.yml server.py static/app.js static/style.css templates/index.html .claude/settings.json)",
-      "Bash(git -C 'c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe' commit -m ' *)"
+      "Bash(git -C 'c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe' commit -m ' *)",
+      "Bash(git -C \"c:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\" push)",
+      "PowerShell(docker exec diktat-whisper ls /root/.cache/huggingface/hub/models--primeline--whisper-large-v3-turbo-german/snapshots/9e7012dad9247f07553aac8a99c4d50ad7c3d36d/)",
+      "WebSearch",
+      "PowerShell(docker exec diktat-whisper rm -rf /root/.cache/huggingface/hub/models--primeline--whisper-large-v3-turbo-german)",
+      "PowerShell(docker compose -f C:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\\\\docker-compose.yml up -d gespraech-web)",
+      "PowerShell(docker compose -f C:\\\\Users\\\\Jan.DOMAIN\\\\ki-transcribe\\\\docker-compose.yml up -d faster-whisper)",
+      "PowerShell(docker exec diktat-whisper cat /root/faster-whisper-server/faster_whisper_server/model_manager.py)",
+      "PowerShell(docker exec diktat-whisper python3 -c \"import huggingface_hub; print\\(huggingface_hub.constants.HF_HUB_OFFLINE\\); import os; print\\(os.environ.get\\('HF_HUB_OFFLINE', 'NOT SET'\\)\\)\")",
+      "PowerShell(docker exec diktat-whisper /root/faster-whisper-server/.venv/bin/python3 -c \"import huggingface_hub; print\\('HF_HUB_OFFLINE:', huggingface_hub.constants.HF_HUB_OFFLINE\\)\")",
+      "PowerShell(docker exec diktat-whisper /root/faster-whisper-server/.venv/bin/python3 -c \"from huggingface_hub import _cache_manager; print\\(dir\\(\\)\\)\" 2>&1)",
+      "PowerShell(docker exec diktat-whisper /root/faster-whisper-server/.venv/bin/python3 -c \"import huggingface_hub.file_download as fd; import inspect; src = inspect.getsource\\(fd.cached_download\\) if hasattr\\(fd,'cached_download'\\) else 'n/a'; print\\(src[:500]\\)\" 2>&1)",
+      "PowerShell(docker exec diktat-whisper cat /root/faster-whisper-server/faster_whisper_server/config.py)",
+      "PowerShell(docker exec diktat-whisper sed -n '100,140p' /root/faster-whisper-server/.venv/lib/python3.12/site-packages/faster_whisper/utils.py)",
+      "PowerShell(docker exec diktat-whisper grep -n \"local_files_only\\\\|HF_HUB_OFFLINE\\\\|outgoing\" /root/faster-whisper-server/.venv/lib/python3.12/site-packages/huggingface_hub/_snapshot_download.py)",
+      "PowerShell(head -40)",
+      "PowerShell(docker exec diktat-whisper sed -n '145,230p' /root/faster-whisper-server/.venv/lib/python3.12/site-packages/huggingface_hub/_snapshot_download.py)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Jan.DOMAIN\\ki-transcribe\\build"

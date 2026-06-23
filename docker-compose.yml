@@ -15,7 +15,7 @@ services:
       - WHISPER_PORT=8000
       - OLLAMA_HOST=ollama
       - OLLAMA_PORT=11434
-      - OLLAMA_MODEL=qwen3:14b
+      - OLLAMA_MODEL=gemma4:12b
       - WHISPER_LANGUAGE=de
       - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
       - LOG_DIR=/logs
@@ -41,6 +41,8 @@ services:
     container_name: diktat-whisper
     expose:
       - "8000"
+    ports:
+      - "127.0.0.1:8001:8000"
     deploy:
       resources:
         reservations:

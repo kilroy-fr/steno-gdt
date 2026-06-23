@@ -1,6 +1,7 @@
 ANALYZE_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
 {gender_instruction}
 Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs und erstelle eine strukturierte Zusammenfassung für den Arzt. Halte dich ausschließlich an die Inhalte des Transkripts – keine Annahmen, keine Ergänzungen.
+WICHTIG: Wenn ein Begriff im Transkript unklar, unverständlich oder phonetisch verzerrt wirkt, schreibe ihn exakt so ab oder markiere ihn als [unverständlich]. Erfinde unter keinen Umständen Wörter, Fachbegriffe, Produktnamen oder Medikamente.
 
 **Transkript:**
 {transcript}
@@ -31,7 +32,7 @@ Antworte vollständig auf Deutsch."""
 
 ABPRO_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
 {gender_instruction}
-Analysiere das folgende Transkript. Nur Transkript-Inhalte – keine Annahmen, keine Ergänzungen. Antwort auf Deutsch.
+Analysiere das folgende Transkript. Nur Transkript-Inhalte – keine Annahmen, keine Ergänzungen. Erfinde keine Wörter, Fachbegriffe oder Medikamente – unklare Stellen als [unverständlich] markieren. Antwort auf Deutsch.
 
 **Transkript:**
 {transcript}
