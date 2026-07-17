@@ -113,11 +113,13 @@ async function populateMicrophoneList() {
 
   // Labels leer? (Noch keine Permission) → nicht anzeigen
   const hasLabels = mics.some(d => d.label);
+  const previousValue = select.value;
   select.innerHTML = mics.map((d, i) => {
     const label = d.label || `Mikrofon ${i + 1}`;
     const short = label.length > 45 ? label.slice(0, 43) + "…" : label;
     return `<option value="${d.deviceId}" title="${label}">${short}</option>`;
   }).join("");
+  if (previousValue) select.value = previousValue;
 
   row.style.display = hasLabels ? "flex" : "none";
 }
@@ -301,8 +303,9 @@ async function startRecording() {
     // Live-Transkript-Bereich vorbereiten
     document.getElementById("emptyState").style.display = "none";
     document.getElementById("transcriptSection").style.display = "block";
-    document.getElementById("transcriptText").textContent =
-      "Transkription beginnt nach 30 Sekunden...";
+    const transcriptTextEl = document.getElementById("transcriptText");
+    transcriptTextEl.classList.remove("streaming");
+    transcriptTextEl.textContent = "Transkription beginnt nach 30 Sekunden...";
 
     // Timer
     timerSeconds = 0;
@@ -382,33 +385,9 @@ async function onRecordingStop() {
   stopHandled = true;
   audioBlob = new Blob(audioChunks, { type: "audio/webm" });
 
-  // Wait for any in-progress live transcription to finish
+  // Wait for any in-progress live transcription to finish before reading audioChunks
   while (isTranscribingLive) {
     await new Promise(r => setTimeout(r, 200));
-  }
-
-  // Transcribe remaining tail (chunks not yet covered by live transcription)
-  if (lastTranscribedChunkIndex > 0 && lastTranscribedChunkIndex < audioChunks.length) {
-    document.getElementById("recordHint").textContent = "Transkribiere verbleibende Aufnahme...";
-    const tailChunks = [audioChunks[0], ...audioChunks.slice(lastTranscribedChunkIndex)];
-    const tailBlob = new Blob(tailChunks, { type: "audio/webm" });
-    const formData = new FormData();
-    formData.append("audio", tailBlob, "chunk.webm");
-    formData.append("lang_mode", getLangMode());
-    try {
-      const r = await fetch("/transcribe-only", { method: "POST", body: formData });
-      if (r.ok) {
-        const data = await r.json();
-        const text = (data.transcript || "").trim();
-        if (text) {
-          liveTranscriptParts.push(text);
-          liveTranscriptText = liveTranscriptParts.join(" ");
-          document.getElementById("transcriptText").textContent = liveTranscriptText;
-        }
-      }
-    } catch (e) {
-      console.warn("Rest-Transkription fehlgeschlagen:", e);
-    }
   }
 
   startAnalysis();
@@ -482,16 +461,13 @@ function getLangMode() {
 // ANALYSE STARTEN
 // ============================================================
 async function startAnalysis() {
-  // Wenn ein Live-Transkript aus der Aufnahme vorliegt, Whisper-Schritt überspringen
-  const activeTab = document.querySelector(".tab-button.active").dataset.tab;
-  if (activeTab === "record" && liveTranscriptText) {
-    await startAnalysisFromTranscript(liveTranscriptText);
-    return;
-  }
-
+  // Das Live-Transkript dient nur als Vorschau während der Aufnahme; für die
+  // eigentliche Analyse wird die komplette Aufnahme in einem Stück transkribiert,
+  // damit Whisper durchgehenden Kontext hat (weniger Segmentgrenzen-Halluzinationen).
   const blob = getActiveAudioBlob();
   if (!blob) return;
 
+  const activeTab = document.querySelector(".tab-button.active").dataset.tab;
   const model = document.getElementById("modelSelect").value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
   if (activeTab !== "record") recordingStartTime = new Date();
@@ -501,10 +477,18 @@ async function startAnalysis() {
   showStatus("Sende Audio...");
   document.getElementById("analyzeBtn").disabled = true;
   document.getElementById("emptyState").style.display = "none";
-  document.getElementById("transcriptSection").style.display = "none";
   document.getElementById("analysisSection").style.display = "none";
   document.getElementById("genderRerun").style.display = "none";
-  document.getElementById("transcriptText").textContent = "";
+  // Live-Vorschau-Transkript sichtbar lassen (blinkender Cursor), bis das fertige
+  // Transkript aus /analyze eintrifft und es ersetzt (siehe handleSSE "transcript")
+  const transcriptTextEl = document.getElementById("transcriptText");
+  if (liveTranscriptText) {
+    document.getElementById("transcriptSection").style.display = "block";
+    transcriptTextEl.classList.add("streaming");
+  } else {
+    document.getElementById("transcriptSection").style.display = "none";
+    transcriptTextEl.textContent = "";
+  }
   document.getElementById("analysisText").innerHTML = "";
   document.getElementById("analysisText").style.display = "";
   document.getElementById("abproCards").style.display = "none";
@@ -527,6 +511,7 @@ async function startAnalysis() {
     const response = await fetch("/analyze", { method: "POST", body: formData });
 
     if (!response.ok) {
+      document.getElementById("transcriptText").classList.remove("streaming");
       showStatus(`Fehler: HTTP ${response.status}`, true);
       nextPatientPending = false;
       return;
@@ -556,6 +541,7 @@ async function startAnalysis() {
       }
     }
   } catch (e) {
+    document.getElementById("transcriptText").classList.remove("streaming");
     showStatus(`Verbindungsfehler: ${e.message}`, true);
   }
 
@@ -670,6 +656,7 @@ function handleSSE(evt) {
     case "transcript":
       currentTranscript = evt.text;
       document.getElementById("transcriptSection").style.display = "block";
+      transcriptEl.classList.remove("streaming");
       transcriptEl.textContent = evt.text;
       break;
 
@@ -688,6 +675,7 @@ function handleSSE(evt) {
       break;
 
     case "error":
+      transcriptEl.classList.remove("streaming");
       showStatus(evt.text, true);
       break;
 

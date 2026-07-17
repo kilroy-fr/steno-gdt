@@ -1,6 +1,6 @@
 # KI-Transcribe Pro
 
-Lokales Transkriptions- und Diktiersystem für medizinische Dokumentation. Bestehend aus einem Docker-basierten FastAPI-Server mit Browser-UI für Gesprächsanalyse sowie einem Windows-Desktop-Client für Direktdiktat.
+Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter FastAPI-Server mit Browser-UI: Audio aufnehmen oder hochladen, per faster-whisper transkribieren und per ollama-LLM strukturiert dokumentieren.
 
 ## 🎯 Features
 
@@ -11,126 +11,73 @@ Lokales Transkriptions- und Diktiersystem für medizinische Dokumentation. Beste
 - **Deutsches Medizin-Modell** (`jimmymeister/whisper-large-v3-turbo-german-ct2`) für bessere Fachbegriff-Erkennung
 - Sprachschalter im Frontend: „Gespräch nicht auf Deutsch" wechselt auf Standard-Modell mit Auto-Spracherkennung
 - KI-gestützte Analyse des Arzt-Patienten-Gesprächs (ollama LLM)
-- Strukturierte Ausgabe: Zusammenfassung, Anamnese, Diagnosen, Maßnahmen
-- Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO), Zusammenfassung, Bereinigung
-- Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe
+- Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO, Standard), Zusammenfassung, Bereinigung
+- A/B/PRO-Modus zeigt zusätzlich drei separat kopierbare Karten (Anamnese / Befund / Procedere)
+- Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe, auch nachträglich per Rerun auf der Analyse-Karte
+- „Nächster Patient"-Button: beendet Aufnahme, startet Analyse und sofort eine neue Aufnahme
+- Verlauf mehrerer Analysen innerhalb einer Sitzung
 - Automatische Betreffzeile per KI
 - Live-Streaming der LLM-Antwort (SSE)
+- Einstellungen-Modal (Zahnrad-Icon): KI-Modell-Auswahl, Mikrofon-Auswahl, Logging-Modus
+- Optionaler Logging-Modus: speichert Transkript + Analyse als JSON auf dem Server (`LOG_DIR`)
+- Live-Health-Anzeige für Whisper und Ollama im Header
 
-### 🎙️ Windows-Client: Diktat
+### ✨ Bedienung
 
-- Direktes Diktieren mit Live-Transkription
-- Echtzeit-Vorschau des transkribierten Texts
-- Perfekt für schnelle Notizen und Dokumentation
-
-### ✨ Gemeinsame Features
-
-- 🔄 Kontinuierliche Audio-Aufnahme in 30-Sekunden-Chunks
-- 📝 Live-Transkription während der Aufnahme
-- ✏️ Editierbares Ergebnisfenster
-- 📎 Automatische Zwischenablage-Integration
-- 💾 Speichert Roh-Transkripte als Backup
-- ⏸️ Pause/Resume während der Aufnahme
+- 🎙️ Direktaufnahme im Browser oder Datei-Upload (Drag & Drop)
+- 📝 Editierbares Ergebnisfenster mit Markdown-Rendering
+- 📎 Kopieren einzelner Abschnitte per Klick
+- ⏸️ Aufnahme pausierbar
 
 ---
 
 ## 📋 Voraussetzungen
 
-### Server
 - Docker & Docker Compose
-- (Optional) NVIDIA GPU für schnellere Verarbeitung
+- NVIDIA GPU für faster-whisper (Standard-Image nutzt CUDA; ohne GPU auf `latest-cpu` umstellen)
 - Mindestens 4 GB RAM
-- Bestehender **ollama Container** mit Modell (z.B. llama3.1:8b)
-
-### Client (Windows)
-- Python 3.8+
-- Windows 10/11
-- Mikrofon
+- Bestehender **ollama-Container** mit Modell (z. B. `gemma4:12b`), erreichbar über das externe Netzwerk `ollama-net`
+- (Optional) Caddy oder anderer Reverse-Proxy im externen Netzwerk `caddy-proxy-network`
 
 ---
 
 ## 🚀 Installation
 
-### 1️⃣ Server Setup
-
-#### Mit bestehendem ollama Container
+### Mit bestehendem ollama-Container
 
 ```bash
-# Verbinde ollama mit Diktat-Netzwerk
+# Netzwerke, falls noch nicht vorhanden
 docker network create diktat-network
 docker network connect diktat-network <dein-ollama-container-name>
 
-# Starte Server
+# Server starten
 docker-compose up -d
 ```
 
-#### Test Server
+### Test
 
 ```bash
-# Status prüfen
-curl http://localhost:8000/
+# UI erreichbar?
+curl http://localhost:8010/
 
 # Health-Check (whisper + ollama + version)
-curl http://localhost:8000/health
+curl http://localhost:8010/health
 ```
 
----
-
-### 2️⃣ Client Setup (Windows)
-
-**Option A: Installer (empfohlen)**
-
-Lade `Output\KI-Transcribe-Installer.exe` herunter und führe ihn aus. Keine Admin-Rechte erforderlich.
-
-**Option B: Python direkt**
-
-```cmd
-# Installiere Python-Dependencies
-pip install -r requirements-client.txt
-
-# GUI starten
-python diktat_gui.py
-```
-
-#### Konfiguration
-
-Beim ersten Start öffnet sich automatisch ein Dialog zur Eingabe der Server-URL. Die Konfiguration wird in `%APPDATA%\KI-Transcribe-Pro\config.json` gespeichert und kann jederzeit über Menü → Einstellungen → Server-URL ändern angepasst werden.
+`docker-compose.yml` bindet Port `8010` auf `localhost` — Zugriff von außen läuft über den Reverse-Proxy im `caddy-proxy-network`.
 
 ---
 
 ## 🎮 Nutzung
 
-### Starten
-
-1. **Server**: `docker-compose up -d` (einmalig)
-2. **Web-UI**: Browser öffnen → URL des Servers (z.B. `http://transcribe.domain.local`)
-3. **Diktat-Client**: `python diktat_gui.py` oder EXE starten
-
-### Workflow
-
-#### Web-UI: Gesprächsanalyse
-
-1. Browser öffnen → Server-URL aufrufen
-2. Audio-Datei hochladen oder direkt im Browser aufnehmen
-3. Modus wählen: **Analysieren**, **Kompakt (A/B/PRO)**, **Zusammenfassung** oder **Bereinigen**
-4. Geschlecht wählen (Patient / Patientin / neutral)
-5. LLM-Modell wählen (falls mehrere verfügbar)
-6. Verarbeitung startet → Transkript und Analyse erscheinen live
-7. Text kopieren oder weiterverarbeiten
-
-#### Diktat-Client (Windows-GUI)
-
-1. GUI starten → Server-URL beim ersten Start eingeben
-2. Klicke **Start** → Aufnahme läuft
-3. Sprich dein Diktat
-4. Sieh Live-Transkription im Textfeld
-5. Klicke **Analyse** → Finalisierung und Speicherung
-6. Editierbares Ergebnis-Fenster öffnet sich
-7. Text wird automatisch in Zwischenablage kopiert
-
-### Tastenkombinationen
-
-Die GUI nutzt Maus-Bedienung. Für Hotkey-Support kann das optionale AHK-Script verwendet werden (siehe unten).
+1. **Server starten**: `docker-compose up -d` (einmalig)
+2. **Web-UI öffnen**: Browser → Server-URL (z. B. `http://transcribe.domain.local`)
+3. Audio-Datei hochladen oder direkt im Browser aufnehmen
+4. Modus wählen: **Vollanalyse**, **A/B/PRO** (Standard), **Zusammenfassung** oder **Bereinigen**
+5. Geschlecht wählen (Patient / Patientin / neutral)
+6. Bei Bedarf über das Zahnrad-Icon KI-Modell oder Mikrofon wechseln
+7. Verarbeitung startet → Transkript und Analyse erscheinen live (SSE-Stream)
+8. Text abschnittsweise kopieren oder mit „Nächster Patient" direkt weiter aufnehmen
 
 ---
 
@@ -138,143 +85,103 @@ Die GUI nutzt Maus-Bedienung. Für Hotkey-Support kann das optionale AHK-Script 
 
 ### Server-Einstellungen
 
-Bearbeite `docker-compose.yml`:
+Bearbeite `docker-compose.yml` (Service `gespraech-web`):
 
 ```yaml
 environment:
-  # Whisper-Einstellungen
-  - WHISPER_LANGUAGE=de
-
-  # Ollama-Modell (Standard-Modell für die Web-UI)
-  - OLLAMA_MODEL=qwen2.5:14b
+  - WHISPER_HOST=faster-whisper
+  - WHISPER_PORT=8000
   - OLLAMA_HOST=ollama
+  - OLLAMA_PORT=11434
+  - OLLAMA_MODEL=gemma4:12b        # Standard-Modell für die Web-UI
+  - WHISPER_LANGUAGE=de
+  - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
+  - LOG_DIR=/logs                  # Ziel für optionalen Logging-Modus
 ```
 
-Das Whisper-Modell wird im `faster-whisper` Container konfiguriert:
+Das Whisper-Modell wird im `faster-whisper`-Container konfiguriert:
 
 ```yaml
 faster-whisper:
   environment:
     - WHISPER__MODEL=large-v3          # Standard-Modell (Fallback / Auto-Sprache)
     - WHISPER__ALLOW_DOWNLOADS=true    # Erlaubt Download zusätzlicher Modelle
-
-gespraech-web:
-  environment:
-    - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2  # Deutsches Medizin-Modell
 ```
 
-Das Medizin-Modell wird beim ersten deutschen Aufruf automatisch von HuggingFace heruntergeladen (~3 GB) und danach im Volume gecacht. Im Frontend schaltet „Gespräch nicht auf Deutsch" auf das Standard-Modell mit automatischer Spracherkennung zurück.
+Das Medizin-Modell wird beim ersten deutschen Aufruf automatisch von HuggingFace heruntergeladen (~3 GB) und danach im Volume `whisper-models` gecacht. Im Frontend schaltet „Gespräch nicht auf Deutsch" auf das Standard-Modell mit automatischer Spracherkennung zurück.
 
-### Whisper-Modelle
+> **Hinweis:** Der `faster-whisper`-Container (`diktat-whisper`) wird mit dem Projekt `ki-atteste` geteilt. Änderungen an Modell-Env-Vars wirken sich auf beide Projekte aus.
 
-| Modell | Größe | Geschwindigkeit | Qualität | Empfehlung |
-|--------|-------|----------------|----------|------------|
-| `tiny` | 39 MB | ⚡⚡⚡⚡⚡ | ⭐⭐ | Nur Tests |
-| `base` | 74 MB | ⚡⚡⚡⚡ | ⭐⭐⭐ | **Standard** |
-| `small` | 244 MB | ⚡⚡⚡ | ⭐⭐⭐⭐ | Balance |
-| `medium` | 769 MB | ⚡⚡ | ⭐⭐⭐⭐⭐ | Hohe Qualität |
-| `large-v3` | 1.5 GB | ⚡ | ⭐⭐⭐⭐⭐ | Beste Qualität |
+### Erlaubte Ollama-Modelle (Frontend-Dropdown)
 
-### Ollama-Modelle
+Nur Modelle mit passendem Namens-Präfix erscheinen in der Modellauswahl (`MODEL_WHITELIST` in `server.py`):
+
+`qwen3:`, `qwen2.5:`, `phi4`, `mistral-nemo`, `deepseek-r1:14b`, `gemma4:`, `llama3.1:`, `meditron`
 
 ```bash
-# Im ollama Container
+# Im ollama-Container
 docker exec -it <ollama-container> bash
 
-# Modelle herunterladen
-ollama pull llama3.1:8b      # Empfohlen
-ollama pull mistral:7b
-ollama pull qwen2.5:7b
-
-# Liste Modelle
+ollama pull gemma4:12b      # Standard
+ollama pull qwen2.5:14b
 ollama list
 ```
 
-### Audio-Einstellungen
+### Analyse-Prompts anpassen
 
-Bearbeite `diktat_gui.py`:
+Die Prompts für alle Modi liegen zentral in `prompts.py` (`ANALYZE_PROMPT`, `ABPRO_PROMPT`, `SUMMARY_PROMPT`, `SUBJECT_PROMPT`, `CLEAN_PROMPT`). Nach Änderungen:
 
-```python
-SAMPLE_RATE = 16000        # Audio-Qualität (8000-48000 Hz)
-CHUNK_DURATION = 30        # Sekunden pro Chunk (10-60)
+```bash
+docker-compose restart gespraech-web
 ```
+
+(`server.py`, `templates/` und `static/` sind read-only in den Container gemounted — es ist kein Rebuild nötig, außer bei Änderungen an `requirements-server.txt` oder dem `Dockerfile`.)
 
 ---
 
 ## 🐛 Troubleshooting
 
-### Problem: "Verbindung zum Server fehlgeschlagen"
+### Problem: „Verbindung zum Server fehlgeschlagen"
 
 ```bash
-# 1. Prüfe Server-Status
-docker ps | grep diktat
-
-# 2. Teste Server
-curl http://localhost:8000/
-
-# 3. Prüfe Logs
-docker logs diktat-api
-
-# 4. Firewall (falls Server im LAN)
-sudo ufw allow 8000/tcp  # Linux
+docker ps | grep gespraech-web
+curl http://localhost:8010/
+docker logs gespraech-web
 ```
 
-### Problem: "faster-whisper nicht erreichbar"
+### Problem: „faster-whisper nicht erreichbar"
 
 ```bash
-# Container-Logs
 docker logs diktat-whisper
-
-# Neu starten
 docker restart diktat-whisper
 ```
 
-### Problem: "ollama nicht gefunden"
+### Problem: „ollama nicht gefunden"
 
 ```bash
-# Prüfe ollama
 docker ps | grep ollama
-
-# Verbinde mit Netzwerk
-docker network connect diktat-network <ollama-container>
-
-# Test
+docker network connect ollama-net <ollama-container>
 curl http://localhost:11434/api/tags
 ```
 
-### Problem: "Keine Audio-Aufnahme"
+### Problem: „Keine Audio-Aufnahme"
 
-1. **Mikrofon-Berechtigungen** prüfen (Windows-Einstellungen)
-2. **Standard-Mikrofon** setzen (Windows Sound-Einstellungen)
-3. **Python-Test**:
-   ```python
-   import sounddevice as sd
-   print(sd.query_devices())
-   ```
+1. Mikrofon-Berechtigung im Browser erteilen (wird beim ersten Aufnahme-Klick angefragt)
+2. Richtiges Mikrofon im Einstellungen-Modal (Zahnrad-Icon) auswählen
+3. Betriebssystem-Mikrofonrechte für den Browser prüfen
 
-### Problem: "Transkription ist schlecht"
+### Problem: „Transkription ist schlecht"
 
-1. **Besseres Modell**: `WHISPER_MODEL=small` statt `base`
-2. **Näher am Mikrofon** sprechen
-3. **Ruhige Umgebung** wählen
-4. **Externes Mikrofon** verwenden
+1. Näher am Mikrofon sprechen, ruhige Umgebung wählen
+2. Bei nicht-deutschen Gesprächen den Toggle „Gespräch nicht auf Deutsch" aktivieren
+3. `WHISPER__MODEL` im `faster-whisper`-Container auf ein größeres Modell stellen (z. B. `large-v3`, bereits Standard)
 
-### Problem: "Text-Säuberung zu aggressiv/schwach"
+### Problem: „Text-Säuberung / Analyse zu aggressiv/schwach"
 
-Bearbeite in `prompts.py` die Konstante `CLEAN_PROMPT`:
+Bearbeite die passende Konstante in `prompts.py` (z. B. `CLEAN_PROMPT`, `ANALYZE_PROMPT`) und starte den Container neu:
 
-```python
-CLEAN_PROMPT = """Bereinige das folgende medizinische Transkript:
-- Entferne Füllwörter (äh, ähm, hm, ...)
-# Hier anpassen für mehr/weniger Säuberung
-...
-"""
-```
-
-Danach neu bauen:
 ```bash
-docker-compose down
-docker-compose up -d --build
+docker-compose restart gespraech-web
 ```
 
 ---
@@ -283,7 +190,7 @@ docker-compose up -d --build
 
 ### GPU-Beschleunigung
 
-**faster-whisper mit GPU:**
+`faster-whisper` läuft standardmäßig mit `fedirz/faster-whisper-server:latest-cuda` und reserviert eine NVIDIA-GPU:
 
 ```yaml
 faster-whisper:
@@ -297,30 +204,11 @@ faster-whisper:
             capabilities: [gpu]
 ```
 
-**ollama mit GPU:**
+Ohne GPU: Image auf `fedirz/faster-whisper-server:latest-cpu` ändern und den `deploy`-Block entfernen.
 
-```yaml
-ollama:
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: 1
-            capabilities: [gpu]
-```
+### Logging-Modus
 
-### Automatischer Start (Windows)
-
-Erstelle `start_diktat.bat`:
-
-```batch
-@echo off
-cd /d "%~dp0"
-start /min python diktat_gui.py
-```
-
-Verknüpfung in Windows-Autostart-Ordner (`Win+R` → `shell:startup`) ablegen.
+Über das Einstellungen-Modal aktivierbar. Speichert bei jeder Analyse Transkript + Ergebnis als JSON in `LOG_DIR` (Server-seitig, Dateiname `YYYYMMDD_HHMMSS_<mode>.json`). Standardmäßig deaktiviert.
 
 ---
 
@@ -328,52 +216,20 @@ Verknüpfung in Windows-Autostart-Ordner (`Win+R` → `shell:startup`) ablegen.
 
 ```
 ki-transcribe/
-├── server.py                  # FastAPI Server (Web-UI + API)
+├── server.py                  # FastAPI-Server (Web-UI + API)
 ├── prompts.py                 # LLM-Prompts (ANALYZE, ABPRO, SUMMARY, SUBJECT, CLEAN)
-├── diktat_gui.py              # Windows-GUI-Client (Diktat)
-├── benchmark_summary.py       # Speed-Benchmark: Prompts gegen alle Whitelist-Modelle
 ├── Dockerfile                 # Docker-Build für server.py
-├── docker-compose.yml         # Docker-Setup
-├── requirements-client.txt    # Client-Python-Dependencies
+├── docker-compose.yml         # Docker-Setup (gespraech-web + faster-whisper)
 ├── requirements-server.txt    # Server-Python-Dependencies
+├── VERSION                    # Aktuelle Versionsnummer
 ├── README.md                  # Diese Datei
 ├── QUICKSTART.md              # Schnellstart-Anleitung
-├── BUILD_README.md            # Build-Anleitung für Windows-Installer
+├── CLAUDE.md                  # Technische Referenz für KI-gestützte Entwicklung
 │
-├── templates/index.html       # Web-UI HTML-Template
-├── static/                    # CSS, JS, Favicon
-│
-├── diktat_gui.spec            # PyInstaller-Konfiguration
-├── installer.iss              # Inno Setup Script
-├── build_installer.bat        # One-Click Build
-├── Output/                    # Fertiger Windows-Installer
-├── dist/                      # PyInstaller-Output (EXE)
-│
-└── legacy/                    # Alter AHK+SoX CLI-Client (nur Referenz)
-    ├── diktat_client.py       # CLI-Client (veraltet)
-    └── diktat_sox.ahk         # AutoHotkey-Script (veraltet)
+├── templates/index.html       # Web-UI HTML-Template (Jinja2)
+├── static/                    # CSS, JS, Favicon, Logo
+└── logs/                      # Ziel für optionalen Logging-Modus (LOG_DIR)
 ```
-
----
-
-## 🎯 Alternative: AHK-Hotkey-System (Optional)
-
-Für Nutzer, die Hotkeys bevorzugen, ist das alte AHK-System weiterhin verfügbar:
-
-### Setup
-
-1. **AutoHotkey v2** installieren
-2. **SoX** installieren (https://sourceforge.net/projects/sox/)
-3. `diktat_sox.ahk` ausführen
-
-### Hotkeys
-
-| Hotkey | Aktion |
-|--------|--------|
-| `Ctrl+Shift+D` | Aufnahme Start/Stop |
-| `Ctrl+Shift+S` | Abbrechen |
-
-**Hinweis:** AHK-Methode unterstützt nur einfaches Diktat, keine Ambient-Funktion oder Live-Transkription.
 
 ---
 
@@ -386,55 +242,52 @@ docker-compose ps
 # Logs anschauen
 docker-compose logs -f
 
-# Container neu starten
-docker-compose restart
+# Container neu starten (z. B. nach Prompt-Änderung)
+docker-compose restart gespraech-web
+
+# Neu bauen (nach Dependency- oder Dockerfile-Änderung)
+docker-compose up -d --build
 
 # Alles stoppen
 docker-compose down
 
-# Neu bauen
-docker-compose up -d --build
-
 # Ins Container-Terminal
-docker exec -it diktat-api bash
+docker exec -it gespraech-web bash
 ```
 
 ---
 
 ## 📝 Changelog
 
-### Version 0.6.1 (aktuell)
+### Version 0.6.5 (aktuell)
+- Windows-Diktat-Client entfernt — reine Web-Lösung
+- Standard-Ollama-Modell auf `gemma4:12b` gewechselt
+- Mikrofon-Auswahl im Einstellungen-Modal behält die zuvor gewählte Permission-Liste bei
+- faster-whisper teilt sich Netzwerk `caddy-proxy-network` (gemeinsam mit `ki-atteste`)
+
+### Version 0.6.1
 - **Deutsches Medizin-Whisper-Modell** (`jimmymeister/whisper-large-v3-turbo-german-ct2`) für bessere Erkennung medizinischer Fachbegriffe
 - **Sprachschalter** im Frontend: „Gespräch nicht auf Deutsch" wechselt auf Standard-`large-v3` mit Auto-Spracherkennung
 - Neuer Env-Var `WHISPER_MEDICAL_MODEL` für konfigurierbares Medizin-Modell
 - `WHISPER__ALLOW_DOWNLOADS=true` im Whisper-Container für On-Demand-Modell-Download
-- Statusmeldung zeigt aktives Modell: „Transkribiere Audio (DE-Medizin)..." / „(Sprache Auto)..."
 
 ### Version 0.5.x
-- Neuer Modus **Kompakt (A/B/PRO)** (`abpro`) für Telegrammstil-Dokumentation
-- Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Output
+- Logging-Modus (`/logging-mode`-Endpoint) zum optionalen Speichern von Transkript + Analyse
+- Neuer Modus **A/B/PRO** (`abpro`) für Telegrammstil-Dokumentation, inkl. separat kopierbarer Karten
+- „Nächster Patient"-Flow und Verlaufsansicht mehrerer Analysen
+- Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Output, inkl. nachträglichem Rerun
 - Automatische KI-Betreffzeile (`/subject`-Endpoint)
 - Endpoint `/analyze-text`: LLM-Analyse ohne Whisper-Schritt (Direkteingabe)
 - Unterdrückung bekannter Whisper-Halluzinationen (Stille-Artefakte)
 - Alle LLM-Prompts in separater `prompts.py`
-- `benchmark_summary.py` für Modell-Benchmarks
+- Modellauswahl hinter Zahnrad-Einstellungsmodal versteckt
 
 ### Version 0.1.x
 - Web-UI: Gesprächsanalyse mit LLM-Streaming (SSE)
 - Web-UI: Modellauswahl im Browser
-- Diktat-Client: Config-Dialog beim ersten Start
-- Diktat-Client: Konfiguration über Menü änderbar
 - FastAPI-Server mit Jinja2-Templates und Static Files
 - faster-whisper Transkription (GPU)
 - ollama LLM-Analyse (Streaming)
-- Windows-GUI-Client (Diktat-Modus)
-- Windows-Installer via PyInstaller + Inno Setup
-
-### Version 1.0 (Legacy)
-- Initiales Release mit AHK+SoX-System
-- faster-whisper Integration
-- ollama LLM-Säuberung
-- Docker-Setup
 
 ---
 
@@ -443,7 +296,7 @@ docker exec -it diktat-api bash
 Basierend auf:
 - [Asklaion](https://github.com/lollylan/asklaion) - Ambient Scribe Konzept
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) - Transkription
-- [ollama](https://ollama.ai/) - LLM-Säuberung
+- [ollama](https://ollama.ai/) - LLM-Analyse
 
 ---
 
@@ -452,5 +305,3 @@ Basierend auf:
 Dieses Projekt nutzt:
 - **faster-whisper**: MIT License
 - **ollama**: MIT License
-- **AutoHotkey v2**: GPL-2.0
-- **SoX**: GPL-2.0

@@ -18,6 +18,7 @@ services:
       - OLLAMA_MODEL=gemma4:12b
       - WHISPER_LANGUAGE=de
       - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
+      - WHISPER_FAST_MODEL=small
       - LOG_DIR=/logs
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
@@ -60,6 +61,7 @@ services:
       - whisper-models:/root/.cache/huggingface
     networks:
       - diktat-network
+      - caddy-proxy-network
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"

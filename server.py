@@ -19,7 +19,7 @@ from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -28,6 +28,7 @@ OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
 WHISPER_MEDICAL_MODEL = os.getenv("WHISPER_MEDICAL_MODEL", "jimmymeister/whisper-large-v3-turbo-german-ct2")
+WHISPER_FAST_MODEL = os.getenv("WHISPER_FAST_MODEL", "small")
 LOG_DIR = os.getenv("LOG_DIR", "/logs")
 
 logging_enabled = False
@@ -54,6 +55,7 @@ WHISPER_HALLUCINATIONS = {
     "thanks.", "thanks!",
     "untertitel der amara.org-community",
     "untertitel von stephanie geiges",
+    "Untertitelung des ZDF, 2020",
     "[musik]", "[applaus]", "♪",
 }
 
@@ -181,13 +183,19 @@ def _save_log(transcript: str, analysis: str, mode: str, model: str, gender: str
         logger.error(f"Log save failed: {e}")
 
 
-async def transcribe_audio(audio_path: str, filename: str = "audio.webm", lang_mode: str = "de") -> str:
+async def transcribe_audio(
+    audio_path: str, filename: str = "audio.webm", lang_mode: str = "de", model_override: str = None
+) -> str:
     async with httpx.AsyncClient(timeout=300) as client:
         with open(audio_path, "rb") as f:
             ext = Path(filename).suffix.lower() or ".webm"
             mime = "audio/webm" if ext == ".webm" else "audio/mpeg" if ext == ".mp3" else "audio/wav"
             data: dict = {"response_format": "text"}
-            if lang_mode == "de":
+            if model_override:
+                data["model"] = model_override
+                if lang_mode == "de":
+                    data["language"] = WHISPER_LANGUAGE
+            elif lang_mode == "de":
                 data["model"] = WHISPER_MEDICAL_MODEL
                 data["language"] = WHISPER_LANGUAGE
             response = await client.post(
@@ -257,13 +265,17 @@ async def set_logging_mode(request: Request):
 
 @app.post("/transcribe-only")
 async def transcribe_only(audio: UploadFile = File(...), lang_mode: str = Form(default="de")):
-    """Nur Transkription ohne LLM-Verarbeitung."""
+    """Live-Vorschau-Transkription mit dem schnellen Modell (WHISPER_FAST_MODEL) – keine LLM-Verarbeitung.
+    Dient nur der Anzeige während der Aufnahme; die finale Analyse transkribiert die volle
+    Aufnahme separat mit dem medizinischen Modell (siehe /analyze)."""
     ext = Path(audio.filename or "audio.webm").suffix or ".webm"
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
         tmp.write(await audio.read())
         tmp_path = tmp.name
     try:
-        transcript = await transcribe_audio(tmp_path, audio.filename or "audio.webm", lang_mode)
+        transcript = await transcribe_audio(
+            tmp_path, audio.filename or "audio.webm", lang_mode, model_override=WHISPER_FAST_MODEL
+        )
         if _is_hallucination(transcript):
             transcript = ""
         return {"transcript": transcript}

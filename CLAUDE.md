@@ -17,7 +17,7 @@ Browser ──► Caddy (Reverse Proxy) ──► gespraech-web (FastAPI, Port 8
 **Netzwerke (Docker):**
 - `diktat-network` — intern: gespraech-web ↔ faster-whisper
 - `ollama-net` — extern, vordefiniert: gespraech-web ↔ ollama
-- `caddy-proxy-network` — extern, vordefiniert: Caddy ↔ gespraech-web
+- `caddy-proxy-network` — extern, vordefiniert: Caddy ↔ gespraech-web (auch faster-whisper, da der Whisper-Container mit `ki-atteste` geteilt wird)
 
 ---
 
@@ -47,9 +47,11 @@ ki-transcribe/
 | GET | `/` | Web-UI (Jinja2-Template) |
 | GET | `/health` | Status whisper + ollama (inkl. `version`) |
 | GET | `/models` | Liste erlaubter ollama-Modelle (gefiltert per `MODEL_WHITELIST`) |
-| POST | `/transcribe-only` | Nur Transkription via faster-whisper |
-| POST | `/analyze` | Transkription + LLM (SSE-Stream), Parameter: `model`, `mode`, `gender` |
-| POST | `/analyze-text` | LLM-Analyse eines vorhandenen Transkripts – kein Whisper-Schritt, SSE-Stream |
+| GET | `/logging-mode` | Aktueller Logging-Status (`{"enabled": bool}`) |
+| POST | `/logging-mode` | Logging-Modus umschalten (Body: `{"enabled": bool}`) |
+| POST | `/transcribe-only` | Live-Vorschau-Transkription mit `WHISPER_FAST_MODEL` (schnell, keine LLM-Verarbeitung), Parameter: `audio`, `lang_mode` |
+| POST | `/analyze` | Transkription + LLM (SSE-Stream), Parameter: `audio`, `model`, `mode`, `gender`, `lang_mode` |
+| POST | `/analyze-text` | LLM-Analyse eines vorhandenen Transkripts – kein Whisper-Schritt, SSE-Stream, Parameter: `transcript`, `model`, `mode`, `gender` |
 | POST | `/subject` | Betreffzeile (max. 100 Zeichen) für ein Transkript per LLM generieren |
 
 **`/analyze` und `/analyze-text` SSE-Event-Typen:** `status`, `transcript`, `token`, `error`, `done`
@@ -67,13 +69,17 @@ ki-transcribe/
 
 **LLM-Prompts** sind zentral in `prompts.py` definiert und werden von `server.py` verwendet.
 
-**`MODEL_WHITELIST`** in `server.py`: Nur Modelle mit passendem Präfix werden im Frontend-Dropdown angezeigt (`qwen3:`, `qwen2.5:`, `phi4`, `mistral-nemo`, `deepseek-r1:14b`, `gemma4:26b`, `llama3.1:`, `meditron`).
+**`MODEL_WHITELIST`** in `server.py`: Nur Modelle mit passendem Präfix werden im Frontend-Dropdown angezeigt (`qwen3:`, `qwen2.5:`, `phi4`, `mistral-nemo`, `deepseek-r1:14b`, `gemma4:`, `llama3.1:`, `meditron`).
 
 **`WHISPER_HALLUCINATIONS`** in `server.py`: Set bekannter Whisper-Halluzinationen (z. B. „Vielen Dank.", Musikzeichen) — werden in `/transcribe-only` und `/analyze` unterdrückt.
 
 **`ThinkingFilter`** in `server.py`: Filtert `<think>…</think>`-Blöcke aus dem SSE-Stream (für Reasoning-Modelle wie qwen3).
 
-**Sprachmodell-Auswahl:** `transcribe_audio()` akzeptiert `lang_mode` (`"de"` / `"auto"`). Bei `"de"` wird `WHISPER_MEDICAL_MODEL` mit `language=de` verwendet; bei `"auto"` läuft das Standard-Modell mit automatischer Spracherkennung. Das Frontend zeigt einen Toggle „Gespräch nicht auf Deutsch" am Ende der Audio-Sektion.
+**Sprachmodell-Auswahl:** `transcribe_audio()` akzeptiert `lang_mode` (`"de"` / `"auto"`) und optional `model_override`. Ohne Override wird bei `"de"` `WHISPER_MEDICAL_MODEL` mit `language=de` verwendet; bei `"auto"` läuft das Standard-Modell mit automatischer Spracherkennung. Das Frontend zeigt einen Toggle „Gespräch nicht auf Deutsch" am Ende der Audio-Sektion.
+
+**Live-Transkript während der Aufnahme (`static/app.js`):** Während der Aufnahme wird alle 30s ein neuer Audio-Abschnitt an `/transcribe-only` geschickt (mit `WHISPER_FAST_MODEL`, z. B. `small`) und im UI angezeigt — dient nur als schnelle Vorschau. Nach Aufnahmeende wird die **komplette** Aufnahme in einem Stück über `/analyze` mit `WHISPER_MEDICAL_MODEL` transkribiert (durchgehender Kontext, weniger Segmentgrenzen-Halluzinationen) und ersetzt die Vorschau, sobald das `transcript`-SSE-Event eintrifft.
+
+**Logging-Modus:** Globaler In-Memory-Schalter `logging_enabled` (per `/logging-mode` gesetzt, UI-Toggle im Einstellungen-Modal). Wenn aktiv, schreibt `_save_log()` Transkript + Analyse als JSON nach `LOG_DIR` (Dateiname `YYYYMMDD_HHMMSS_<mode>.json`).
 
 ---
 
@@ -85,9 +91,11 @@ ki-transcribe/
 | `WHISPER_PORT` | `8000` | Port |
 | `OLLAMA_HOST` | `ollama` | Hostname des ollama-Containers |
 | `OLLAMA_PORT` | `11434` | Port |
-| `OLLAMA_MODEL` | `qwen3:8b` | Standard-Modell |
+| `OLLAMA_MODEL` | `gemma4:12b` | Standard-Modell |
 | `WHISPER_LANGUAGE` | `de` | Sprache für Transkription (bei `lang_mode=de`) |
-| `WHISPER_MEDICAL_MODEL` | `jimmymeister/whisper-large-v3-turbo-german-ct2` | Whisper-Modell für deutsche Aufnahmen |
+| `WHISPER_MEDICAL_MODEL` | `jimmymeister/whisper-large-v3-turbo-german-ct2` | Whisper-Modell für deutsche Aufnahmen (finale Analyse via `/analyze`) |
+| `WHISPER_FAST_MODEL` | `small` | Kleines/schnelles Whisper-Modell für die Live-Vorschau via `/transcribe-only` |
+| `LOG_DIR` | `/logs` | Zielverzeichnis für Logging-Modus (`_save_log()`) |
 
 **Whisper-Container-Variable** (in `docker-compose.yml` unter `faster-whisper`):
 
@@ -118,4 +126,6 @@ docker-compose logs -f gespraech-web
 ## Wichtige Hinweise
 
 - **Ollama ist external:** Der ollama-Container wird nicht in dieser `docker-compose.yml` definiert — er muss bereits laufen und mit `ollama-net` verbunden sein.
-- **GPU erforderlich für faster-whisper:** Der Container nutzt `runtime: nvidia`. Ohne GPU muss das Image auf `latest-cpu` geändert werden.
+- **GPU erforderlich für faster-whisper:** Der Container nutzt das Image `fedirz/faster-whisper-server:latest-cuda` mit `deploy.resources.reservations.devices` (nvidia). Ohne GPU muss das Image auf `latest-cpu` geändert und der `devices`-Block entfernt werden.
+- **faster-whisper ist geteilt:** Container-Name `diktat-whisper` wird auch vom Projekt `ki-atteste` genutzt — Änderungen an Modell/Env-Vars wirken sich auf beide aus.
+- **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `templates/` und `static/` read-only in den laufenden Container — Änderungen wirken ohne Rebuild, nur ein `docker-compose restart gespraech-web` ist nötig.
