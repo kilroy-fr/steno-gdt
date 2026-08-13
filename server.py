@@ -15,11 +15,12 @@ from pathlib import Path
 from datetime import datetime
 import logging
 from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, SUMMARY_PROMPT
+from medical_vocab import MEDICAL_GLOSSARY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.6.8"
+VERSION = "0.6.10"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -332,7 +333,9 @@ async def analyze(
                 prompt_template = SUMMARY_PROMPT
             else:
                 prompt_template = CLEAN_PROMPT
-            prompt = prompt_template.format(transcript=transcript, **_gender_context(gender))
+            prompt = prompt_template.format(
+                transcript=transcript, medical_glossary=MEDICAL_GLOSSARY, **_gender_context(gender)
+            )
 
             analysis_tokens = []
             try:
@@ -378,7 +381,9 @@ async def analyze_text(
         prompt_template = SUMMARY_PROMPT
     else:
         prompt_template = CLEAN_PROMPT
-    prompt = prompt_template.format(transcript=transcript, **_gender_context(gender))
+    prompt = prompt_template.format(
+        transcript=transcript, medical_glossary=MEDICAL_GLOSSARY, **_gender_context(gender)
+    )
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"

@@ -51,7 +51,22 @@
       "PowerShell(docker exec diktat-whisper sed -n '100,140p' /root/faster-whisper-server/.venv/lib/python3.12/site-packages/faster_whisper/utils.py)",
       "PowerShell(docker exec diktat-whisper grep -n \"local_files_only\\\\|HF_HUB_OFFLINE\\\\|outgoing\" /root/faster-whisper-server/.venv/lib/python3.12/site-packages/huggingface_hub/_snapshot_download.py)",
       "PowerShell(head -40)",
-      "PowerShell(docker exec diktat-whisper sed -n '145,230p' /root/faster-whisper-server/.venv/lib/python3.12/site-packages/huggingface_hub/_snapshot_download.py)"
+      "PowerShell(docker exec diktat-whisper sed -n '145,230p' /root/faster-whisper-server/.venv/lib/python3.12/site-packages/huggingface_hub/_snapshot_download.py)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('server.py',encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('medical_vocab.py',encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Read(//c/tmp/**)",
+      "Bash(ffmpeg -f lavfi -i \"sine=frequency=440:duration=3\" -c:a libopus test.webm -y -loglevel error)",
+      "Bash(cp /tmp/test.webm ./test.webm)",
+      "Bash(curl -s -X POST http://127.0.0.1:8010/transcribe-only -F \"audio=@test.webm;type=audio/webm\" -F \"lang_mode=de\" -w \"\\\\nHTTP_STATUS:%{http_code}\\\\n\")",
+      "Bash(docker network *)",
+      "Bash(docker inspect *)",
+      "Bash(docker exec *)",
+      "Bash(MSYS_NO_PATHCONV=1 docker exec gespraech-web tail -3 /app/prompts.py)",
+      "Bash(MSYS_NO_PATHCONV=1 docker exec gespraech-web tail -2 /app/prompts.py)",
+      "Bash(curl -s --max-time 20 http://127.0.0.1:8010/health)",
+      "Bash(python -c ' *)",
+      "Bash(MSYS_NO_PATHCONV=1 docker exec gespraech-web tail -1 /app/prompts.py)",
+      "Bash(curl -s --max-time 15 http://127.0.0.1:8010/health)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Jan.DOMAIN\\ki-transcribe\\build"

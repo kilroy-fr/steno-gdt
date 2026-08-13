@@ -10,7 +10,9 @@ Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter F
 - Vollständige Transkription via faster-whisper (GPU)
 - **Deutsches Medizin-Modell** (`jimmymeister/whisper-large-v3-turbo-german-ct2`) für bessere Fachbegriff-Erkennung
 - Sprachschalter im Frontend: „Gespräch nicht auf Deutsch" wechselt auf Standard-Modell mit Auto-Spracherkennung
+- **Medizinisches Fachvokabular** (`medical_vocab.py`): kuratiertes Glossar aus Diagnosen, Wirkstoffen, Impfstoffen und Untersuchungen, das dem LLM mitgegeben wird, damit phonetisch verzerrte Begriffe erkannt statt geraten werden
 - KI-gestützte Analyse des Arzt-Patienten-Gesprächs (ollama LLM)
+- Sprecherzuordnung: die Prompts weisen das LLM auf den Dialogcharakter ohne Sprecherkennzeichnung hin, damit Arzt-Überlegungen nicht als gesicherte Diagnosen und Patienten-Rückfragen nicht als Verordnungen dokumentiert werden
 - Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO, Standard), Zusammenfassung, Bereinigung
 - A/B/PRO-Modus zeigt zusätzlich drei separat kopierbare Karten (Anamnese / Befund / Procedere)
 - Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe, auch nachträglich per Rerun auf der Analyse-Karte
@@ -135,7 +137,13 @@ Die Prompts für alle Modi liegen zentral in `prompts.py` (`ANALYZE_PROMPT`, `AB
 docker-compose restart gespraech-web
 ```
 
-(`server.py`, `templates/` und `static/` sind read-only in den Container gemounted — es ist kein Rebuild nötig, außer bei Änderungen an `requirements-server.txt` oder dem `Dockerfile`.)
+(`server.py`, `prompts.py`, `medical_vocab.py`, `templates/` und `static/` sind read-only in den Container gemounted — es ist kein Rebuild nötig, außer bei Änderungen an `requirements-server.txt` oder dem `Dockerfile`.)
+
+### Fachvokabular erweitern
+
+`medical_vocab.py` enthält eine kuratierte Liste deutscher Hausarzt-Begriffe. `MEDICAL_GLOSSARY` wird in `ANALYZE_PROMPT`, `ABPRO_PROMPT` und `CLEAN_PROMPT` eingebettet, damit das LLM verzerrte ASR-Ausgaben gegen bekannte Fachbegriffe abgleichen kann. Neue Begriffe einfach in die passende Liste eintragen und den Container neu starten.
+
+> **Hinweis:** Das Glossar wird bewusst **nicht** als faster-whisper `hotwords`-Parameter verwendet — eine Liste dieser Größe sprengt dessen 448-Token-Decoder-Budget und lässt Whisper mit `ValueError: The maximum decoding length must be > 0` abstürzen.
 
 ---
 
@@ -175,6 +183,20 @@ curl http://localhost:11434/api/tags
 1. Näher am Mikrofon sprechen, ruhige Umgebung wählen
 2. Bei nicht-deutschen Gesprächen den Toggle „Gespräch nicht auf Deutsch" aktivieren
 3. `WHISPER__MODEL` im `faster-whisper`-Container auf ein größeres Modell stellen (z. B. `large-v3`, bereits Standard)
+4. Häufig falsch erkannte Fachbegriffe in `medical_vocab.py` ergänzen — das LLM gleicht verzerrte Stellen dann gegen das Glossar ab
+
+### Problem: „container … is not connected to the network ki-transcribe_diktat-network"
+
+Tritt beim Recreate auf, wenn neben `diktat-network` noch ein leeres, projekt-präfigiertes Netzwerk aus früheren Compose-Versionen existiert. Beide tragen dasselbe Compose-Label, Compose greift auf das falsche zu:
+
+```bash
+# Prüfen, dass das Alt-Netzwerk leer ist (Containers: 0)
+docker network inspect ki-transcribe_diktat-network --format 'Containers: {{len .Containers}}'
+
+# Dann entfernen
+docker network rm ki-transcribe_diktat-network
+docker compose up -d
+```
 
 ### Problem: „Text-Säuberung / Analyse zu aggressiv/schwach"
 
@@ -218,6 +240,7 @@ Ohne GPU: Image auf `fedirz/faster-whisper-server:latest-cpu` ändern und den `d
 ki-transcribe/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
 ├── prompts.py                 # LLM-Prompts (ANALYZE, ABPRO, SUMMARY, SUBJECT, CLEAN)
+├── medical_vocab.py           # Kuratiertes Fachvokabular (MEDICAL_GLOSSARY)
 ├── Dockerfile                 # Docker-Build für server.py
 ├── docker-compose.yml         # Docker-Setup (gespraech-web + faster-whisper)
 ├── requirements-server.txt    # Server-Python-Dependencies
@@ -248,6 +271,9 @@ docker-compose restart gespraech-web
 # Neu bauen (nach Dependency- oder Dockerfile-Änderung)
 docker-compose up -d --build
 
+# Nur die Web-App neu bauen, ohne den geteilten Whisper-Container zu stoppen
+docker compose up -d --build --no-deps gespraech-web
+
 # Alles stoppen
 docker-compose down
 
@@ -259,7 +285,15 @@ docker exec -it gespraech-web bash
 
 ## 📝 Changelog
 
-### Version 0.6.5 (aktuell)
+### Version 0.6.9 (aktuell)
+- **Medizinisches Fachvokabular** (`medical_vocab.py`): kuratiertes Glossar aus Diagnosen, Wirkstoffen, Impfstoffen und Untersuchungen, eingebettet in `ANALYZE_PROMPT`, `ABPRO_PROMPT` und `CLEAN_PROMPT`
+- **Sprecherzuordnung** in `ANALYZE_PROMPT` und `ABPRO_PROMPT`: expliziter Hinweis auf den Dialog ohne Sprecherkennzeichnung, damit Verdachtsdiagnosen des Arztes nicht als gesicherte Diagnosen und Patienten-Rückfragen nicht als Verordnungen dokumentiert werden
+- `prompts.py` und `medical_vocab.py` sind jetzt ebenfalls live in den Container gemounted — Prompt-Änderungen brauchen nur noch einen `restart` statt eines Rebuilds
+
+### Version 0.6.7
+- Finale Transkription läuft über die komplette Aufnahme statt über zusammengesetzte Chunks — durchgehender Kontext, weniger Halluzinationen an Segmentgrenzen
+
+### Version 0.6.5
 - Windows-Diktat-Client entfernt — reine Web-Lösung
 - Standard-Ollama-Modell auf `gemma4:12b` gewechselt
 - Mikrofon-Auswahl im Einstellungen-Modal behält die zuvor gewählte Permission-Liste bei

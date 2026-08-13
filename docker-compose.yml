@@ -23,6 +23,8 @@ services:
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
       - ./server.py:/app/server.py:ro
+      - ./prompts.py:/app/prompts.py:ro
+      - ./medical_vocab.py:/app/medical_vocab.py:ro
       - ./templates:/app/templates:ro
       - ./static:/app/static:ro
       - ./logs:/logs
