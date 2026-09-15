@@ -461,6 +461,13 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
   word-break: break-word;
 }
 
+/* Sprecher-Marker im diarisierten Transkript */
+.speaker-tag {
+  color: var(--primary);
+  font-weight: 600;
+  user-select: text;
+}
+
 /* Analyse-Panel: mehr Höhe, da strukturiert */
 #analysisText.result-text {
   max-height: 540px;

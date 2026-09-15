@@ -33,6 +33,10 @@
             <span class="health-dot" id="ollamaDot" title="Ollama (KI)"></span>
             <span class="health-label">Ollama</span>
           </div>
+          <div class="health-item">
+            <span class="health-dot" id="diarizeDot" title="Diarisation (Sprechertrennung)"></span>
+            <span class="health-label">Sprecher</span>
+          </div>
         </div>
         <span class="version-badge">v{{ version }}</span>
         <button class="btn-gear" id="settingsBtn" title="Einstellungen">
@@ -95,6 +99,15 @@
           <span class="hint-text" style="margin:0;" title="Aktivieren für nicht-deutsche Aufnahmen: Standard-Modell mit automatischer Spracherkennung statt deutschem Medizin-Modell">Gespräch nicht auf Deutsch</span>
           <label class="toggle-switch">
             <input type="checkbox" id="langAutoToggle">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <!-- Sprechertrennung -->
+        <div style="display:flex; align-items:center; justify-content:space-between; padding:4px 0;">
+          <span class="hint-text" style="margin:0;" title="Trennt Arzt und Patient im Transkript (SPRECHER A/B). Läuft parallel zur Transkription auf der CPU und kostet kaum Zeit.">Sprechertrennung</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="diarizeToggle" checked>
             <span class="toggle-slider"></span>
           </label>
         </div>

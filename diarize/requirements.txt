@@ -1,0 +1,17 @@
+# Diarisations-Service Requirements
+# ACHTUNG: torch/torchaudio kommen aus requirements-torch.txt (CPU-Index) und
+# muessen VOR dieser Datei installiert werden, sonst zieht pyannote CUDA-Wheels.
+
+fastapi~=0.141.1          # Web-Framework
+uvicorn~=0.52.3           # ASGI Server
+python-multipart~=0.0.32  # File-Upload Support
+pyannote.audio~=3.3       # Sprechersegmentierung + Speaker-Embeddings
+
+# Obergrenze <1.0 ist PFLICHT, nicht Vorsicht: pyannote 3.4 reicht in
+# Pipeline.from_pretrained() den Parameter `use_auth_token` BEDINGUNGSLOS an
+# hf_hub_download() weiter. Bis huggingface_hub 0.35 schreibt der Dekorator
+# validate_hf_hub_args() ihn intern auf `token` um; 1.x hat diese Behandlung
+# entfernt, wodurch schon der Modell-Download mit
+# `TypeError: hf_hub_download() got an unexpected keyword argument
+# 'use_auth_token'` abbricht - auch ohne uebergebenen Token.
+huggingface_hub<1.0

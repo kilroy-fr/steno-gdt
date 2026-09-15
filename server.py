@@ -6,6 +6,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import asyncio
 import httpx
 import tempfile
 import os
@@ -14,13 +15,21 @@ import json
 from pathlib import Path
 from datetime import datetime
 import logging
-from prompts import ABPRO_PROMPT, ANALYZE_PROMPT, CLEAN_PROMPT, SUBJECT_PROMPT, SUMMARY_PROMPT
+from prompts import (
+    ABPRO_PROMPT,
+    ANALYZE_PROMPT,
+    CLEAN_PROMPT,
+    SPEAKER_CONTEXT_DIARIZED,
+    SPEAKER_CONTEXT_PLAIN,
+    SUBJECT_PROMPT,
+    SUMMARY_PROMPT,
+)
 from medical_vocab import MEDICAL_GLOSSARY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.6.11"
+VERSION = "0.8.0"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -30,6 +39,13 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
 WHISPER_MEDICAL_MODEL = os.getenv("WHISPER_MEDICAL_MODEL", "jimmymeister/whisper-large-v3-turbo-german-ct2")
 WHISPER_FAST_MODEL = os.getenv("WHISPER_FAST_MODEL", "small")
+DIARIZE_HOST = os.getenv("DIARIZE_HOST", "diarize")
+DIARIZE_PORT = os.getenv("DIARIZE_PORT", "8000")
+# Beide 0 = pyannote schaetzt die Sprecherzahl selbst. Bewusst keine Vorgabe:
+# eine Untergrenze von 2 zerlegt eine Solo-Aufnahme (Diktat) in Phantom-
+# sprecher, eine Obergrenze von 2 ordnet Begleitperson und MFA falsch zu.
+DIARIZE_MIN_SPEAKERS = int(os.getenv("DIARIZE_MIN_SPEAKERS", "0"))
+DIARIZE_MAX_SPEAKERS = int(os.getenv("DIARIZE_MAX_SPEAKERS", "0"))
 LOG_DIR = os.getenv("LOG_DIR", "/logs")
 
 logging_enabled = False
@@ -164,7 +180,8 @@ def _gender_context(gender: str) -> dict:
     return {"gender_instruction": "", "patient_label": "die Person"}
 
 
-def _save_log(transcript: str, analysis: str, mode: str, model: str, gender: str) -> None:
+def _save_log(transcript: str, analysis: str, mode: str, model: str, gender: str,
+              diarized: bool = False) -> None:
     try:
         log_dir = Path(LOG_DIR)
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -175,6 +192,7 @@ def _save_log(transcript: str, analysis: str, mode: str, model: str, gender: str
             "mode": mode,
             "model": model,
             "gender": gender,
+            "diarized": diarized,
             "transcript": transcript,
             "analysis": analysis,
         }
@@ -184,31 +202,221 @@ def _save_log(transcript: str, analysis: str, mode: str, model: str, gender: str
         logger.error(f"Log save failed: {e}")
 
 
-async def transcribe_audio(
-    audio_path: str, filename: str = "audio.webm", lang_mode: str = "de", model_override: str = None
-) -> str:
+def _audio_mime(filename: str) -> str:
+    # Ohne Endung wie bisher webm annehmen – das liefert der Browser-Recorder.
+    ext = Path(filename).suffix.lower() or ".webm"
+    return {
+        ".webm": "audio/webm", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+        ".ogg": "audio/ogg", ".flac": "audio/flac",
+    }.get(ext, "audio/wav")
+
+
+def _whisper_model_fields(lang_mode: str, model_override: str = None) -> dict:
+    """Modell-/Sprachfelder fuer den Whisper-Request (siehe CLAUDE.md, Sprachmodell-Auswahl)."""
+    if model_override:
+        fields = {"model": model_override}
+        if lang_mode == "de":
+            fields["language"] = WHISPER_LANGUAGE
+        return fields
+    if lang_mode == "de":
+        return {"model": WHISPER_MEDICAL_MODEL, "language": WHISPER_LANGUAGE}
+    return {}
+
+
+async def _post_whisper(audio_path: str, filename: str, data: dict) -> httpx.Response:
+    """POST an den Whisper-Server. `data` muss ein Mapping sein - httpx schiebt
+    eine Liste von Tupeln in den urlencoded-Pfad und wirft dann
+    "Attempted to send an sync request with an AsyncClient instance".
+    Wiederholte Formularfelder werden als Liste im Wert ausgedrueckt."""
     async with httpx.AsyncClient(timeout=300) as client:
         with open(audio_path, "rb") as f:
-            ext = Path(filename).suffix.lower() or ".webm"
-            mime = "audio/webm" if ext == ".webm" else "audio/mpeg" if ext == ".mp3" else "audio/wav"
-            data: dict = {"response_format": "text"}
-            if model_override:
-                data["model"] = model_override
-                if lang_mode == "de":
-                    data["language"] = WHISPER_LANGUAGE
-            elif lang_mode == "de":
-                data["model"] = WHISPER_MEDICAL_MODEL
-                data["language"] = WHISPER_LANGUAGE
             response = await client.post(
                 f"http://{WHISPER_HOST}:{WHISPER_PORT}/v1/audio/transcriptions",
-                files={"file": (filename, f, mime)},
+                files={"file": (filename, f, _audio_mime(filename))},
                 data=data,
             )
     if response.status_code != 200:
         raise HTTPException(
             status_code=500, detail=f"Whisper-Fehler {response.status_code}: {response.text[:200]}"
         )
+    return response
+
+
+async def transcribe_audio(
+    audio_path: str, filename: str = "audio.webm", lang_mode: str = "de", model_override: str = None
+) -> str:
+    data = {"response_format": "text", **_whisper_model_fields(lang_mode, model_override)}
+    response = await _post_whisper(audio_path, filename, data)
     return response.text.strip()
+
+
+async def transcribe_with_units(
+    audio_path: str, filename: str = "audio.webm", lang_mode: str = "de"
+) -> tuple:
+    """Transkribiert mit Zeitstempeln - Grundlage fuer die Sprecherzuordnung.
+
+    Liefert (Volltext, Einheiten); eine Einheit ist {"start", "end", "text"}.
+    Angefragt wird Wort-Granularitaet: Whisper-Segmente laufen regelmaessig ueber
+    Sprecherwechsel hinweg und wuerden ganze Antworten dem Falschen zuordnen.
+    Liefert der Whisper-Server keine Woerter, wird auf Segmentebene
+    zurueckgefallen - schlechter, aber besser als gar keine Trennung.
+    """
+    # Feldname MIT eckigen Klammern - der faster-whisper-Server bindet den
+    # Parameter per Form(alias="timestamp_granularities[]"). Ohne Klammern wird
+    # er stillschweigend ignoriert und "words" kommt als null zurueck.
+    data = {
+        "response_format": "verbose_json",
+        "timestamp_granularities[]": ["word", "segment"],
+        **_whisper_model_fields(lang_mode),
+    }
+    response = await _post_whisper(audio_path, filename, data)
+    payload = response.json()
+    text = (payload.get("text") or "").strip()
+    segments = payload.get("segments") or []
+
+    words = list(payload.get("words") or [])
+    if not words:
+        for seg in segments:
+            words.extend(seg.get("words") or [])
+
+    if words:
+        units = [
+            {"start": float(w["start"]), "end": float(w["end"]), "text": w["word"]}
+            for w in words
+        ]
+    else:
+        logger.warning("Whisper lieferte keine Wort-Zeitstempel - Fallback auf Segmentebene")
+        units = [
+            {"start": float(sg["start"]), "end": float(sg["end"]), "text": sg["text"]}
+            for sg in segments
+        ]
+    return text, units
+
+
+# ============================================================
+# SPRECHERTRENNUNG (DIARISATION)
+# ============================================================
+# Die Marker sind bewusst anonym ("SPRECHER A") statt "Arzt"/"Patient": pyannote
+# weiss nicht, wer wer ist. Die Zuordnung uebernimmt das LLM anhand des
+# Gespraechsverlaufs (siehe SPEAKER_CONTEXT_DIARIZED in prompts.py) - wer die
+# Anamnesefragen stellt, ist im Text eindeutiger als jede akustische Heuristik.
+SPEAKER_LETTERS = "ABCDEFGHIJ"
+
+_SPEAKER_LINE_RE = re.compile(r"^SPRECHER [A-Z0-9]+:", re.MULTILINE)
+
+
+def has_speaker_labels(transcript: str) -> bool:
+    return bool(_SPEAKER_LINE_RE.search(transcript))
+
+
+async def diarize_audio(audio_path: str, filename: str) -> list:
+    """Holt Sprecher-Zeitintervalle vom Diarisations-Container."""
+    async with httpx.AsyncClient(timeout=300) as client:
+        with open(audio_path, "rb") as f:
+            r = await client.post(
+                f"http://{DIARIZE_HOST}:{DIARIZE_PORT}/diarize",
+                files={"audio": (filename, f, _audio_mime(filename))},
+                data={
+                    "min_speakers": DIARIZE_MIN_SPEAKERS,
+                    "max_speakers": DIARIZE_MAX_SPEAKERS,
+                },
+            )
+    if r.status_code != 200:
+        raise RuntimeError(f"Diarisation {r.status_code}: {r.text[:200]}")
+    return r.json().get("segments") or []
+
+
+def _speaker_at(start: float, end: float, segments: list) -> str:
+    """Sprecher mit der groessten zeitlichen Ueberlappung, sonst der naechstgelegene."""
+    best, best_overlap = None, 0.0
+    for seg in segments:
+        overlap = min(end, seg["end"]) - max(start, seg["start"])
+        if overlap > best_overlap:
+            best, best_overlap = seg["speaker"], overlap
+    if best is not None:
+        return best
+    # Kein Ueberlapp (Sprechpause, VAD-Luecke): naechstes Segment nach Abstand.
+    mid = (start + end) / 2
+    return min(
+        segments, key=lambda sg: min(abs(mid - sg["start"]), abs(mid - sg["end"]))
+    )["speaker"]
+
+
+def _group_turns(units: list, segments: list) -> list:
+    turns = []
+    for unit in units:
+        speaker = _speaker_at(unit["start"], unit["end"], segments)
+        if turns and turns[-1]["speaker"] == speaker:
+            turns[-1]["units"].append(unit)
+            turns[-1]["end"] = unit["end"]
+        else:
+            turns.append({
+                "speaker": speaker, "units": [unit],
+                "start": unit["start"], "end": unit["end"],
+            })
+    return turns
+
+
+def _smooth_turns(turns: list) -> list:
+    """Schmilzt einzelne Kurz-Einwuerfe in den umgebenden Sprecher ein.
+
+    Ein einzelnes kurzes Wort ("mhm", "ja") mitten in einer fremden Aeusserung ist
+    fast immer Diarisations-Rauschen und wuerde den Text ohne Informationsgewinn
+    in Dutzende Mini-Turns zerhacken.
+    """
+    if len(turns) < 3:
+        return turns
+    result = [turns[0]]
+    i = 1
+    while i < len(turns):
+        current = turns[i]
+        following = turns[i + 1] if i + 1 < len(turns) else None
+        is_blip = len(current["units"]) == 1 and (current["end"] - current["start"]) < 0.8
+        if is_blip and following is not None and result[-1]["speaker"] == following["speaker"]:
+            result[-1]["units"].extend(current["units"])
+            result[-1]["units"].extend(following["units"])
+            result[-1]["end"] = following["end"]
+            i += 2
+            continue
+        result.append(current)
+        i += 1
+    return result
+
+
+def format_diarized_transcript(units: list, segments: list) -> str:
+    """Baut aus Wort-Zeitstempeln + Sprecherintervallen ein beschriftetes Transkript."""
+    if not units or not segments:
+        return ""
+    label_map: dict = {}
+    lines = []
+    for turn in _smooth_turns(_group_turns(units, segments)):
+        if turn["speaker"] not in label_map:
+            index = len(label_map)
+            label_map[turn["speaker"]] = (
+                SPEAKER_LETTERS[index] if index < len(SPEAKER_LETTERS) else str(index + 1)
+            )
+        text = re.sub(r"\s+", " ", "".join(u["text"] for u in turn["units"])).strip()
+        if text:
+            lines.append(f"SPRECHER {label_map[turn['speaker']]}: {text}")
+    return "\n".join(lines)
+
+
+def _build_prompt(mode: str, transcript: str, gender: str, diarized: bool) -> str:
+    template = {
+        "analyze": ANALYZE_PROMPT,
+        "abpro": ABPRO_PROMPT,
+        "summary": SUMMARY_PROMPT,
+    }.get(mode, CLEAN_PROMPT)
+    gender_context = _gender_context(gender)
+    speaker_context = (
+        SPEAKER_CONTEXT_DIARIZED if diarized else SPEAKER_CONTEXT_PLAIN
+    ).format(**gender_context)
+    return template.format(
+        transcript=transcript,
+        medical_glossary=MEDICAL_GLOSSARY,
+        speaker_context=speaker_context,
+        **gender_context,
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -234,7 +442,8 @@ async def get_models():
 
 @app.get("/health")
 async def health():
-    result: dict = {"version": VERSION, "whisper": "error", "ollama": "error"}
+    result: dict = {"version": VERSION, "whisper": "error", "ollama": "error",
+                    "diarize": "error"}
     try:
         async with httpx.AsyncClient(timeout=3) as client:
             await client.get(f"http://{WHISPER_HOST}:{WHISPER_PORT}/")
@@ -245,6 +454,12 @@ async def health():
         async with httpx.AsyncClient(timeout=3) as client:
             await client.get(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags")
         result["ollama"] = "ok"
+    except Exception:
+        pass
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.get(f"http://{DIARIZE_HOST}:{DIARIZE_PORT}/health")
+        result["diarize"] = r.json().get("status", "error")
     except Exception:
         pass
     return result
@@ -296,9 +511,11 @@ async def analyze(
     mode: str = Form(default="analyze"),
     gender: str = Form(default="neutral"),
     lang_mode: str = Form(default="de"),
+    diarize: str = Form(default="true"),
 ):
     """Transkription + LLM-Analyse als SSE-Stream."""
     used_model = model or OLLAMA_MODEL
+    want_diarize = str(diarize).lower() not in ("false", "0", "off", "")
     original_name = audio.filename or "audio.webm"
     ext = Path(original_name).suffix or ".webm"
 
@@ -309,33 +526,64 @@ async def analyze(
     async def event_stream():
         try:
             model_label = "DE-Medizin" if lang_mode == "de" else "Sprache Auto"
-            yield f"data: {json.dumps({'type': 'status', 'text': f'Transkribiere Audio ({model_label})...'})}\n\n"
+            diarized = False
 
-            try:
-                transcript = await transcribe_audio(tmp_path, original_name, lang_mode)
-            except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
-                return
+            if want_diarize:
+                status = f"Transkribiere Audio ({model_label}) + Sprechertrennung..."
+                yield f"data: {json.dumps({'type': 'status', 'text': status})}\n\n"
+                # Beide Dienste laufen auf derselben Datei, aber auf getrennter
+                # Hardware (Whisper GPU, Diarisation CPU) - parallel kostet die
+                # Sprechertrennung dadurch praktisch keine zusaetzliche Zeit.
+                transcription, diarization = await asyncio.gather(
+                    transcribe_with_units(tmp_path, original_name, lang_mode),
+                    diarize_audio(tmp_path, original_name),
+                    return_exceptions=True,
+                )
+                units = []
+                if isinstance(transcription, BaseException):
+                    # Nur die Zeitstempel-Variante ist gescheitert (z. B. ein
+                    # Whisper-Server ohne verbose_json). Ein zweiter, einfacher
+                    # Versuch ist billiger als die Analyse aufzugeben.
+                    logger.warning(f"Transkription mit Zeitstempeln fehlgeschlagen: {transcription}")
+                    try:
+                        transcript = await transcribe_audio(tmp_path, original_name, lang_mode)
+                    except Exception as e:
+                        yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
+                        return
+                else:
+                    transcript, units = transcription
 
+                if isinstance(diarization, BaseException) or not diarization or not units:
+                    # Bewusst kein Abbruch: ein Transkript ohne Sprechertrennung
+                    # ist immer noch brauchbar (Prompt schaltet auf PLAIN um).
+                    logger.warning(f"Diarisation nicht anwendbar: {diarization}")
+                    yield f"data: {json.dumps({'type': 'status', 'text': 'Sprechertrennung nicht verfügbar – fahre ohne Sprecherkennzeichnung fort.'})}\n\n"
+                else:
+                    labeled = format_diarized_transcript(units, diarization)
+                    if labeled:
+                        diarized = True
+            else:
+                yield f"data: {json.dumps({'type': 'status', 'text': f'Transkribiere Audio ({model_label})...'})}\n\n"
+                try:
+                    transcript = await transcribe_audio(tmp_path, original_name, lang_mode)
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
+                    return
+
+            # Halluzinations-Pruefung auf dem unbeschrifteten Text: mit Markern
+            # davor wuerde kein Eintrag aus WHISPER_HALLUCINATIONS mehr greifen.
             if _is_hallucination(transcript) or len(transcript.strip()) < 10:
                 yield f"data: {json.dumps({'type': 'error', 'text': 'Kein Audioinhalt erkannt – bitte erneut aufnehmen.'})}\n\n"
                 return
+
+            if diarized:
+                transcript = labeled
 
             yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
 
             yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
 
-            if mode == "analyze":
-                prompt_template = ANALYZE_PROMPT
-            elif mode == "abpro":
-                prompt_template = ABPRO_PROMPT
-            elif mode == "summary":
-                prompt_template = SUMMARY_PROMPT
-            else:
-                prompt_template = CLEAN_PROMPT
-            prompt = prompt_template.format(
-                transcript=transcript, medical_glossary=MEDICAL_GLOSSARY, **_gender_context(gender)
-            )
+            prompt = _build_prompt(mode, transcript, gender, diarized)
 
             analysis_tokens = []
             try:
@@ -352,7 +600,7 @@ async def analyze(
                 return
 
             if logging_enabled and analysis_tokens:
-                _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender)
+                _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender, diarized)
 
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
@@ -372,18 +620,10 @@ async def analyze_text(
 ):
     """LLM-Analyse eines bereits vorhandenen Transkripts – kein Whisper-Schritt."""
     used_model = model or OLLAMA_MODEL
-
-    if mode == "analyze":
-        prompt_template = ANALYZE_PROMPT
-    elif mode == "abpro":
-        prompt_template = ABPRO_PROMPT
-    elif mode == "summary":
-        prompt_template = SUMMARY_PROMPT
-    else:
-        prompt_template = CLEAN_PROMPT
-    prompt = prompt_template.format(
-        transcript=transcript, medical_glossary=MEDICAL_GLOSSARY, **_gender_context(gender)
-    )
+    # Beim erneuten Analysieren kommt das Transkript aus dem Frontend zurueck -
+    # ob es diarisiert ist, steht an den Markern selbst.
+    diarized = has_speaker_labels(transcript)
+    prompt = _build_prompt(mode, transcript, gender, diarized)
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
@@ -408,7 +648,7 @@ async def analyze_text(
             return
 
         if logging_enabled and analysis_tokens:
-            _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender)
+            _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender, diarized)
 
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 

@@ -12,7 +12,8 @@ Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter F
 - Sprachschalter im Frontend: „Gespräch nicht auf Deutsch" wechselt auf Standard-Modell mit Auto-Spracherkennung
 - **Medizinisches Fachvokabular** (`medical_vocab.py`): kuratiertes Glossar aus Diagnosen, Wirkstoffen, Impfstoffen und Untersuchungen, das dem LLM mitgegeben wird, damit phonetisch verzerrte Begriffe erkannt statt geraten werden
 - KI-gestützte Analyse des Arzt-Patienten-Gesprächs (ollama LLM)
-- Sprecherzuordnung: die Prompts weisen das LLM auf den Dialogcharakter ohne Sprecherkennzeichnung hin, damit Arzt-Überlegungen nicht als gesicherte Diagnosen und Patienten-Rückfragen nicht als Verordnungen dokumentiert werden
+- **Sprechertrennung (Diarisation)** via pyannote.audio: trennt Arzt, Patient und weitere Anwesende im Transkript (`SPRECHER A:` / `SPRECHER B:` …). Läuft auf der CPU in einem eigenen Container, parallel zur Transkription
+- Sprecherzuordnung: das LLM erschließt aus dem Gesprächsverlauf, welcher Marker der Arzt ist – so werden Arzt-Überlegungen nicht als gesicherte Diagnosen und Patienten-Rückfragen nicht als Verordnungen dokumentiert. Ohne Diarisation greift weiterhin die reine Kontext-Heuristik
 - Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO, Standard), Zusammenfassung, Bereinigung
 - A/B/PRO-Modus zeigt zusätzlich drei separat kopierbare Karten (Anamnese / Befund / Procedere)
 - Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe, auch nachträglich per Rerun auf der Analyse-Karte
@@ -22,7 +23,7 @@ Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter F
 - Live-Streaming der LLM-Antwort (SSE)
 - Einstellungen-Modal (Zahnrad-Icon): KI-Modell-Auswahl, Mikrofon-Auswahl, Logging-Modus
 - Optionaler Logging-Modus: speichert Transkript + Analyse als JSON auf dem Server (`LOG_DIR`)
-- Live-Health-Anzeige für Whisper und Ollama im Header
+- Live-Health-Anzeige für Whisper, Ollama und Sprechertrennung im Header
 
 ### ✨ Bedienung
 
@@ -37,7 +38,8 @@ Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter F
 
 - Docker & Docker Compose
 - NVIDIA GPU für faster-whisper (Standard-Image nutzt CUDA; ohne GPU auf `latest-cpu` umstellen)
-- Mindestens 4 GB RAM
+- Mindestens 4 GB RAM (Diarisation belegt zusätzlich ~1,5 GB und einige CPU-Kerne)
+- Kostenloser **Hugging-Face-Account** für die Sprechertrennung: die pyannote-Modelle sind MIT-lizenziert, aber „gated" (siehe [`diarize/README.md`](diarize/README.md))
 - Bestehender **ollama-Container** mit Modell (z. B. `gemma4:12b`), erreichbar über das externe Netzwerk `ollama-net`
 - (Optional) Caddy oder anderer Reverse-Proxy im externen Netzwerk `caddy-proxy-network`
 
@@ -62,7 +64,7 @@ docker-compose up -d
 # UI erreichbar?
 curl http://localhost:8010/
 
-# Health-Check (whisper + ollama + version)
+# Health-Check (whisper + ollama + diarize + version)
 curl http://localhost:8010/health
 ```
 
@@ -98,8 +100,34 @@ environment:
   - OLLAMA_MODEL=gemma4:12b        # Standard-Modell für die Web-UI
   - WHISPER_LANGUAGE=de
   - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
+  - DIARIZE_HOST=diarize
+  - DIARIZE_PORT=8000
+  - DIARIZE_MIN_SPEAKERS=0         # 0 = pyannote schätzt die Sprecherzahl selbst
+  - DIARIZE_MAX_SPEAKERS=0         # 0 = ohne Obergrenze (Begleitperson, MFA)
   - LOG_DIR=/logs                  # Ziel für optionalen Logging-Modus
 ```
+
+### Sprechertrennung (Diarisation)
+
+Einmalig vor dem ersten Build: Hugging-Face-Token besorgen, Nutzungsbedingungen
+der drei pyannote-Repos akzeptieren und den Token ablegen — die vollständige
+Anleitung steht in [`diarize/README.md`](diarize/README.md).
+
+```bash
+echo "hf_xxxxxxxxxxxxxxxxxxxx" > .hf_token   # gitignored
+docker compose build diarize
+docker compose up -d diarize
+curl http://127.0.0.1:8002/health
+```
+
+Der Token wird ausschließlich als BuildKit-Secret gemountet und landet nicht im
+Image; zur Laufzeit läuft der Container mit `HF_HUB_OFFLINE=1`, also ohne
+Netzzugang. Im Frontend schaltet der Toggle „Sprechertrennung" die Funktion pro
+Analyse ab. Fällt der Container aus, läuft die Analyse ohne Sprecherkennzeichnung
+weiter — die Transkription bricht **nicht** ab.
+
+Ohne Diarisation ist die Sprechertrennung nicht deaktiviert, sondern nur
+ungenauer: die Prompts arbeiten dann mit reiner Kontext-Heuristik.
 
 Das Whisper-Modell wird im `faster-whisper`-Container konfiguriert:
 
@@ -184,6 +212,34 @@ curl http://localhost:11434/api/tags
 2. Bei nicht-deutschen Gesprächen den Toggle „Gespräch nicht auf Deutsch" aktivieren
 3. `WHISPER__MODEL` im `faster-whisper`-Container auf ein größeres Modell stellen (z. B. `large-v3`, bereits Standard)
 4. Häufig falsch erkannte Fachbegriffe in `medical_vocab.py` ergänzen — das LLM gleicht verzerrte Stellen dann gegen das Glossar ab
+
+### Problem: „Sprechertrennung nicht verfügbar"
+
+Die Analyse läuft dann bewusst ohne Sprecherkennzeichnung weiter. Ursache prüfen:
+
+```bash
+curl http://127.0.0.1:8002/health      # {"status": "ok"} erwartet
+docker compose logs --tail 50 diarize
+```
+
+- `Pipeline nicht geladen` / `nicht im Cache`: Image wurde ohne gültigen
+  `.hf_token` gebaut oder die Nutzungsbedingungen sind nicht für **alle drei**
+  pyannote-Repos akzeptiert → `docker compose build --no-cache diarize`
+- Der Health-Punkt „Sprecher" im Header bleibt rot, solange der Container startet
+  (das Laden der Pipeline dauert einige Sekunden)
+
+### Problem: „Sprecher werden falsch zugeordnet"
+
+Ein Raummikrofon liefert einen Mono-Kanal — die Trennung ist gut, aber nicht
+perfekt; Fehler sitzen vor allem an Sprecherwechseln und bei kurzen Einwürfen.
+
+1. Mikrofon mittig zwischen Arzt und Patient platzieren (Freisprecheinrichtungen
+   wie das EPOS Expand 40 sind deutlich besser als Laptop-Mikrofone)
+2. Bei mehr als zwei Anwesenden ist das erwartbar — die Prompts sind darauf
+   ausgelegt, bei Widersprüchen dem Inhalt statt dem Marker zu folgen
+3. `DIARIZE_MIN_SPEAKERS`/`DIARIZE_MAX_SPEAKERS` nur setzen, wenn die
+   Personenzahl wirklich feststeht — eine harte Vorgabe von 2 ordnet Aussagen
+   von Begleitpersonen falsch zu
 
 ### Problem: „container … is not connected to the network ki-transcribe_diktat-network"
 

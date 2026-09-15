@@ -1,0 +1,16 @@
+# PyTorch bewusst aus dem CPU-Wheel-Index: die Diarisation laeuft absichtlich
+# auf der CPU (siehe diarize/app.py). Der Default-PyPI-Index wuerde die
+# CUDA-Builds ziehen (~2,5 GB Image) und den Container an NVIDIA binden.
+--index-url https://download.pytorch.org/whl/cpu
+
+# Abweichend von der ~=-Konvention des Projekts (siehe requirements-server.txt):
+# der CPU-Index fuehrt nicht alle Minor-Versionen.
+#
+# Obergrenze <2.9 ist PFLICHT, nicht Vorsicht: torchaudio 2.9.0 hat
+# `torchaudio.AudioMetaData` entfernt, pyannote.audio 3.4 benutzt es in
+# pyannote/audio/core/io.py. Mit 2.9+ bricht schon der Import mit
+# `AttributeError: module 'torchaudio' has no attribute 'AudioMetaData'`.
+# Geprueft: 2.6.0 / 2.7.1 / 2.8.0 haben das Attribut, 2.9.0 nicht.
+# torch und torchaudio erscheinen im Gleichschritt, daher dieselbe Spanne.
+torch>=2.2,<2.9
+torchaudio>=2.2,<2.9

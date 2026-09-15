@@ -19,6 +19,12 @@ services:
       - WHISPER_LANGUAGE=de
       - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
       - WHISPER_FAST_MODEL=small
+      - DIARIZE_HOST=diarize
+      - DIARIZE_PORT=8000
+      # 0/0 = pyannote schaetzt die Sprecherzahl selbst (Diktat bleibt 1,
+      # Begleitperson/MFA duerfen 3+ sein)
+      - DIARIZE_MIN_SPEAKERS=0
+      - DIARIZE_MAX_SPEAKERS=0
       - LOG_DIR=/logs
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
@@ -30,10 +36,40 @@ services:
       - ./logs:/logs
     depends_on:
       - faster-whisper
+      - diarize
     networks:
       - diktat-network
       - ollama-network
       - caddy-proxy-network
+    restart: unless-stopped
+
+  # ============================================================
+  # Diarisation (Sprechertrennung, CPU) – pyannote.audio
+  # ============================================================
+  # Bewusst CPU und bewusst ein eigener Container: der geteilte Whisper-Container
+  # bleibt unangetastet, die Pipeline braucht keine GPU-Zuteilung, und ein
+  # spaeterer GPU-Wechsel beruehrt die Sprechertrennung nicht.
+  # Erster Build braucht ./.hf_token – siehe diarize/README.md
+  diarize:
+    build:
+      context: ./diarize
+      dockerfile: Dockerfile
+      secrets:
+        - hf_token
+    container_name: diktat-diarize
+    expose:
+      - "8000"
+    ports:
+      - "127.0.0.1:8002:8000"
+    environment:
+      - PYANNOTE_MODEL=pyannote/speaker-diarization-3.1
+      - TORCH_THREADS=4
+      - TZ=Europe/Berlin
+    # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
+    volumes:
+      - ./diarize/app.py:/app/app.py:ro
+    networks:
+      - diktat-network
     restart: unless-stopped
 
   # ============================================================
@@ -67,6 +103,15 @@ services:
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+
+# ============================================================
+# SECRETS
+# ============================================================
+# Hugging-Face-Token, nur zur Build-Zeit (gated pyannote-Modelle).
+# Als BuildKit-Secret gemountet, landet also nicht im Image.
+secrets:
+  hf_token:
+    file: ./.hf_token
 
 # ============================================================
 # NETZWERKE

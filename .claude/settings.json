@@ -66,7 +66,8 @@
       "Bash(curl -s --max-time 20 http://127.0.0.1:8010/health)",
       "Bash(python -c ' *)",
       "Bash(MSYS_NO_PATHCONV=1 docker exec gespraech-web tail -1 /app/prompts.py)",
-      "Bash(curl -s --max-time 15 http://127.0.0.1:8010/health)"
+      "Bash(curl -s --max-time 15 http://127.0.0.1:8010/health)",
+      "Bash(docker compose *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Jan.DOMAIN\\ki-transcribe\\build"

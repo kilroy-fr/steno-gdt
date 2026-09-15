@@ -163,9 +163,11 @@ async function checkHealth() {
     const data = await r.json();
     setHealthDot("whisperDot", data.whisper);
     setHealthDot("ollamaDot", data.ollama);
+    setHealthDot("diarizeDot", data.diarize);
   } catch {
     setHealthDot("whisperDot", "error");
     setHealthDot("ollamaDot", "error");
+    setHealthDot("diarizeDot", "error");
   }
 }
 
@@ -457,6 +459,30 @@ function getLangMode() {
   return document.getElementById("langAutoToggle")?.checked ? "auto" : "de";
 }
 
+function getDiarize() {
+  return document.getElementById("diarizeToggle")?.checked ? "true" : "false";
+}
+
+// Sprecher-Marker im Transkript hervorheben. Ohne Marker (Live-Vorschau,
+// Diarisation aus oder fehlgeschlagen) bleibt es einfacher Text.
+function renderTranscript(el, text) {
+  if (!/^SPRECHER [A-Z0-9]+:/m.test(text)) {
+    el.textContent = text;
+    return;
+  }
+  el.innerHTML = text.split("\n").map((line) => {
+    const m = line.match(/^(SPRECHER [A-Z0-9]+:)([\s\S]*)$/);
+    if (!m) return escapeHtml(line);
+    return '<span class="speaker-tag">' + escapeHtml(m[1]) + "</span>" + escapeHtml(m[2]);
+  }).join("\n");
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
 // ============================================================
 // ANALYSE STARTEN
 // ============================================================
@@ -504,6 +530,7 @@ async function startAnalysis() {
   formData.append("mode", mode);
   formData.append("gender", selectedGender);
   formData.append("lang_mode", getLangMode());
+  formData.append("diarize", getDiarize());
 
   let analysisRaw = "";
 
@@ -657,7 +684,7 @@ function handleSSE(evt) {
       currentTranscript = evt.text;
       document.getElementById("transcriptSection").style.display = "block";
       transcriptEl.classList.remove("streaming");
-      transcriptEl.textContent = evt.text;
+      renderTranscript(transcriptEl, evt.text);
       break;
 
     case "token":
@@ -823,7 +850,7 @@ function restoreHistory(entry) {
 
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("transcriptSection").style.display = "block";
-  document.getElementById("transcriptText").textContent = entry.transcript;
+  renderTranscript(document.getElementById("transcriptText"), entry.transcript);
 
   setAnalysisMode(entry.mode);
   document.getElementById("analysisSection").style.display = "block";

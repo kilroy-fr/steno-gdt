@@ -1,7 +1,21 @@
+# ============================================================
+# SPRECHER-KONTEXT
+# ============================================================
+# Wird von server.py in ANALYZE_PROMPT und ABPRO_PROMPT als {speaker_context}
+# eingesetzt – je nachdem, ob das Transkript diarisiert wurde oder nicht.
+# Bewusst keine harte Vorgabe "genau zwei Personen": Begleitpersonen und MFA
+# kommen im Sprechzimmer regelmaessig vor.
+
+SPEAKER_CONTEXT_PLAIN = """SPRECHER: Das Transkript ist ein Dialog ohne Sprecherkennzeichnung (Arzt, {patient_label}, ggf. Begleitperson). Ordne Aussagen anhand des Kontexts zu; wenn die Zuordnung unklar bleibt, formuliere neutral ("es wurde besprochen") statt zu raten. Laut überlegte Verdachtsdiagnosen des Arztes sind keine gesicherten Diagnosen; Rückfragen zu bestehenden Medikamenten sind keine neuen Verordnungen."""
+
+SPEAKER_CONTEXT_DIARIZED = """SPRECHER: Die Sprecher wurden automatisch getrennt – jede Zeile beginnt mit einem anonymen Marker (SPRECHER A, SPRECHER B, ...). Welcher Marker der Arzt und welcher {patient_label} ist, steht NICHT fest: erschließe es aus dem Gesprächsverlauf – wer Anamnesefragen stellt, untersucht und Empfehlungen ausspricht, ist der Arzt; weitere Marker sind meist Begleitperson oder Praxispersonal.
+Die Sprechertrennung ist fehleranfällig, vor allem an Sprecherwechseln und bei kurzen Einwürfen. Wenn Marker und Inhalt sich widersprechen, hat der Inhalt Vorrang; bleibt die Zuordnung unklar, formuliere neutral ("es wurde besprochen") statt zu raten. Laut überlegte Verdachtsdiagnosen des Arztes sind keine gesicherten Diagnosen; Rückfragen zu bestehenden Medikamenten sind keine neuen Verordnungen.
+Übernimm die Marker NICHT in deine Ausgabe."""
+
 ANALYZE_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
 {gender_instruction}
 Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs und erstelle eine strukturierte Zusammenfassung für den Arzt. Halte dich ausschließlich an die Inhalte des Transkripts – keine Annahmen, keine Ergänzungen.
-SPRECHER: Das Transkript ist ein Dialog ohne Sprecherkennzeichnung (Arzt, {patient_label}, ggf. Begleitperson). Ordne Aussagen anhand des Kontexts zu; wenn die Zuordnung unklar bleibt, formuliere neutral ("es wurde besprochen") statt zu raten. Laut überlegte Verdachtsdiagnosen des Arztes sind keine gesicherten Diagnosen; Rückfragen zu bestehenden Medikamenten sind keine neuen Verordnungen.
+{speaker_context}
 WICHTIG: Wenn ein Begriff im Transkript unklar, unverständlich oder phonetisch verzerrt wirkt, schreibe ihn exakt so ab oder markiere ihn als [unverständlich]. Erfinde unter keinen Umständen Wörter, Fachbegriffe, Produktnamen oder Medikamente. Nutze das folgende Glossar ausschließlich, um bereits im Transkript angedeutete Begriffe korrekt zu erkennen – niemals, um neue Inhalte zu ergänzen.
 
 {medical_glossary}
@@ -36,7 +50,7 @@ Antworte vollständig auf Deutsch."""
 ABPRO_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
 {gender_instruction}
 Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs. Nur Transkript-Inhalte – keine Annahmen, keine Ergänzungen. Erfinde keine Wörter, Fachbegriffe oder Medikamente – unklare Stellen als [unverständlich] markieren. Antwort auf Deutsch.
-SPRECHER: Das Transkript ist ein Dialog ohne Sprecherkennzeichnung (Arzt, {patient_label}, ggf. Begleitperson). Ordne Aussagen anhand des Kontexts zu; bei unklarer Zuordnung neutral formulieren statt raten. Laut überlegte Verdachtsdiagnosen des Arztes sind keine gesicherten Diagnosen; Rückfragen zu bestehenden Medikamenten sind keine neuen Verordnungen.
+{speaker_context}
 Nutze das folgende Glossar ausschließlich, um bereits im Transkript angedeutete Begriffe korrekt zu erkennen – niemals, um neue Inhalte zu ergänzen.
 
 {medical_glossary}
@@ -81,6 +95,7 @@ CLEAN_PROMPT = """Bereinige das folgende medizinische Transkript:
 - Korrigiere offensichtliche Transkriptionsfehler
 - Nutze das folgende Glossar, um phonetisch verzerrte Fachbegriffe zu erkennen und korrekt zu schreiben – nur wenn ein Begriff erkennbar gemeint ist, nichts erzwingen oder ergänzen
 - Behalte den Inhalt und die Formulierungen exakt bei
+- Falls Zeilen mit Sprecher-Markern beginnen (z. B. "SPRECHER A:"), behalte diese unverändert bei
 - Keine Umformulierungen, keine Zusammenfassungen
 - Gib NUR den bereinigten Text zurück, ohne Meta-Kommentare
 
