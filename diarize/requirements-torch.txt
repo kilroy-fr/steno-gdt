@@ -1,16 +1,29 @@
-# PyTorch bewusst aus dem CPU-Wheel-Index: die Diarisation laeuft absichtlich
-# auf der CPU (siehe diarize/app.py). Der Default-PyPI-Index wuerde die
-# CUDA-Builds ziehen (~2,5 GB Image) und den Container an NVIDIA binden.
---index-url https://download.pytorch.org/whl/cpu
+# PyTorch-Variante wird NICHT hier festgelegt, sondern beim Build ueber das
+# Argument TORCH_INDEX_URL (siehe Dockerfile und docker-compose.yml):
+#
+#   CPU          https://download.pytorch.org/whl/cpu
+#   NVIDIA       https://download.pytorch.org/whl/cu128
+#   Intel Arc    https://download.pytorch.org/whl/xpu
+#
+# Deshalb steht hier bewusst KEIN --index-url: eine Direktive in dieser Datei
+# wuerde das --index-url der pip-Kommandozeile ueberstimmen und der Wechsel auf
+# eine andere Karte waere wieder eine Quelltextaenderung.
+#
+# cu128 statt cu124 ist Pflicht, nicht Geschmack: die RTX 5080 ist Blackwell
+# (sm_120), fuer das die cu124-Wheels keinen Code enthalten.
 
 # Abweichend von der ~=-Konvention des Projekts (siehe requirements-server.txt):
-# der CPU-Index fuehrt nicht alle Minor-Versionen.
+# die PyTorch-Indizes fuehren nicht alle Minor-Versionen.
 #
 # Obergrenze <2.9 ist PFLICHT, nicht Vorsicht: torchaudio 2.9.0 hat
 # `torchaudio.AudioMetaData` entfernt, pyannote.audio 3.4 benutzt es in
 # pyannote/audio/core/io.py. Mit 2.9+ bricht schon der Import mit
 # `AttributeError: module 'torchaudio' has no attribute 'AudioMetaData'`.
 # Geprueft: 2.6.0 / 2.7.1 / 2.8.0 haben das Attribut, 2.9.0 nicht.
+#
+# Untergrenze 2.7, weil erst ab da alle drei Indizes (cpu, cu128, xpu) dieselbe
+# Spanne fuehren — so bleibt die Versionswahl unabhaengig von der Kartenwahl.
+# Aktuell faellt die Wahl auf alle drei Indizes gleich: 2.8.0.
 # torch und torchaudio erscheinen im Gleichschritt, daher dieselbe Spanne.
-torch>=2.2,<2.9
-torchaudio>=2.2,<2.9
+torch>=2.7,<2.9
+torchaudio>=2.7,<2.9

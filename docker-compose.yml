@@ -44,16 +44,27 @@ services:
     restart: unless-stopped
 
   # ============================================================
-  # Diarisation (Sprechertrennung, CPU) – pyannote.audio
+  # Diarisation (Sprechertrennung, GPU) – pyannote.audio
   # ============================================================
-  # Bewusst CPU und bewusst ein eigener Container: der geteilte Whisper-Container
-  # bleibt unangetastet, die Pipeline braucht keine GPU-Zuteilung, und ein
-  # spaeterer GPU-Wechsel beruehrt die Sprechertrennung nicht.
+  # Eigener Container, damit der mit ki-atteste geteilte Whisper-Container
+  # unangetastet bleibt. Auf der CPU war die Pipeline mit ~0,6x Echtzeit der
+  # Flaschenhals der gesamten Analyse (15 min Rechenzeit fuer 25 min Aufnahme,
+  # waehrend Whisper auf der GPU nach gut einer Minute fertig war) – siehe
+  # Kopfkommentar in diarize/app.py.
+  #
+  # Kartenwechsel (z. B. auf eine Intel Arc) sind bewusst reine Konfiguration:
+  # TORCH_INDEX_URL waehlt das Wheel, der devices-/deploy-Block die Zuteilung.
+  # DIARIZE_DEVICE=auto erkennt CUDA bzw. XPU selbst, der Quelltext bleibt gleich.
   # Erster Build braucht ./.hf_token – siehe diarize/README.md
   diarize:
     build:
       context: ./diarize
       dockerfile: Dockerfile
+      args:
+        # NVIDIA: cu128 ist Pflicht, die RTX 5080 ist Blackwell (sm_120).
+        # Intel Arc: auf https://download.pytorch.org/whl/xpu umstellen.
+        # Ohne GPU: https://download.pytorch.org/whl/cpu
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
       secrets:
         - hf_token
     container_name: diktat-diarize
@@ -63,11 +74,33 @@ services:
       - "127.0.0.1:8002:8000"
     environment:
       - PYANNOTE_MODEL=pyannote/speaker-diarization-3.1
-      - TORCH_THREADS=4
+      - DIARIZE_DEVICE=auto
+      # Greift nur, wenn kein Grafikgeraet gefunden wird (CPU-Rueckfall).
+      - TORCH_THREADS=8
       - TZ=Europe/Berlin
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
       - ./diarize/app.py:/app/app.py:ro
+    # NVIDIA-Zuteilung. Die Karte wird mit faster-whisper und ollama geteilt;
+    # pyannote braucht nur 1–2 GB VRAM und laeuft nur waehrend einer Analyse.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Fuer eine Intel Arc stattdessen den deploy-Block loeschen und das
+    # WSL2-Grafikgeraet durchreichen. NICHT /dev/dri — unter Docker Desktop
+    # laeuft die GPU ueber die WSL2-Paravirtualisierung, der Knoten heisst
+    # /dev/dxg und die Treiberbibliotheken liegen in /usr/lib/wsl:
+    # devices:
+    #   - /dev/dxg:/dev/dxg
+    # volumes:
+    #   - ./diarize/app.py:/app/app.py:ro
+    #   - /usr/lib/wsl:/usr/lib/wsl:ro
+    # environment:
+    #   - LD_LIBRARY_PATH=/usr/lib/wsl/lib
     networks:
       - diktat-network
     restart: unless-stopped

@@ -11,7 +11,7 @@ Medizinisches Transkriptions-System als Web-App / FastAPI-Server (`server.py`) �
 ```
 Browser ──► Caddy (Reverse Proxy) ──► gespraech-web (FastAPI, Port 8000)
                                            ├── faster-whisper (Transkription, GPU)
-                                           ├── diarize (Sprechertrennung, CPU)
+                                           ├── diarize (Sprechertrennung, GPU)
                                            └── ollama (LLM, externer Container)
 ```
 
@@ -36,12 +36,12 @@ ki-transcribe/
 ├── templates/index.html       # Jinja2-Template für Web-UI
 ├── static/                    # CSS, JS, SVG, logo.jpg für Web-UI
 │
-├── diarize/                   # Eigener CPU-Container: Sprechertrennung
+├── diarize/                   # Eigener Container: Sprechertrennung (GPU)
 │   ├── app.py                 # FastAPI-Service um die pyannote-Pipeline
 │   ├── download_model.py      # Laedt die Modelle zur Build-Zeit in den Cache
-│   ├── Dockerfile             # CPU-torch + pyannote, Modelle eingebacken
+│   ├── Dockerfile             # torch-Variante per ARG, pyannote, Modelle eingebacken
 │   ├── requirements.txt       # pyannote.audio, FastAPI
-│   ├── requirements-torch.txt # torch/torchaudio aus dem CPU-Wheel-Index
+│   ├── requirements-torch.txt # torch/torchaudio, Wheel-Index per Build-ARG
 │   └── README.md              # HF-Token-Setup, API
 │
 ├── README.md                  # Hauptdokumentation
@@ -91,12 +91,16 @@ ki-transcribe/
 
 **Sprecherzuordnung (`SPRECHER:`-Zeile in `ANALYZE_PROMPT` und `ABPRO_PROMPT`):** Whisper liefert keine Diarisierung — das Transkript ist ein flacher Textblob, in dem Arzt- und Patientenäußerungen ohne Kennzeichnung ineinanderlaufen. Beide Prompts weisen das LLM daher explizit auf den Dialogcharakter hin und geben zwei Abgrenzungen vor: laut überlegte Verdachtsdiagnosen des Arztes sind keine gesicherten Diagnosen, Rückfragen zu bestehenden Medikamenten keine neuen Verordnungen. Bei unklarer Zuordnung soll neutral formuliert statt geraten werden. Bewusst **nicht** „genau zwei Personen" — Begleitpersonen und MFA kommen vor, eine harte Zweier-Vorgabe würde deren Aussagen falsch zuordnen. `SUMMARY_PROMPT`, `SUBJECT_PROMPT` und `CLEAN_PROMPT` brauchen den Hinweis nicht (keine Zuordnung nötig bzw. reine Textbereinigung).
 
-**Sprechertrennung / Diarisation (`diarize/`, `/analyze`):** Eigener CPU-Container mit `pyannote/speaker-diarization-3.1`. `/analyze` ruft ihn per `asyncio.gather()` **parallel** zur Transkription auf — Whisper belegt die GPU, pyannote die CPU, die Sprechertrennung kostet dadurch praktisch keine zusätzliche Wartezeit.
+**Sprechertrennung / Diarisation (`diarize/`, `/analyze`):** Eigener Container mit `pyannote/speaker-diarization-3.1` auf der GPU. `/analyze` ruft ihn per `asyncio.gather()` **parallel** zur Transkription auf und wartet auf beide — die Diarisation kostet nur dann keine zusätzliche Zeit, wenn sie schneller fertig ist als Whisper.
 
 Ablauf: `transcribe_with_units()` fordert bei Whisper `response_format=verbose_json` mit `timestamp_granularities=word` an; `diarize_audio()` holt Sprecherintervalle; `format_diarized_transcript()` ordnet jedes Wort dem Sprecher mit der größten zeitlichen Überlappung zu, gruppiert zu Turns und schreibt `SPRECHER A: …`-Zeilen.
 
 Bewusste Entscheidungen:
-- **pyannote statt NeMo:** NeMo MSDD ist faktisch CUDA-only; pyannote ist reines PyTorch und läuft klein genug für die CPU. Ein späterer GPU-Wechsel (z. B. Intel Arc) berührt die Sprechertrennung damit nicht.
+- **pyannote statt NeMo:** NeMo MSDD ist faktisch CUDA-only. pyannote ist reines PyTorch und damit an keinen Hersteller gebunden — genau das trägt den geplanten Wechsel von der RTX 5080 auf eine Intel Arc B70.
+- **GPU statt CPU — die ursprüngliche CPU-Entscheidung war falsch.** Gemessen auf 4 Threads: **~0,6× Echtzeit**, also 15 min Rechenzeit für eine 25-min-Aufnahme, während Whisper auf der GPU nach ~85 s fertig war. Da `asyncio.gather()` auf beide wartet, bestimmte die Diarisation die Gesamtdauer der Analyse (Faktor ~10). Mehr Threads lösen das **nicht**: das Embedding skaliert von 4 auf 24 Threads nur um 1,9×, die Segmentierung gar nicht; die Batch-Größen sind bereits 32/32. Der Grund ist strukturell — 10-s-Fenster mit 1 s Schrittweite ergeben ~1470 Embedding-Fenster pro 25 min. Auf der 5080: **53× Echtzeit** end-to-end, VRAM-Spitze 281 MiB.
+- **Der Kartentyp steht nicht im Quelltext.** Das Wheel wählt das Build-Argument `TORCH_INDEX_URL` (`cpu` / `cu128` / `xpu`), das Rechenwerk wählt `DIARIZE_DEVICE` zur Laufzeit (`auto` erkennt CUDA → XPU → CPU). Der Wechsel auf eine **Intel Arc B70** ist damit: Build-Arg auf `…/whl/xpu`, im `diarize`-Dienst den `deploy`-Block durch die WSL2-Gerätedurchreichung ersetzen (`/dev/dxg` + `/usr/lib/wsl`, **nicht** `/dev/dri` — Docker Desktop läuft auf WSL2, Rezept in `diarize/README.md`), neu bauen. `diarize/app.py` bleibt unverändert. `cu128` ist für die RTX 5080 Pflicht (Blackwell = sm_120, in den cu124-Wheels nicht enthalten).
+- **GPU-Fehler sind nicht fatal:** schlägt `.to(device)` oder der Startup-Warmup fehl (kein VRAM, Treiber passt nicht zum Wheel), schaltet `_load_pipeline()` auf die CPU zurück statt den Dienst auszusperren. Der Warmup existiert genau dafür — und weil er die cuDNN-Autotune-Phase aus der ersten echten Analyse nimmt.
+- **Die Laufzeit wird geloggt** (`Diarisation: … 300s Audio in 5.6s, 53.3x Echtzeit auf cuda`): dass dieser Echtzeitfaktor fehlte, war der Grund, warum der Rückstand gegenüber Whisper erst über Zeitstempel benachbarter Logzeilen rekonstruiert werden musste.
 - **Kein WhisperX:** das würde Whisper in den eigenen Prozess holen und den mit `ki-atteste` geteilten Container aufbrechen. Whispers eigene Wort-Zeitstempel ersetzen das wav2vec2-Alignment.
 - **Formularfeld heißt `timestamp_granularities[]` – mit eckigen Klammern.** Der faster-whisper-Server bindet den Parameter per `Form(alias="timestamp_granularities[]")`; das OpenAPI-Schema zeigt ihn ohne Klammern. Ohne Klammern wird er **stillschweigend ignoriert** (HTTP 200, `words: null`) und die Diarisation fällt unbemerkt auf Segmentebene zurück. Erlaubte Kombinationen: `["word"]`, `["segment"]`, `["word","segment"]`.
 - **`data` an httpx muss ein Mapping sein, keine Liste von Tupeln.** Bei Multipart (`files=...`) landet eine Liste im urlencoded-Pfad und der Request stirbt mit `Attempted to send an sync request with an AsyncClient instance`. Wiederholte Felder gehören als Liste in den *Wert*: `{"timestamp_granularities[]": ["word", "segment"]}`.
@@ -142,7 +146,14 @@ Die Modelle sind auf Hugging Face gated (MIT-Lizenz, nur Registrierung). Der Tok
 | Variable | Default | Beschreibung |
 |----------|---------|--------------|
 | `PYANNOTE_MODEL` | `pyannote/speaker-diarization-3.1` | Pipeline; muss beim Build vorgeladen worden sein |
-| `TORCH_THREADS` | `4` | CPU-Threads für die Pipeline |
+| `DIARIZE_DEVICE` | `auto` | Rechenwerk: `auto` (CUDA → Intel XPU → CPU), oder fest `cuda` / `xpu` / `cpu` |
+| `TORCH_THREADS` | `8` | CPU-Threads — greift nur im CPU-Rückfall, auf der GPU bedeutungslos |
+
+**Diarisations-Build-Argument** (in `docker-compose.yml` unter `diarize.build.args`) — bestimmt, welche PyTorch-Variante ins Image kommt. Nur zur Build-Zeit wirksam, eine Änderung braucht `docker compose build diarize`:
+
+| Argument | Default (Dockerfile) | Gesetzt auf | Beschreibung |
+|----------|----------------------|-------------|--------------|
+| `TORCH_INDEX_URL` | `…/whl/cpu` | `…/whl/cu128` | Wheel-Index: `cpu`, `cu128` (NVIDIA, Blackwell-tauglich), `xpu` (Intel Arc) |
 
 **Whisper-Container-Variable** (in `docker-compose.yml` unter `faster-whisper`):
 
@@ -175,6 +186,8 @@ docker-compose logs -f gespraech-web
 - **Ollama ist external:** Der ollama-Container wird nicht in dieser `docker-compose.yml` definiert — er muss bereits laufen und mit `ollama-net` verbunden sein.
 - **GPU erforderlich für faster-whisper:** Der Container nutzt das Image `fedirz/faster-whisper-server:latest-cuda` mit `deploy.resources.reservations.devices` (nvidia). Ohne GPU muss das Image auf `latest-cpu` geändert und der `devices`-Block entfernt werden.
 - **faster-whisper ist geteilt:** Container-Name `diktat-whisper` wird auch vom Projekt `ki-atteste` genutzt — Änderungen an Modell/Env-Vars wirken sich auf beide aus.
+- **Die GPU teilen sich jetzt drei Dienste:** `faster-whisper`, `ollama` und `diarize`. pyannote braucht dabei am wenigsten (VRAM-Spitze 281 MiB) und belegt sie nur während einer Analyse. Auf der 16-GB-Karte ist das unkritisch; eng wird es erst, wenn ollama ein deutlich größeres Modell dauerhaft resident hält.
+- **`diarize` neu starten, ohne Whisper mitzuziehen:** `docker compose up -d --no-deps diarize`. Ohne `--no-deps` gilt derselbe Fallstrick wie unten bei `gespraech-web`.
 - **HF-Token für den Diarisations-Build:** `docker compose build diarize` braucht `./.hf_token` (gitignored). Fehlt die Datei oder sind die Nutzungsbedingungen der pyannote-Repos nicht akzeptiert, bricht der Build mit einer erklärenden Meldung ab. `docker compose up` ohne Build funktioniert auch ohne die Datei.
 - **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `templates/`, `static/` und `diarize/app.py` read-only in den jeweiligen Container — Änderungen wirken ohne Rebuild, nur ein `docker-compose restart gespraech-web` ist nötig. Rebuild braucht es nur bei `requirements-server.txt` oder `Dockerfile`.
 - **Compose-Netzwerk-Altlast:** Bei „container … is not connected to the network ki-transcribe_diktat-network" während eines Recreates existiert neben `diktat-network` noch ein leeres, projekt-präfigiertes Netzwerk aus der Zeit vor dem `name:`-Eintrag. Beide tragen dasselbe Label `com.docker.compose.network=diktat-network`, Compose greift auf das falsche zu. Fix: `docker network rm ki-transcribe_diktat-network` (Container-Anzahl vorher per `docker network inspect` auf 0 prüfen).
