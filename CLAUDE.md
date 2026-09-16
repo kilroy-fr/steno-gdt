@@ -81,7 +81,15 @@ ki-transcribe/
 
 **`MODEL_WHITELIST`** in `server.py`: Nur Modelle mit passendem Präfix werden im Frontend-Dropdown angezeigt (`qwen3:`, `qwen2.5:`, `phi4`, `mistral-nemo`, `deepseek-r1:14b`, `gemma4:`, `llama3.1:`, `meditron`).
 
-**`WHISPER_HALLUCINATIONS`** in `server.py`: Set bekannter Whisper-Halluzinationen (z. B. „Vielen Dank.", Musikzeichen) — werden in `/transcribe-only` und `/analyze` unterdrückt.
+**Halluzinationen und Wiederholschleifen (`server.py`):** Whispers häufigster Schadensfall ist nicht der einzelne falsche Satz, sondern die **Wiederholschleife**: das Modell wiederholt einen Baustein dutzendfach („Der älteren. Der älteren. …"), weil `condition_on_previous_text=True` ihm seine eigene Ausgabe als Kontext zurückgibt. Ausgelöst wird das von Stille. Gemessen an den gespeicherten Logs: **bei 49 % aller Analysen bestanden über 5 % des Transkripts aus Schleifentext, bei 30 % über ein Drittel; über alle Logs hinweg waren 44 % des Transkripttextes Schleife.** Drei Ebenen wirken dagegen:
+
+1. **`WHISPER_VAD_FILTER`** (Default an) schaltet Silero-VAD im Whisper-Server ein, schneidet Stille also heraus, bevor das Modell sie sieht. Das ist der wirksamste Hebel. Gemessen an einer Testaufnahme (4:11, davon 3:45 Stille) lieferte der Server ohne VAD **ausschließlich** „Vielen Dank." ×9 und verlor die echte Sprache vollständig; mit VAD beide Sprachpassagen fehlerfrei. Wort-Zeitstempel bleiben trotz VAD auf der Original-Zeitachse (geprüft: < 1 s Abweichung über 251 s), die Sprecherzuordnung bricht also nicht.
+2. **`collapse_repeated_text()` / `collapse_repeated_units()`** kürzen verbliebene Schleifen. Gesucht wird ab dem *kürzesten* Baustein (1–12 Wörter). Die Schwellen sind bewusst vorsichtig, weil im Sprechzimmer echt wiederholt wird: bei ein- und zweiwortigen Bausteinen erst ab der **vierten** Wiederholung („das tut weh, weh, weh" bleibt stehen), bei längeren ab der dritten. Erhalten bleiben Anfang **und letzter** Block — nur der letzte trägt die schließende Interpunktion. Bausteine aus `WHISPER_HALLUCINATIONS` fliegen bei Wiederholung ganz raus; einmalig stehen sie (ein „Vielen Dank." am Gesprächsende ist echt).
+3. **`_is_hallucination()`** verwirft ein Transkript, das als Ganzes nur aus einem bekannten Baustein besteht.
+
+Die Bereinigung läuft auf den **Einheiten vor der Sprecherzuordnung**: Schleifenwörter tragen über die Stille verteilte Zeitstempel und würden sonst reihum beiden Sprechern zugeschlagen — das zerhackt auch die echten Turns drumherum.
+
+**Nicht erreichbar von außen:** `condition_on_previous_text=False` wäre die eigentliche Ursachenbehebung. Der faster-whisper-Server reicht aber nur `task`, `language`, `initial_prompt`, `word_timestamps`, `temperature`, `vad_filter` und `hotwords` durch (`routers/stt.py`), und der Container wird mit `ki-atteste` geteilt, ist also kein Ort für einen lokalen Patch. `temperature` nimmt er nur als Skalar, eine Fallback-Liste (die Voraussetzung dafür, dass `compression_ratio_threshold` überhaupt greift) ist damit ebenfalls nicht setzbar.
 
 **`ThinkingFilter`** in `server.py`: Filtert `<think>…</think>`-Blöcke aus dem SSE-Stream (für Reasoning-Modelle wie qwen3).
 
@@ -109,7 +117,7 @@ Bewusste Entscheidungen:
 - **Keine Sprecherzahl vorgeben** (`DIARIZE_MIN/MAX_SPEAKERS=0`): eine Untergrenze von 2 zerlegt eine Solo-Aufnahme in Phantomsprecher, eine Obergrenze von 2 ordnet Begleitperson und MFA falsch zu. pyannote schätzt die Zahl selbst.
 - **huggingface_hub muss `<1.0` bleiben** (`diarize/requirements.txt`): pyannote 3.4 reicht `use_auth_token` bedingungslos an `hf_hub_download()` weiter. Bis 0.35 schreibt `validate_hf_hub_args()` das intern auf `token` um, 1.x nicht mehr — der Modell-Download bricht dann mit `TypeError` ab, auch ohne übergebenen Token.
 - **torchaudio muss `<2.9` bleiben** (`diarize/requirements-torch.txt`): 2.9.0 hat `torchaudio.AudioMetaData` entfernt, pyannote.audio 3.4 benutzt es weiterhin — sonst scheitert schon der Import. Die Obergrenze ist also funktional, nicht vorsichtshalber gesetzt.
-- **Kurz-Einwürfe werden eingeschmolzen** (`_smooth_turns()`): ein einzelnes kurzes Wort („mhm") zwischen zwei Turns desselben Sprechers ist fast immer Diarisations-Rauschen.
+- **Kurz-Einwürfe werden eingeschmolzen** (`_smooth_turns()`): bis zu zwei Wörter unter 1,5 s zwischen zwei Turns desselben Sprechers gelten als Diarisations-Rauschen. Die Glättung läuft iterativ (bis zu 5 Durchläufe) mit anschließendem `_coalesce()` — fällt ein Einwurf weg, können die Nachbarn verschmelzen und dabei einen weiteren Einwurf einschließen, den ein einzelner Durchlauf nicht erwischt. **Preis der Regel:** echte Backchannel („Mhm", „Ja") des Gegenübers landen beim redenden Sprecher. Für die Dokumentation ist das folgenlos, für eine wortgetreue Gesprächsanalyse wäre es falsch.
 - **Fehler sind nicht fatal:** fällt der Container aus, läuft `/analyze` mit unbeschriftetem Transkript weiter und schickt ein `status`-Event; der Prompt schaltet auf `SPEAKER_CONTEXT_PLAIN` zurück.
 - **Halluzinations-Prüfung vor dem Beschriften:** mit `SPRECHER A: ` davor würde kein Eintrag aus `WHISPER_HALLUCINATIONS` mehr greifen.
 
@@ -135,6 +143,7 @@ Die Modelle sind auf Hugging Face gated (MIT-Lizenz, nur Registrierung). Der Tok
 | `WHISPER_LANGUAGE` | `de` | Sprache für Transkription (bei `lang_mode=de`) |
 | `WHISPER_MEDICAL_MODEL` | `jimmymeister/whisper-large-v3-turbo-german-ct2` | Whisper-Modell für deutsche Aufnahmen (finale Analyse via `/analyze`) |
 | `WHISPER_FAST_MODEL` | `small` | Kleines/schnelles Whisper-Modell für die Live-Vorschau via `/transcribe-only` |
+| `WHISPER_VAD_FILTER` | `true` | Silero-VAD im Whisper-Server — schneidet Stille vor der Transkription heraus (Halluzinationsschutz) |
 | `DIARIZE_HOST` | `diarize` | Hostname des Diarisations-Containers |
 | `DIARIZE_PORT` | `8000` | Port |
 | `DIARIZE_MIN_SPEAKERS` | `0` | Untergrenze für pyannote (`0` = keine Vorgabe) |

@@ -19,6 +19,9 @@ services:
       - WHISPER_LANGUAGE=de
       - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
       - WHISPER_FAST_MODEL=small
+      # Silero-VAD im Whisper-Server. Nur zum Abschalten da, falls VAD je sehr
+      # leise Sprache wegschneidet — sonst anlassen, siehe CLAUDE.md.
+      - WHISPER_VAD_FILTER=true
       - DIARIZE_HOST=diarize
       - DIARIZE_PORT=8000
       # 0/0 = pyannote schaetzt die Sprecherzahl selbst (Diktat bleibt 1,

@@ -29,7 +29,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.8.2"
+VERSION = "0.9.0"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -39,6 +39,21 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
 WHISPER_MEDICAL_MODEL = os.getenv("WHISPER_MEDICAL_MODEL", "jimmymeister/whisper-large-v3-turbo-german-ct2")
 WHISPER_FAST_MODEL = os.getenv("WHISPER_FAST_MODEL", "small")
+# Silero-VAD im Whisper-Server: schneidet Stille heraus, BEVOR das Modell sie
+# sieht. Das ist der wirksamste Hebel gegen Halluzinationen — gemessen an einer
+# Testaufnahme (4:11, davon 3:45 Stille) lieferte der Server ohne VAD
+# ausschliesslich "Vielen Dank." x9 und verlor die echte Sprache vollstaendig,
+# mit VAD beide Sprachpassagen fehlerfrei.
+#
+# Die eigentliche Ursache — condition_on_previous_text=True — laesst sich von
+# aussen nicht abschalten: der faster-whisper-Server reicht nur task, language,
+# initial_prompt, word_timestamps, temperature, vad_filter und hotwords an
+# faster-whisper durch (routers/stt.py). Der Container wird ausserdem mit
+# ki-atteste geteilt, ist also kein Ort fuer einen lokalen Patch.
+#
+# Wort-Zeitstempel bleiben trotz VAD auf der Original-Zeitachse (geprueft:
+# Abweichung < 1 s ueber 251 s Audio), die Sprecherzuordnung bricht also nicht.
+WHISPER_VAD_FILTER = os.getenv("WHISPER_VAD_FILTER", "true").lower() not in ("false", "0", "off", "")
 DIARIZE_HOST = os.getenv("DIARIZE_HOST", "diarize")
 DIARIZE_PORT = os.getenv("DIARIZE_PORT", "8000")
 # Beide 0 = pyannote schaetzt die Sprecherzahl selbst. Bewusst keine Vorgabe:
@@ -79,6 +94,108 @@ WHISPER_HALLUCINATIONS = {
 
 def _is_hallucination(transcript: str) -> bool:
     return transcript.strip().lower() in WHISPER_HALLUCINATIONS
+
+
+# ============================================================
+# WIEDERHOLSCHLEIFEN
+# ============================================================
+# WHISPER_HALLUCINATIONS greift nur, wenn das *ganze* Transkript aus einem
+# bekannten Baustein besteht. Der haeufigere Schadensfall ist die Schleife
+# mitten im Text: Whisper wiederholt einen Baustein dutzendfach
+# ("Der aelteren. Der aelteren. ..."), weil condition_on_previous_text seine
+# eigene Ausgabe als Kontext zurueckbekommt. WHISPER_VAD_FILTER verhindert die
+# meisten dieser Schleifen; das hier ist die zweite Verteidigungslinie fuer den
+# Rest — und raeumt die Woerter weg, bevor sie mit unsinnigen Zeitstempeln die
+# Sprecherzuordnung verschmutzen.
+_REPEAT_MAX_NGRAM = 12      # laengster Baustein, nach dem gesucht wird
+_WORD_CHARS_RE = re.compile(r"[^\wäöüßáéíóúàèìòùâêîôûñç]+", re.IGNORECASE)
+
+
+def _repeat_key(text: str) -> str:
+    """Vergleichsform: Satzzeichen und Gross-/Kleinschreibung ignorieren.
+
+    Whisper variiert in Schleifen die Interpunktion ("Der aelteren." vs
+    "Der aelteren"), ein wortgetreuer Vergleich wuerde die Schleife verfehlen.
+    """
+    return _WORD_CHARS_RE.sub("", text).lower()
+
+
+# Bekannte Fuellbausteine in Vergleichsform — ein einzelnes "Vielen Dank." am
+# Ende eines Gespraechs ist echt, mehrfach hintereinander nie.
+_HALLUCINATION_KEYS = {k for k in (_repeat_key(h) for h in WHISPER_HALLUCINATIONS) if k}
+
+
+def _blocks_to_keep(pattern_key: str, n: int, runs: int) -> int | None:
+    """Wie viele Bloecke einer Wiederholung bleiben stehen? None = nicht anfassen.
+
+    Die Schwellen sind bewusst vorsichtig: in einem Arztgespraech ist die
+    dreifache Wiederholung eines einzelnen Wortes ("das tut weh, weh, weh")
+    echte Rede. Erst ab der vierten wird es eine Maschinenschleife.
+    """
+    if pattern_key in _HALLUCINATION_KEYS and runs >= 2:
+        return 0                          # bekannter Fuellbaustein, mehrfach -> ganz weg
+    if n <= 2:
+        return 2 if runs >= 4 else None
+    return 1 if runs >= 3 else None       # ein dreifach wiederholter Halbsatz ist nie echt
+
+
+def _collapse_runs(items: list, key) -> list:
+    """Kuerzt unmittelbar aufeinanderfolgende Wiederholungen eines Bausteins.
+
+    Gesucht wird ab dem *kuerzesten* Baustein: bei "Der aelteren." x75 soll das
+    Zweiwort-Muster anschlagen und nicht dessen Vielfaches.
+
+    Erhalten bleiben der Anfang und der *letzte* Block. Das ist kein Detail:
+    nur der letzte traegt die schliessende Interpunktion, sonst endete
+    "Das tut weh, weh, weh." als "Das tut weh, weh,".
+    """
+    keys = [key(x) for x in items]
+    total = len(items)
+    out, i = [], 0
+    while i < total:
+        collapsed = False
+        for n in range(1, _REPEAT_MAX_NGRAM + 1):
+            if i + 2 * n > total:
+                break
+            pattern = keys[i:i + n]
+            if not any(pattern):  # reine Satzzeichen/Leerstrings
+                continue
+            runs, j = 1, i + n
+            while j + n <= total and keys[j:j + n] == pattern:
+                runs += 1
+                j += n
+            keep = _blocks_to_keep("".join(pattern), n, runs)
+            if keep is not None:
+                if keep > 0:
+                    out.extend(items[i:i + (keep - 1) * n])   # erste Bloecke
+                    out.extend(items[j - n:j])                # letzter Block
+                i = j
+                collapsed = True
+                break
+        if not collapsed:
+            out.append(items[i])
+            i += 1
+    return out
+
+
+def collapse_repeated_units(units: list) -> list:
+    """Entfernt Wiederholschleifen auf Wortebene (Eingabe fuer die Diarisation)."""
+    return _collapse_runs(units, lambda u: _repeat_key(u["text"]))
+
+
+def collapse_repeated_text(text: str) -> str:
+    """Entfernt Wiederholschleifen im Fliesstext — satzweise und wortweise.
+
+    Satzweise zuerst, weil eine Schleife aus ganzen Saetzen sonst erst auf
+    Wortebene zerfaellt und dort nur teilweise erkannt wird.
+    """
+    sentences = re.findall(r"[^.!?]*[.!?]+|\S[^.!?]*$", text)
+    if len(sentences) > 1:
+        text = "".join(_collapse_runs(sentences, _repeat_key))
+    words = re.findall(r"\s*\S+", text)
+    if len(words) > 1:
+        text = "".join(_collapse_runs(words, _repeat_key))
+    return text.strip()
 
 
 app = FastAPI(title="KI-Gesprächsanalyse")
@@ -212,15 +329,21 @@ def _audio_mime(filename: str) -> str:
 
 
 def _whisper_model_fields(lang_mode: str, model_override: str = None) -> dict:
-    """Modell-/Sprachfelder fuer den Whisper-Request (siehe CLAUDE.md, Sprachmodell-Auswahl)."""
+    """Modell-/Sprachfelder fuer den Whisper-Request (siehe CLAUDE.md, Sprachmodell-Auswahl).
+
+    `vad_filter` gilt fuer jede Anfrage — auch fuer die Live-Vorschau, die aus
+    30-s-Abschnitten besteht und damit reichlich Abschnittsgrenzen in Stille hat.
+    """
+    fields: dict = {"vad_filter": str(WHISPER_VAD_FILTER).lower()}
     if model_override:
-        fields = {"model": model_override}
+        fields["model"] = model_override
         if lang_mode == "de":
             fields["language"] = WHISPER_LANGUAGE
         return fields
     if lang_mode == "de":
-        return {"model": WHISPER_MEDICAL_MODEL, "language": WHISPER_LANGUAGE}
-    return {}
+        fields["model"] = WHISPER_MEDICAL_MODEL
+        fields["language"] = WHISPER_LANGUAGE
+    return fields
 
 
 async def _post_whisper(audio_path: str, filename: str, data: dict) -> httpx.Response:
@@ -247,7 +370,7 @@ async def transcribe_audio(
 ) -> str:
     data = {"response_format": "text", **_whisper_model_fields(lang_mode, model_override)}
     response = await _post_whisper(audio_path, filename, data)
-    return response.text.strip()
+    return collapse_repeated_text(response.text.strip())
 
 
 async def transcribe_with_units(
@@ -290,6 +413,18 @@ async def transcribe_with_units(
             {"start": float(sg["start"]), "end": float(sg["end"]), "text": sg["text"]}
             for sg in segments
         ]
+
+    # Wiederholschleifen raus, BEVOR die Sprecherzuordnung laeuft: die Woerter
+    # einer Schleife tragen ueber die Stille verteilte Zeitstempel und wuerden
+    # sonst reihum beiden Sprechern zugeschlagen — das zerhackt auch die echten
+    # Turns drumherum.
+    before = len(units)
+    units = collapse_repeated_units(units)
+    text = collapse_repeated_text(text)
+    if len(units) < before:
+        logger.warning(
+            f"Wiederholschleife entfernt: {before - len(units)} von {before} Einheiten"
+        )
     return text, units
 
 
@@ -357,30 +492,63 @@ def _group_turns(units: list, segments: list) -> list:
     return turns
 
 
-def _smooth_turns(turns: list) -> list:
-    """Schmilzt einzelne Kurz-Einwuerfe in den umgebenden Sprecher ein.
+# Ab wann gilt ein Turn als Diarisations-Rauschen statt als echter Sprecher-
+# wechsel? Ein echter Wortbeitrag im Sprechzimmer ist laenger als anderthalb
+# Sekunden oder hat mehr als zwei Woerter. Alles darunter zwischen zwei Turns
+# desselben Sprechers ist fast immer eine verrutschte Segmentgrenze.
+_BLIP_MAX_SECONDS = 1.5
+_BLIP_MAX_WORDS = 2
 
-    Ein einzelnes kurzes Wort ("mhm", "ja") mitten in einer fremden Aeusserung ist
-    fast immer Diarisations-Rauschen und wuerde den Text ohne Informationsgewinn
-    in Dutzende Mini-Turns zerhacken.
+
+def _coalesce(turns: list) -> list:
+    """Zieht benachbarte Turns desselben Sprechers zusammen."""
+    merged: list = []
+    for turn in turns:
+        if merged and merged[-1]["speaker"] == turn["speaker"]:
+            merged[-1]["units"].extend(turn["units"])
+            merged[-1]["end"] = turn["end"]
+        else:
+            merged.append(turn)
+    return merged
+
+
+def _smooth_turns(turns: list) -> list:
+    """Schmilzt Kurz-Einwuerfe in den umgebenden Sprecher ein.
+
+    Ein kurzer Einwurf ("mhm", "ja") mitten in einer fremden Aeusserung ist fast
+    immer Diarisations-Rauschen und wuerde den Text ohne Informationsgewinn in
+    Dutzende Mini-Turns zerhacken.
+
+    Wiederholt, bis sich nichts mehr aendert: faellt ein Einwurf weg, koennen
+    die beiden Nachbarn zu einem Turn werden, der seinerseits einen weiteren
+    Einwurf einschliesst. Ein einzelner Durchlauf erwischt nur die erste Lage.
     """
-    if len(turns) < 3:
-        return turns
-    result = [turns[0]]
-    i = 1
-    while i < len(turns):
-        current = turns[i]
-        following = turns[i + 1] if i + 1 < len(turns) else None
-        is_blip = len(current["units"]) == 1 and (current["end"] - current["start"]) < 0.8
-        if is_blip and following is not None and result[-1]["speaker"] == following["speaker"]:
-            result[-1]["units"].extend(current["units"])
-            result[-1]["units"].extend(following["units"])
-            result[-1]["end"] = following["end"]
-            i += 2
-            continue
-        result.append(current)
-        i += 1
-    return result
+    for _ in range(5):  # Schranke statt while True — Stillstand tritt frueh ein
+        if len(turns) < 3:
+            return turns
+        result = [turns[0]]
+        i = 1
+        changed = False
+        while i < len(turns):
+            current = turns[i]
+            following = turns[i + 1] if i + 1 < len(turns) else None
+            is_blip = (
+                len(current["units"]) <= _BLIP_MAX_WORDS
+                and (current["end"] - current["start"]) < _BLIP_MAX_SECONDS
+            )
+            if is_blip and following is not None and result[-1]["speaker"] == following["speaker"]:
+                result[-1]["units"].extend(current["units"])
+                result[-1]["units"].extend(following["units"])
+                result[-1]["end"] = following["end"]
+                i += 2
+                changed = True
+                continue
+            result.append(current)
+            i += 1
+        turns = _coalesce(result)
+        if not changed:
+            break
+    return turns
 
 
 def format_diarized_transcript(units: list, segments: list) -> str:
