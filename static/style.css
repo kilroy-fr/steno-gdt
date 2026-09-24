@@ -403,6 +403,24 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 /* ============================================================
    STATUS BOX
    ============================================================ */
+/* Wiederholschleifen-Warnung: auffaelliger als das Statusband, weil sie nicht
+   den Fortschritt meldet, sondern dass dem Transkript Gespraech fehlt. */
+.loop-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  background: rgba(245,158,11,0.12);
+  border: 1px solid rgba(245,158,11,0.45);
+  border-left: 4px solid var(--warning);
+  border-radius: var(--border-radius);
+  margin-top: 16px;
+  color: var(--warning);
+  line-height: 1.5;
+}
+
+.loop-warning-icon { flex-shrink: 0; }
+
 .status-box {
   display: flex;
   align-items: center;

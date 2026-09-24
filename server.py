@@ -29,7 +29,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -61,6 +61,22 @@ DIARIZE_PORT = os.getenv("DIARIZE_PORT", "8000")
 # sprecher, eine Obergrenze von 2 ordnet Begleitperson und MFA falsch zu.
 DIARIZE_MIN_SPEAKERS = int(os.getenv("DIARIZE_MIN_SPEAKERS", "0"))
 DIARIZE_MAX_SPEAKERS = int(os.getenv("DIARIZE_MAX_SPEAKERS", "0"))
+# Wartezeit fuer Whisper und Diarisation. Gilt in httpx pro Lesevorgang, ist bei
+# diesen beiden Diensten also die gesamte Rechenzeit: es kommt nichts zurueck,
+# bis das Modell fertig ist. Der frueher fest verdrahtete Wert von 300 s war
+# genau die Grenze, an der sich hochgeladene Dateien von Live-Aufnahmen
+# unterscheiden — eine Sprechstunden-Aufnahme dauert Minuten, eine hochgeladene
+# Datei kann eine Dreiviertelstunde lang sein. Lief die Diarisation dann noch
+# auf der CPU (~0,6x Echtzeit, siehe diarize/app.py), schlug der Timeout zu und
+# /analyze fuhr stillschweigend ohne Sprecherkennzeichnung weiter — der Grund,
+# warum Uploads "keine Diarisation" zu machen schienen.
+AUDIO_TIMEOUT = float(os.getenv("AUDIO_TIMEOUT", "1800"))
+# Ab welchem Anteil entfernter Schleife das Transkript als unbrauchbar gilt und
+# die Oberflaeche warnt. Der Anlassfall lag bei 93 % — aber schon 15 % heisst,
+# dass Whisper laenger im Leerlauf war, und was dabei an echter Rede verloren
+# ging, steht nirgends. Eine duenne Analyse darf nicht wie eine vollstaendige
+# aussehen.
+LOOP_WARN_SHARE = float(os.getenv("LOOP_WARN_SHARE", "0.15"))
 LOG_DIR = os.getenv("LOG_DIR", "/logs")
 
 logging_enabled = False
@@ -178,9 +194,125 @@ def _collapse_runs(items: list, key) -> list:
     return out
 
 
+# Die Stufe oben verlangt *exakte* Periodizitaet. Echte Schleifen wackeln aber:
+# beobachtet wurde ein Wechsel zwischen "die Ausbildung und die" (4 Woerter) und
+# "die Ausbildung und die Aus" (5). Jeder saubere Lauf ist dadurch nur zwei bis
+# vier Bloecke lang, wird brav auf einen gekuerzt — und uebrig bleibt trotzdem
+# eine seitenlange Kette. Deshalb eine zweite Stufe, die ueber ein 40er-Fenster
+# laeuft und nicht nach exakter Periodizitaet sucht. Ihre beiden Kriterien
+# stehen bei _is_degenerate_window(); der Wortschatz allein reicht nicht, das
+# war der erste Versuch und er hat echte Rede gefressen.
+_LOOP_SPAN_WINDOW = 40
+_LOOP_SPAN_VOCAB = 8
+_LOOP_SPAN_SELFSIM = 0.5   # geforderte Selbstaehnlichkeit, siehe unten
+_LOOP_SPAN_KEEP = 12       # so viel bleibt als Beleg stehen, dass hier etwas war
+
+
+def _is_degenerate_window(window: list) -> bool:
+    """Wortschatz allein reicht als Kriterium nicht.
+
+    Eine Strecke aus lauter "ja/mhm/genau/okay" kommt auf ebenso wenige Typen
+    wie eine Schleife, ist aber echte Rede — im Sprechzimmer hoert jemand zu und
+    bestaetigt. Der Unterschied liegt nicht im Wortschatz, sondern in der
+    Ordnung: eine Schleife wiederholt eine *Folge* und ist deshalb bei einem
+    bestimmten Abstand zu sich selbst deckungsgleich; Rueckmeldepartikel fallen
+    in beliebiger Reihenfolge. Zweites Kriterium ist darum die
+    Selbstaehnlichkeit — der Anteil der Positionen, an denen sich ein Wort nach
+    p Schritten wiederholt, ueber alle p bis zur laengsten gesuchten
+    Bausteinlaenge.
+
+    Gemessen an echtem Material trennt das sauber: die Schleife aus dem Log vom
+    17.09.2026 liegt zwischen 0,56 und 1,00, eine synthetische Strecke aus
+    zufaellig gewuerfelten Rueckmeldepartikeln (gleicher Wortschatzumfang) nie
+    ueber 0,42. Die Schwelle liegt in dieser Luecke.
+
+    Die teure Rechnung laeuft erst nach der billigen Wortschatzpruefung — in
+    einem normalen Transkript besteht die kein einziges Fenster.
+    """
+    words = [k for k in window if k]
+    if len({*words}) > _LOOP_SPAN_VOCAB:
+        return False
+    total = len(words)
+    for lag in range(1, _REPEAT_MAX_NGRAM + 1):
+        pairs = total - lag
+        if pairs < _LOOP_SPAN_WINDOW // 4:
+            break
+        hits = sum(1 for i in range(pairs) if words[i] == words[i + lag])
+        if hits / pairs >= _LOOP_SPAN_SELFSIM:
+            return True
+    return False
+
+
+def _degenerate_spans(keys: list) -> list:
+    """Strecken, die aus einem winzigen Wortschatz bestehen — Schleife mit Jitter."""
+    total = len(keys)
+    if total < _LOOP_SPAN_WINDOW:
+        return []
+    flags = [
+        _is_degenerate_window(keys[i:i + _LOOP_SPAN_WINDOW])
+        for i in range(total - _LOOP_SPAN_WINDOW + 1)
+    ]
+    spans: list = []
+    i = 0
+    while i < len(flags):
+        if not flags[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(flags) and flags[j]:
+            j += 1
+        start, end = i, j - 1 + _LOOP_SPAN_WINDOW      # Ende exklusiv
+        # Zwei Laeufe koennen einander ueberlappen: ein Lauf reicht ueber sein
+        # letztes Fenster hinaus bis end, der naechste kann davor beginnen.
+        # Ungemergt wuerde _collapse_degenerate den Zwischenraum ruecklaeufig
+        # schneiden und Text doppelt ausgeben.
+        if spans and start <= spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], end))
+        else:
+            spans.append((start, end))
+        i = j
+    return spans
+
+
+def _collapse_degenerate(items: list, key) -> list:
+    """Kuerzt entartete Strecken auf ihren Anfang.
+
+    Bewusst kein Schlussblock wie in _collapse_runs: eine Schleife traegt keine
+    schliessende Interpunktion, die es zu retten gaebe.
+    """
+    spans = _degenerate_spans([key(x) for x in items])
+    if not spans:
+        return items
+    out, prev = [], 0
+    for start, end in spans:
+        out.extend(items[prev:start])
+        out.extend(items[start:start + _LOOP_SPAN_KEEP])
+        prev = end
+    out.extend(items[prev:])
+    return out
+
+
+def _loop_share(before: int, after: int) -> float:
+    """Anteil der Einheiten, die als Schleife entfernt wurden."""
+    return (before - after) / before if before > 0 else 0.0
+
+
+def _loop_warning(share: float) -> str | None:
+    """Klartext-Warnung fuer die Oberflaeche — oder None, wenn alles im Rahmen."""
+    if share < LOOP_WARN_SHARE:
+        return None
+    return (
+        f"Whisper ist in eine Wiederholschleife gelaufen: {share:.0%} des Transkripts "
+        "wurden als Schleife entfernt. Was in dieser Zeit tatsächlich gesprochen wurde, "
+        "fehlt im Transkript – die Analyse ist entsprechend lückenhaft. "
+        "Bitte gegen die Aufnahme prüfen, bevor etwas davon übernommen wird."
+    )
+
+
 def collapse_repeated_units(units: list) -> list:
     """Entfernt Wiederholschleifen auf Wortebene (Eingabe fuer die Diarisation)."""
-    return _collapse_runs(units, lambda u: _repeat_key(u["text"]))
+    key = lambda u: _repeat_key(u["text"])          # noqa: E731
+    return _collapse_degenerate(_collapse_runs(units, key), key)
 
 
 def collapse_repeated_text(text: str) -> str:
@@ -194,8 +326,18 @@ def collapse_repeated_text(text: str) -> str:
         text = "".join(_collapse_runs(sentences, _repeat_key))
     words = re.findall(r"\s*\S+", text)
     if len(words) > 1:
-        text = "".join(_collapse_runs(words, _repeat_key))
+        text = "".join(_collapse_degenerate(_collapse_runs(words, _repeat_key), _repeat_key))
     return text.strip()
+
+
+def _exc_text(exc: BaseException) -> str:
+    """Klartext fuer eine geloggte Ausnahme — mit Typ.
+
+    httpx-Timeouts tragen eine leere Meldung: aus `f"{exc}"` wird dann eine
+    Logzeile, die nach dem Doppelpunkt aufhoert und nicht verraet, dass der
+    Dienst gar nicht geantwortet hat.
+    """
+    return f"{type(exc).__name__}: {exc}" if isinstance(exc, BaseException) else str(exc)
 
 
 app = FastAPI(title="KI-Gesprächsanalyse")
@@ -298,7 +440,7 @@ def _gender_context(gender: str) -> dict:
 
 
 def _save_log(transcript: str, analysis: str, mode: str, model: str, gender: str,
-              diarized: bool = False) -> None:
+              diarized: bool = False, loop_share: float = 0.0) -> None:
     try:
         log_dir = Path(LOG_DIR)
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -310,6 +452,10 @@ def _save_log(transcript: str, analysis: str, mode: str, model: str, gender: str
             "model": model,
             "gender": gender,
             "diarized": diarized,
+            # Anteil des Transkripts, der als Wiederholschleife entfernt wurde.
+            # Steht mit im Log, damit sich im Nachhinein beurteilen laesst,
+            # worauf eine duenne Analyse beruhte.
+            "loop_share": round(loop_share, 3),
             "transcript": transcript,
             "analysis": analysis,
         }
@@ -351,7 +497,7 @@ async def _post_whisper(audio_path: str, filename: str, data: dict) -> httpx.Res
     eine Liste von Tupeln in den urlencoded-Pfad und wirft dann
     "Attempted to send an sync request with an AsyncClient instance".
     Wiederholte Formularfelder werden als Liste im Wert ausgedrueckt."""
-    async with httpx.AsyncClient(timeout=300) as client:
+    async with httpx.AsyncClient(timeout=AUDIO_TIMEOUT) as client:
         with open(audio_path, "rb") as f:
             response = await client.post(
                 f"http://{WHISPER_HOST}:{WHISPER_PORT}/v1/audio/transcriptions",
@@ -367,10 +513,20 @@ async def _post_whisper(audio_path: str, filename: str, data: dict) -> httpx.Res
 
 async def transcribe_audio(
     audio_path: str, filename: str = "audio.webm", lang_mode: str = "de", model_override: str = None
-) -> str:
+) -> tuple:
+    """Liefert (Transkript, Schleifenanteil).
+
+    Der Anteil ist kein Protokolldetail: er ist das einzige Mass dafuer, wie
+    viel echtes Gespraech im Transkript fehlt.
+    """
     data = {"response_format": "text", **_whisper_model_fields(lang_mode, model_override)}
     response = await _post_whisper(audio_path, filename, data)
-    return collapse_repeated_text(response.text.strip())
+    raw = response.text.strip()
+    text = collapse_repeated_text(raw)
+    share = _loop_share(len(re.findall(r"\S+", raw)), len(re.findall(r"\S+", text)))
+    if share:
+        logger.warning(f"Wiederholschleife entfernt: {share:.0%} des Transkripts")
+    return text, share
 
 
 async def transcribe_with_units(
@@ -378,7 +534,8 @@ async def transcribe_with_units(
 ) -> tuple:
     """Transkribiert mit Zeitstempeln - Grundlage fuer die Sprecherzuordnung.
 
-    Liefert (Volltext, Einheiten); eine Einheit ist {"start", "end", "text"}.
+    Liefert (Volltext, Einheiten, Schleifenanteil); eine Einheit ist
+    {"start", "end", "text"}.
     Angefragt wird Wort-Granularitaet: Whisper-Segmente laufen regelmaessig ueber
     Sprecherwechsel hinweg und wuerden ganze Antworten dem Falschen zuordnen.
     Liefert der Whisper-Server keine Woerter, wird auf Segmentebene
@@ -421,11 +578,13 @@ async def transcribe_with_units(
     before = len(units)
     units = collapse_repeated_units(units)
     text = collapse_repeated_text(text)
-    if len(units) < before:
+    share = _loop_share(before, len(units))
+    if share:
         logger.warning(
-            f"Wiederholschleife entfernt: {before - len(units)} von {before} Einheiten"
+            f"Wiederholschleife entfernt: {before - len(units)} von {before} Einheiten "
+            f"({share:.0%})"
         )
-    return text, units
+    return text, units, share
 
 
 # ============================================================
@@ -446,7 +605,7 @@ def has_speaker_labels(transcript: str) -> bool:
 
 async def diarize_audio(audio_path: str, filename: str) -> list:
     """Holt Sprecher-Zeitintervalle vom Diarisations-Container."""
-    async with httpx.AsyncClient(timeout=300) as client:
+    async with httpx.AsyncClient(timeout=AUDIO_TIMEOUT) as client:
         with open(audio_path, "rb") as f:
             r = await client.post(
                 f"http://{DIARIZE_HOST}:{DIARIZE_PORT}/diarize",
@@ -657,12 +816,15 @@ async def transcribe_only(audio: UploadFile = File(...), lang_mode: str = Form(d
         tmp.write(await audio.read())
         tmp_path = tmp.name
     try:
-        transcript = await transcribe_audio(
+        transcript, loop_share = await transcribe_audio(
             tmp_path, audio.filename or "audio.webm", lang_mode, model_override=WHISPER_FAST_MODEL
         )
         if _is_hallucination(transcript):
             transcript = ""
-        return {"transcript": transcript}
+        # Der Schleifenanteil geht auch an die Vorschau: laeuft das schnelle
+        # Modell schon im Leerlauf, soll das waehrend der Aufnahme sichtbar
+        # werden und nicht erst in der fertigen Analyse.
+        return {"transcript": transcript, "loop_share": round(loop_share, 3)}
     except HTTPException:
         raise
     except Exception as e:
@@ -691,17 +853,28 @@ async def analyze(
         tmp.write(await audio.read())
         tmp_path = tmp.name
 
+    # Groesse mitloggen: eine hochgeladene Datei kann ein Vielfaches einer
+    # Sprechstunden-Aufnahme sein, und genau daran haengen die Laufzeiten
+    # weiter unten. Ohne diese Zeile liess sich im Nachhinein nicht
+    # unterscheiden, ob ein Lauf lang war oder haengen geblieben ist.
+    logger.info(
+        f"/analyze: {original_name} ({os.path.getsize(tmp_path) / 1_048_576:.1f} MB), "
+        f"mode={mode}, lang={lang_mode}, diarize={want_diarize}"
+    )
+
     async def event_stream():
         try:
             model_label = "DE-Medizin" if lang_mode == "de" else "Sprache Auto"
             diarized = False
+            loop_share = 0.0
 
             if want_diarize:
                 status = f"Transkribiere Audio ({model_label}) + Sprechertrennung..."
                 yield f"data: {json.dumps({'type': 'status', 'text': status})}\n\n"
-                # Beide Dienste laufen auf derselben Datei, aber auf getrennter
-                # Hardware (Whisper GPU, Diarisation CPU) - parallel kostet die
-                # Sprechertrennung dadurch praktisch keine zusaetzliche Zeit.
+                # Beide Dienste lesen dieselbe Datei und laufen parallel; die
+                # Diarisation ist auf der GPU um ein Vielfaches schneller als
+                # Whisper (gemessen an einer 45-min-Datei: 41 s gegen gut zwei
+                # Minuten) und kostet damit keine zusaetzliche Wartezeit.
                 transcription, diarization = await asyncio.gather(
                     transcribe_with_units(tmp_path, original_name, lang_mode),
                     diarize_audio(tmp_path, original_name),
@@ -712,19 +885,28 @@ async def analyze(
                     # Nur die Zeitstempel-Variante ist gescheitert (z. B. ein
                     # Whisper-Server ohne verbose_json). Ein zweiter, einfacher
                     # Versuch ist billiger als die Analyse aufzugeben.
-                    logger.warning(f"Transkription mit Zeitstempeln fehlgeschlagen: {transcription}")
+                    logger.warning(
+                        f"Transkription mit Zeitstempeln fehlgeschlagen: {_exc_text(transcription)}"
+                    )
                     try:
-                        transcript = await transcribe_audio(tmp_path, original_name, lang_mode)
+                        transcript, loop_share = await transcribe_audio(
+                            tmp_path, original_name, lang_mode
+                        )
                     except Exception as e:
                         yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
                         return
                 else:
-                    transcript, units = transcription
+                    transcript, units, loop_share = transcription
 
                 if isinstance(diarization, BaseException) or not diarization or not units:
                     # Bewusst kein Abbruch: ein Transkript ohne Sprechertrennung
                     # ist immer noch brauchbar (Prompt schaltet auf PLAIN um).
-                    logger.warning(f"Diarisation nicht anwendbar: {diarization}")
+                    reason = (
+                        _exc_text(diarization)
+                        if isinstance(diarization, BaseException)
+                        else ("keine Sprecherintervalle" if not diarization else "keine Zeitstempel")
+                    )
+                    logger.warning(f"Diarisation nicht anwendbar: {reason}")
                     yield f"data: {json.dumps({'type': 'status', 'text': 'Sprechertrennung nicht verfügbar – fahre ohne Sprecherkennzeichnung fort.'})}\n\n"
                 else:
                     labeled = format_diarized_transcript(units, diarization)
@@ -733,7 +915,9 @@ async def analyze(
             else:
                 yield f"data: {json.dumps({'type': 'status', 'text': f'Transkribiere Audio ({model_label})...'})}\n\n"
                 try:
-                    transcript = await transcribe_audio(tmp_path, original_name, lang_mode)
+                    transcript, loop_share = await transcribe_audio(
+                        tmp_path, original_name, lang_mode
+                    )
                 except Exception as e:
                     yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
                     return
@@ -748,6 +932,12 @@ async def analyze(
                 transcript = labeled
 
             yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
+
+            # Vor der Analyse, nicht danach: wer hier mitliest, soll wissen, dass
+            # gleich auf Luecken geantwortet wird.
+            warning = _loop_warning(loop_share)
+            if warning:
+                yield f"data: {json.dumps({'type': 'warning', 'text': warning})}\n\n"
 
             yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
 
@@ -768,7 +958,8 @@ async def analyze(
                 return
 
             if logging_enabled and analysis_tokens:
-                _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender, diarized)
+                _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender,
+                          diarized, loop_share)
 
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 

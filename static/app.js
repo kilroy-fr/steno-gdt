@@ -366,6 +366,15 @@ async function transcribeLiveChunk() {
     const r = await fetch("/transcribe-only", { method: "POST", body: formData });
     if (r.ok) {
       const data = await r.json();
+      // Schon die Vorschau meldet eine Schleife - dann laeuft das Mikrofon
+      // vermutlich gegen Stille oder Rauschen, und das sollte auffallen,
+      // solange die Aufnahme noch laeuft und man reagieren kann.
+      if ((data.loop_share || 0) >= 0.15) {
+        showLoopWarning(
+          `Vorschau: ${Math.round(data.loop_share * 100)} % des zuletzt transkribierten ` +
+          `Abschnitts waren Wiederholschleife. Bitte Mikrofon und Aussteuerung prüfen.`
+        );
+      }
       const text = (data.transcript || "").trim();
       if (text) {
         lastTranscribedChunkIndex = capturedIndex;
@@ -522,6 +531,8 @@ async function startAnalysis() {
   const analysisEl = document.getElementById("analysisText");
   analysisEl.classList.add("streaming");
   analysisEl.classList.remove("done");
+
+  hideLoopWarning();
 
   const formData = new FormData();
   const filename = blob instanceof File ? blob.name : "recording.webm";
@@ -701,6 +712,10 @@ function handleSSE(evt) {
       analysisEl.scrollTop = analysisEl.scrollHeight;
       break;
 
+    case "warning":
+      showLoopWarning(evt.text);
+      break;
+
     case "error":
       transcriptEl.classList.remove("streaming");
       showStatus(evt.text, true);
@@ -715,6 +730,19 @@ function handleSSE(evt) {
 // ============================================================
 // UI HILFS-FUNKTIONEN
 // ============================================================
+// Bleibt sichtbar, bis eine neue Aufnahme analysiert wird: eine Analyse auf
+// einem halben Transkript darf nicht wie eine vollstaendige aussehen. Beim
+// Neulauf ueber /analyze-text bleibt sie deshalb ebenfalls stehen - das
+// Transkript ist dasselbe lueckenhafte.
+function showLoopWarning(text) {
+  document.getElementById("loopWarningText").textContent = text;
+  document.getElementById("loopWarning").style.display = "flex";
+}
+
+function hideLoopWarning() {
+  document.getElementById("loopWarning").style.display = "none";
+}
+
 function showStatus(text, isError = false) {
   const box = document.getElementById("statusBox");
   const textEl = document.getElementById("statusText");
@@ -777,6 +805,7 @@ function resetAll() {
   ae.style.display = "";
   document.getElementById("abproCards").style.display = "none";
 
+  hideLoopWarning();
   hideStatus();
   updateAnalyzeBtn();
 }

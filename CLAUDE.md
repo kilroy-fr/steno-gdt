@@ -36,6 +36,11 @@ ki-transcribe/
 ├── templates/index.html       # Jinja2-Template für Web-UI
 ├── static/                    # CSS, JS, SVG, logo.jpg für Web-UI
 │
+├── whisper-patch/             # Gepatchter Router fuer den geteilten Whisper-Container
+│   ├── stt.py                 # condition_on_previous_text=False + 2 weitere Optionen
+│   ├── stt.py.upstream        # unveraenderte Vorlage, nur fuer den Diff
+│   └── README.md              # Warum, und wie nach einem Image-Update aufgefrischt wird
+│
 ├── diarize/                   # Eigener Container: Sprechertrennung (GPU)
 │   ├── app.py                 # FastAPI-Service um die pyannote-Pipeline
 │   ├── download_model.py      # Laedt die Modelle zur Build-Zeit in den Cache
@@ -59,12 +64,14 @@ ki-transcribe/
 | GET | `/models` | Liste erlaubter ollama-Modelle (gefiltert per `MODEL_WHITELIST`) |
 | GET | `/logging-mode` | Aktueller Logging-Status (`{"enabled": bool}`) |
 | POST | `/logging-mode` | Logging-Modus umschalten (Body: `{"enabled": bool}`) |
-| POST | `/transcribe-only` | Live-Vorschau-Transkription mit `WHISPER_FAST_MODEL` (schnell, keine LLM-Verarbeitung), Parameter: `audio`, `lang_mode` |
+| POST | `/transcribe-only` | Live-Vorschau-Transkription mit `WHISPER_FAST_MODEL` (schnell, keine LLM-Verarbeitung), Parameter: `audio`, `lang_mode`; liefert `{"transcript", "loop_share"}` |
 | POST | `/analyze` | Transkription + optionale Diarisation + LLM (SSE-Stream), Parameter: `audio`, `model`, `mode`, `gender`, `lang_mode`, `diarize` |
 | POST | `/analyze-text` | LLM-Analyse eines vorhandenen Transkripts – kein Whisper-Schritt, SSE-Stream, Parameter: `transcript`, `model`, `mode`, `gender` |
 | POST | `/subject` | Betreffzeile (max. 100 Zeichen) für ein Transkript per LLM generieren |
 
-**`/analyze` und `/analyze-text` SSE-Event-Typen:** `status`, `transcript`, `token`, `error`, `done`
+**`/analyze` und `/analyze-text` SSE-Event-Typen:** `status`, `transcript`, `token`, `warning`, `error`, `done`
+
+`warning` meldet ein unvollstaendiges Transkript (Wiederholschleife, siehe unten) — anders als `error` laeuft die Analyse danach weiter, das Ergebnis ist aber nur eingeschraenkt brauchbar.
 
 **Modi (`mode`-Parameter) für `/analyze` und `/analyze-text`:**
 
@@ -81,15 +88,29 @@ ki-transcribe/
 
 **`MODEL_WHITELIST`** in `server.py`: Nur Modelle mit passendem Präfix werden im Frontend-Dropdown angezeigt (`qwen3:`, `qwen2.5:`, `phi4`, `mistral-nemo`, `deepseek-r1:14b`, `gemma4:`, `llama3.1:`, `meditron`).
 
-**Halluzinationen und Wiederholschleifen (`server.py`):** Whispers häufigster Schadensfall ist nicht der einzelne falsche Satz, sondern die **Wiederholschleife**: das Modell wiederholt einen Baustein dutzendfach („Der älteren. Der älteren. …"), weil `condition_on_previous_text=True` ihm seine eigene Ausgabe als Kontext zurückgibt. Ausgelöst wird das von Stille. Gemessen an den gespeicherten Logs: **bei 49 % aller Analysen bestanden über 5 % des Transkripts aus Schleifentext, bei 30 % über ein Drittel; über alle Logs hinweg waren 44 % des Transkripttextes Schleife.** Drei Ebenen wirken dagegen:
+**Halluzinationen und Wiederholschleifen (`server.py`):** Whispers häufigster Schadensfall ist nicht der einzelne falsche Satz, sondern die **Wiederholschleife**: das Modell wiederholt einen Baustein dutzendfach („Der älteren. Der älteren. …"), weil `condition_on_previous_text=True` ihm seine eigene Ausgabe als Kontext zurückgibt. Ausgelöst wird das von Stille. Gemessen an den gespeicherten Logs: **bei 49 % aller Analysen bestanden über 5 % des Transkripts aus Schleifentext, bei 30 % über ein Drittel; über alle Logs hinweg waren 44 % des Transkripttextes Schleife.** **Die Ursache ist seit dem Patch in `whisper-patch/stt.py` behoben** (siehe unten); die Ebenen darunter bleiben als Auffangnetz. Vier Ebenen wirken dagegen:
 
+0. **`whisper-patch/stt.py`** setzt `condition_on_previous_text=False` im Whisper-Server selbst — der Rückkanal, der eine Schleife überhaupt erst über Fenstergrenzen trägt, ist damit zu. Dazu die Temperatur-Leiter statt des Skalars (macht `compression_ratio_threshold` erst scharf) und `hallucination_silence_threshold=2.0`. Details und Auffrischungsrezept: `whisper-patch/README.md`.
 1. **`WHISPER_VAD_FILTER`** (Default an) schaltet Silero-VAD im Whisper-Server ein, schneidet Stille also heraus, bevor das Modell sie sieht. Das ist der wirksamste Hebel. Gemessen an einer Testaufnahme (4:11, davon 3:45 Stille) lieferte der Server ohne VAD **ausschließlich** „Vielen Dank." ×9 und verlor die echte Sprache vollständig; mit VAD beide Sprachpassagen fehlerfrei. Wort-Zeitstempel bleiben trotz VAD auf der Original-Zeitachse (geprüft: < 1 s Abweichung über 251 s), die Sprecherzuordnung bricht also nicht.
-2. **`collapse_repeated_text()` / `collapse_repeated_units()`** kürzen verbliebene Schleifen. Gesucht wird ab dem *kürzesten* Baustein (1–12 Wörter). Die Schwellen sind bewusst vorsichtig, weil im Sprechzimmer echt wiederholt wird: bei ein- und zweiwortigen Bausteinen erst ab der **vierten** Wiederholung („das tut weh, weh, weh" bleibt stehen), bei längeren ab der dritten. Erhalten bleiben Anfang **und letzter** Block — nur der letzte trägt die schließende Interpunktion. Bausteine aus `WHISPER_HALLUCINATIONS` fliegen bei Wiederholung ganz raus; einmalig stehen sie (ein „Vielen Dank." am Gesprächsende ist echt).
+2. **`collapse_repeated_text()` / `collapse_repeated_units()`** kürzen verbliebene Schleifen — in zwei Stufen:
+   - **exakt periodisch** (`_collapse_runs()`): gesucht wird ab dem *kürzesten* Baustein (1–12 Wörter). Die Schwellen sind bewusst vorsichtig, weil im Sprechzimmer echt wiederholt wird: bei ein- und zweiwortigen Bausteinen erst ab der **vierten** Wiederholung („das tut weh, weh, weh" bleibt stehen), bei längeren ab der dritten. Erhalten bleiben Anfang **und letzter** Block — nur der letzte trägt die schließende Interpunktion. Bausteine aus `WHISPER_HALLUCINATIONS` fliegen bei Wiederholung ganz raus; einmalig stehen sie (ein „Vielen Dank." am Gesprächsende ist echt).
+   - **entartet / mit Jitter** (`_collapse_degenerate()`): echte Schleifen sind selten sauber periodisch. Beobachtet wurde ein Wechsel zwischen „die Ausbildung und die" (4 Wörter) und „die Ausbildung und die Aus" (5) — jeder saubere Lauf ist dadurch nur zwei bis vier Blöcke lang, wird brav auf einen gekürzt, und übrig bleibt trotzdem eine seitenlange Kette. Die zweite Stufe schaut deshalb auf ein 40er-Fenster und verlangt **zwei** Kriterien: höchstens 8 verschiedene Bausteine **und** eine Selbstähnlichkeit ≥ 0,5 (Anteil der Positionen, an denen sich ein Wort nach *p* Schritten wiederholt, über alle *p* bis 12). Der Wortschatz allein reicht nicht — eine Strecke aus lauter „ja/mhm/genau/okay" kommt auf ebenso wenige Typen, ist aber echte Rede. Der Unterschied ist die Ordnung: eine Schleife wiederholt eine *Folge*. Gemessen trennt das sauber — die Schleife aus dem Log vom 17.09.2026 liegt zwischen **0,56 und 1,00**, zufällig gewürfelte Rückmeldepartikel nie über **0,42**. Von einer entarteten Strecke bleiben 12 Einheiten als Beleg stehen, der Rest fällt weg (eine Schleife trägt keine schließende Interpunktion, die zu retten wäre).
 3. **`_is_hallucination()`** verwirft ein Transkript, das als Ganzes nur aus einem bekannten Baustein besteht.
+4. **Die Warnung ist die letzte Ebene und die wichtigste.** Keine der Kürzungen holt zurück, was während der Schleife tatsächlich gesprochen wurde — sie räumen nur den Müll weg und lassen ein *stilles* Loch zurück. `_loop_share()` misst den entfernten Anteil, `_loop_warning()` formuliert ab `LOOP_WARN_SHARE` (Default 0,15) den Klartext, `/analyze` schickt ihn als **`warning`**-SSE-Event, und das Frontend zeigt ihn als stehendes Banner über dem Transkript (`#loopWarning`, `showLoopWarning()`), das erst bei der nächsten Aufnahme verschwindet. Beim Neulauf über `/analyze-text` bleibt es bewusst stehen: das Transkript ist dasselbe lückenhafte. Die Live-Vorschau (`/transcribe-only`) gibt `loop_share` ebenfalls zurück, damit eine Schleife schon während der Aufnahme auffällt. Der Anteil steht außerdem als `loop_share` im Log.
 
 Die Bereinigung läuft auf den **Einheiten vor der Sprecherzuordnung**: Schleifenwörter tragen über die Stille verteilte Zeitstempel und würden sonst reihum beiden Sprechern zugeschlagen — das zerhackt auch die echten Turns drumherum.
 
-**Nicht erreichbar von außen:** `condition_on_previous_text=False` wäre die eigentliche Ursachenbehebung. Der faster-whisper-Server reicht aber nur `task`, `language`, `initial_prompt`, `word_timestamps`, `temperature`, `vad_filter` und `hotwords` durch (`routers/stt.py`), und der Container wird mit `ki-atteste` geteilt, ist also kein Ort für einen lokalen Patch. `temperature` nimmt er nur als Skalar, eine Fallback-Liste (die Voraussetzung dafür, dass `compression_ratio_threshold` überhaupt greift) ist damit ebenfalls nicht setzbar.
+**Ursachenbehebung: `whisper-patch/stt.py` (Bind-Mount in den Whisper-Container).** Über HTTP ist an die entscheidenden Decoder-Optionen nicht heranzukommen — der Server reicht nur `task`, `language`, `initial_prompt`, `word_timestamps`, `temperature`, `vad_filter` und `hotwords` durch (`routers/stt.py`). Er läuft aber aus einem Quellbaum (`uv run uvicorn --factory faster_whisper_server.main:create_app`), und der Dienst ist in *dieser* `docker-compose.yml` definiert: ein Read-only-Mount einer gepatchten `stt.py` über `/root/faster-whisper-server/faster_whisper_server/routers/stt.py` genügt, es braucht kein eigenes Image. Drei Optionen werden gesetzt:
+
+| Option | vorher | jetzt | Wirkung |
+|--------|--------|-------|---------|
+| `condition_on_previous_text` | `True` (faster-whisper-Default) | `False` | Nimmt der Schleife den Rückkanal. Der Preis ist etwas weniger Kontext über Fenstergrenzen (Eigennamen, angefangene Sätze). |
+| `temperature` | Skalar `0.0` | Leiter `(0.0 … 1.0)`, wenn der Aufrufer nichts anderes setzt | Macht `compression_ratio_threshold=2.4` erst wirksam: ein entartetes Segment wird nur neu dekodiert, wenn es eine höhere Temperatur gibt, auf die zurückgefallen werden kann. Der Skalar schaltet die Notbremse unbemerkt aus — faster-whispers eigener Default ist die Leiter. |
+| `hallucination_silence_threshold` | `None` | `2.0` (nur bei Wort-Zeitstempeln) | Überspringt Stille, in die hinein halluziniert wurde. |
+
+Dass upstream den Parameter kennt, zeigt der WebSocket-Pfad derselben Datei: dort steht `condition_on_previous_text: False` bereits im Original. Nur in die Datei-Endpunkte ist er nie durchgereicht worden.
+
+**Der Whisper-Dienst trägt deshalb kein Watchtower-Label mehr.** Der Mount legt sich über *jede* Version der Datei — ein automatisches Image-Update würde den alten Patch gegen einen neuen Rest des Pakets laufen lassen. Updates von Hand, Diff-Rezept in `whisper-patch/README.md`. Der Patch wirkt auch auf `ki-atteste` (geteilter Container); das ist beabsichtigt, Diktatschleifen sind dieselbe Fehlerart.
 
 **`ThinkingFilter`** in `server.py`: Filtert `<think>…</think>`-Blöcke aus dem SSE-Stream (für Reasoning-Modelle wie qwen3).
 
@@ -123,6 +144,10 @@ Bewusste Entscheidungen:
 
 Die Modelle sind auf Hugging Face gated (MIT-Lizenz, nur Registrierung). Der Token wird als BuildKit-Secret aus `./.hf_token` gemountet, landet also nicht im Image; zur Laufzeit läuft der Container mit `HF_HUB_OFFLINE=1`. Details: `diarize/README.md`.
 
+**Hochgeladene Dateien laufen durch denselben Pfad wie Live-Aufnahmen.** Das Frontend kennt nur einen Analyse-Weg (`startAnalysis()` in `static/app.js`): `getActiveAudioBlob()` liefert je nach Tab den Aufnahme-Blob oder die hochgeladene `File`, alles Weitere — `diarize`, `lang_mode`, `mode` — ist identisch. Was Uploads trotzdem unterschied, war ausschließlich die **Länge**: eine Sprechstunden-Aufnahme dauert Minuten, eine hochgeladene Datei kann 45 min lang sein, und der Timeout für Whisper und Diarisation stand fest auf 300 s. Solange die Diarisation auf der CPU lief (~0,6× Echtzeit), riss jede längere Datei diese Grenze, `/analyze` fiel auf `SPEAKER_CONTEXT_PLAIN` zurück und der Upload sah aus, als würde er gar nicht diarisiert. Die Grenze ist jetzt `AUDIO_TIMEOUT` (Default 1800 s). Gemessen an einer 45-min-Datei (2714 s, 43 MB) auf der 5080: Diarisation 41 s, Gesamtanalyse 3:08 min, 40 Sprecherwechsel im Transkript.
+
+**Gescheiterte Diarisation wird mit Typ geloggt** (`_exc_text()`): httpx-Timeouts tragen eine leere Meldung, `Diarisation nicht anwendbar: ` endete deshalb nach dem Doppelpunkt und verschwieg gerade den Fall, der hier auftrat. `/analyze` loggt außerdem Dateiname und -größe, damit ein langer Lauf von einem hängenden unterscheidbar bleibt.
+
 **Sprecher-Kontext in den Prompts (`prompts.py`):** `ANALYZE_PROMPT` und `ABPRO_PROMPT` enthalten den Platzhalter `{speaker_context}`, den `_build_prompt()` in `server.py` je nach Diarisations-Status mit `SPEAKER_CONTEXT_DIARIZED` oder `SPEAKER_CONTEXT_PLAIN` füllt. `/analyze-text` erkennt über `has_speaker_labels()` an den Markern selbst, welche Variante gilt. `CLEAN_PROMPT` weist zusätzlich an, vorhandene Marker unverändert zu übernehmen.
 
 **Live-Transkript während der Aufnahme (`static/app.js`):** Während der Aufnahme wird alle 30s ein neuer Audio-Abschnitt an `/transcribe-only` geschickt (mit `WHISPER_FAST_MODEL`, z. B. `small`) und im UI angezeigt — dient nur als schnelle Vorschau. Nach Aufnahmeende wird die **komplette** Aufnahme in einem Stück über `/analyze` mit `WHISPER_MEDICAL_MODEL` transkribiert (durchgehender Kontext, weniger Segmentgrenzen-Halluzinationen) und ersetzt die Vorschau, sobald das `transcript`-SSE-Event eintrifft.
@@ -148,6 +173,8 @@ Die Modelle sind auf Hugging Face gated (MIT-Lizenz, nur Registrierung). Der Tok
 | `DIARIZE_PORT` | `8000` | Port |
 | `DIARIZE_MIN_SPEAKERS` | `0` | Untergrenze für pyannote (`0` = keine Vorgabe) |
 | `DIARIZE_MAX_SPEAKERS` | `0` | Obergrenze (`0` = keine Vorgabe) |
+| `AUDIO_TIMEOUT` | `1800` | Wartezeit (s) auf Whisper **und** Diarisation — bemisst die Rechenzeit, nicht die Netzlatenz |
+| `LOOP_WARN_SHARE` | `0.15` | Ab welchem Anteil entfernter Wiederholschleife die Oberfläche warnt |
 | `LOG_DIR` | `/logs` | Zielverzeichnis für Logging-Modus (`_save_log()`) |
 
 **Diarisations-Container-Variablen** (in `docker-compose.yml` unter `diarize`):
@@ -194,10 +221,11 @@ docker-compose logs -f gespraech-web
 
 - **Ollama ist external:** Der ollama-Container wird nicht in dieser `docker-compose.yml` definiert — er muss bereits laufen und mit `ollama-net` verbunden sein.
 - **GPU erforderlich für faster-whisper:** Der Container nutzt das Image `fedirz/faster-whisper-server:latest-cuda` mit `deploy.resources.reservations.devices` (nvidia). Ohne GPU muss das Image auf `latest-cpu` geändert und der `devices`-Block entfernt werden.
-- **faster-whisper ist geteilt:** Container-Name `diktat-whisper` wird auch vom Projekt `ki-atteste` genutzt — Änderungen an Modell/Env-Vars wirken sich auf beide aus.
+- **faster-whisper ist geteilt:** Container-Name `diktat-whisper` wird auch vom Projekt `ki-atteste` genutzt — Änderungen an Modell/Env-Vars wirken sich auf beide aus. Das gilt auch für den Router-Patch aus `whisper-patch/` (beabsichtigt, siehe oben).
+- **Whisper-Container neu starten, ohne die Web-App mitzuziehen:** `docker compose up -d --no-deps faster-whisper`. Nötig nach jeder Änderung an `whisper-patch/stt.py` — die Datei ist gemountet, aber uvicorn lädt sie nur beim Start.
 - **Die GPU teilen sich jetzt drei Dienste:** `faster-whisper`, `ollama` und `diarize`. pyannote braucht dabei am wenigsten (VRAM-Spitze 281 MiB) und belegt sie nur während einer Analyse. Auf der 16-GB-Karte ist das unkritisch; eng wird es erst, wenn ollama ein deutlich größeres Modell dauerhaft resident hält.
 - **`diarize` neu starten, ohne Whisper mitzuziehen:** `docker compose up -d --no-deps diarize`. Ohne `--no-deps` gilt derselbe Fallstrick wie unten bei `gespraech-web`.
 - **HF-Token für den Diarisations-Build:** `docker compose build diarize` braucht `./.hf_token` (gitignored). Fehlt die Datei oder sind die Nutzungsbedingungen der pyannote-Repos nicht akzeptiert, bricht der Build mit einer erklärenden Meldung ab. `docker compose up` ohne Build funktioniert auch ohne die Datei.
-- **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `templates/`, `static/` und `diarize/app.py` read-only in den jeweiligen Container — Änderungen wirken ohne Rebuild, nur ein `docker-compose restart gespraech-web` ist nötig. Rebuild braucht es nur bei `requirements-server.txt` oder `Dockerfile`.
+- **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `templates/`, `static/`, `diarize/app.py` und `whisper-patch/stt.py` read-only in den jeweiligen Container — Änderungen wirken ohne Rebuild, nur ein `docker-compose restart gespraech-web` ist nötig. Rebuild braucht es nur bei `requirements-server.txt` oder `Dockerfile`.
 - **Compose-Netzwerk-Altlast:** Bei „container … is not connected to the network ki-transcribe_diktat-network" während eines Recreates existiert neben `diktat-network` noch ein leeres, projekt-präfigiertes Netzwerk aus der Zeit vor dem `name:`-Eintrag. Beide tragen dasselbe Label `com.docker.compose.network=diktat-network`, Compose greift auf das falsche zu. Fix: `docker network rm ki-transcribe_diktat-network` (Container-Anzahl vorher per `docker network inspect` auf 0 prüfen).
 - **Geteilten Whisper nicht mitziehen:** `docker compose up -d --build gespraech-web` stoppt via `depends_on` auch `diktat-whisper` (und `diktat-diarize`) und legt damit kurzzeitig `ki-atteste` lahm. Mit `--no-deps` bleiben beide unangetastet.

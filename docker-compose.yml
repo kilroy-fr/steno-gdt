@@ -28,6 +28,10 @@ services:
       # Begleitperson/MFA duerfen 3+ sein)
       - DIARIZE_MIN_SPEAKERS=0
       - DIARIZE_MAX_SPEAKERS=0
+      # Wartezeit auf Whisper und Diarisation. 30 min, damit auch eine
+      # hochgeladene Dreiviertelstunde durchlaeuft - vorher waren 300 s fest
+      # verdrahtet, und genau daran scheiterten lange Uploads.
+      - AUDIO_TIMEOUT=1800
       - LOG_DIR=/logs
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
@@ -133,12 +137,21 @@ services:
       - TZ=Europe/Berlin
     volumes:
       - whisper-models:/root/.cache/huggingface
+      # Gepatchter Router: setzt condition_on_previous_text=False und zwei
+      # weitere Decoder-Optionen, an die die HTTP-Schnittstelle nicht
+      # heranreicht. Ohne das laeuft Whisper in Wiederholschleifen, aus denen
+      # es bis zum Dateiende nicht mehr herauskommt (gemessen: 9612 von 10376
+      # Woertern einer 36-min-Aufnahme). Der Server laeuft aus einem
+      # Quellbaum, ein Dateimount genuegt also. Details: whisper-patch/README.md
+      - ./whisper-patch/stt.py:/root/faster-whisper-server/faster_whisper_server/routers/stt.py:ro
     networks:
       - diktat-network
       - caddy-proxy-network
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+    # Kein Watchtower mehr: der Mount oben legt sich ueber jede Version der
+    # Datei, ein automatisches Image-Update wuerde den Patch also unbemerkt
+    # gegen einen fremden Rest des Pakets laufen lassen. Updates von Hand,
+    # Rezept in whisper-patch/README.md.
 
 # ============================================================
 # SECRETS

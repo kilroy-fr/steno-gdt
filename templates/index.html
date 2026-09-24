@@ -180,6 +180,14 @@
       </div>
 
       <!-- Transkript -->
+      <!-- Warnung, wenn Whisper in einer Wiederholschleife haengen blieb. Steht
+           bewusst ueber dem Transkript und bleibt stehen, statt wie das
+           Statusband vom naechsten Schritt ueberschrieben zu werden. -->
+      <div id="loopWarning" class="loop-warning" style="display:none;">
+        <span class="loop-warning-icon">⚠️</span>
+        <span id="loopWarningText"></span>
+      </div>
+
       <div id="transcriptSection" class="result-section" style="display:none;">
         <div class="result-header">
           <h2>📝 Transkript</h2>
