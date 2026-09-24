@@ -20,13 +20,11 @@ Intel Arc) ist damit ein Build-Argument plus Device-Mapping in
 docker-compose.yml, keine Quelltextaenderung.
 """
 import asyncio
-import contextlib
 import logging
 import os
 import subprocess
 import tempfile
 import time
-import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -114,23 +112,22 @@ def _load_pipeline():
                 "HF_TOKEN gebaut? Siehe diarize/README.md."
             )
 
-        device = _select_device()
-        try:
-            if device.type == "cpu":
-                torch.set_num_threads(TORCH_THREADS)
-            pipeline.to(device)
-            _warmup(pipeline, device)
-        except Exception as e:
-            # Bewusst kein harter Fehler: eine langsame Diarisation ist immer
-            # noch besser als gar keine, und /analyze wuerde sonst dauerhaft
-            # ohne Sprecherkennzeichnung laufen.
-            if device.type == "cpu":
-                raise
-            logger.warning(f"'{device.type}' nicht nutzbar ({e}) — weiter auf der CPU.")
-            device = torch.device("cpu")
-            torch.set_num_threads(TORCH_THREADS)
-            pipeline.to(device)
-            _warmup(pipeline, device)
+        # Bewusst kein harter Fehler, wenn die Karte scheitert: eine langsame
+        # Diarisation ist immer noch besser als gar keine, und /analyze wuerde
+        # sonst dauerhaft ohne Sprecherkennzeichnung laufen.
+        preferred = _select_device()
+        candidates = [preferred] if preferred.type == "cpu" else [preferred, torch.device("cpu")]
+        for device in candidates:
+            try:
+                if device.type == "cpu":
+                    torch.set_num_threads(TORCH_THREADS)
+                pipeline.to(device)
+                _warmup(pipeline, device)
+                break
+            except Exception as e:
+                if device.type == "cpu":
+                    raise
+                logger.warning(f"'{device.type}' nicht nutzbar ({e}) — weiter auf der CPU.")
 
         _pipeline = pipeline
         _device = device
@@ -151,24 +148,30 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Diarisation", lifespan=lifespan)
 
 
-def _to_wav(src: Path) -> Path:
-    """Konvertiert beliebiges Eingangsformat (webm/opus, mp3, ...) nach 16 kHz mono WAV."""
-    dst = src.parent / f"{src.stem}_16k.wav"
+def _decode(src: Path) -> torch.Tensor:
+    """Dekodiert beliebiges Eingangsformat (webm/opus, mp3, ...) zu 16 kHz mono.
+
+    ffmpeg schreibt die Samples direkt in die Pipe, die Pipeline bekommt sie als
+    Tensor — keine zweite Temp-Datei, und pyannote muss nicht selbst dekodieren
+    und resamplen.
+    """
     try:
-        subprocess.run(
-            ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src),
-             "-ac", "1", "-ar", str(TARGET_SR), "-c:a", "pcm_s16le", str(dst)],
+        pcm = subprocess.run(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(src),
+             "-ac", "1", "-ar", str(TARGET_SR), "-f", "f32le", "pipe:1"],
             check=True, capture_output=True,
-        )
+        ).stdout
     except subprocess.CalledProcessError as e:
         raise HTTPException(
             status_code=400,
             detail=f"ffmpeg-Fehler: {e.stderr.decode('utf-8', 'replace')[:200]}",
         )
-    return dst
+    if not pcm:
+        raise HTTPException(status_code=400, detail="Keine Audiodaten in der Datei.")
+    return torch.frombuffer(bytearray(pcm), dtype=torch.float32).unsqueeze(0)
 
 
-def _run_pipeline(wav_path: Path, min_speakers: int, max_speakers: int) -> list[dict]:
+def _run_pipeline(waveform: torch.Tensor, min_speakers: int, max_speakers: int) -> list[dict]:
     kwargs: dict = {}
     # 0 = "nicht vorgeben". Eine harte Obergrenze von 2 waere falsch: Begleit-
     # personen und MFA kommen im Sprechzimmer regelmaessig vor.
@@ -177,20 +180,11 @@ def _run_pipeline(wav_path: Path, min_speakers: int, max_speakers: int) -> list[
     if max_speakers > 0:
         kwargs["max_speakers"] = max_speakers
 
-    diarization = _pipeline(str(wav_path), **kwargs)
+    diarization = _pipeline({"waveform": waveform, "sample_rate": TARGET_SR}, **kwargs)
     return [
         {"start": round(turn.start, 3), "end": round(turn.end, 3), "speaker": label}
         for turn, _, label in diarization.itertracks(yield_label=True)
     ]
-
-
-def _wav_duration(path: Path) -> float:
-    """Laenge der konvertierten WAV in Sekunden — nur fuer die Logzeile."""
-    try:
-        with contextlib.closing(wave.open(str(path), "rb")) as w:
-            return w.getnframes() / float(w.getframerate())
-    except Exception:
-        return 0.0
 
 
 @app.get("/health")
@@ -221,24 +215,24 @@ async def diarize(
         )
 
     suffix = Path(audio.filename or "audio.webm").suffix or ".webm"
-    wav_path = None
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(await audio.read())
         tmp_path = Path(tmp.name)
 
     try:
+        loop = asyncio.get_running_loop()
         t0 = time.perf_counter()
-        wav_path = await asyncio.get_running_loop().run_in_executor(None, _to_wav, tmp_path)
+        waveform = await loop.run_in_executor(None, _decode, tmp_path)
         async with _pipeline_lock:
-            segments = await asyncio.get_running_loop().run_in_executor(
-                None, _run_pipeline, wav_path, min_speakers, max_speakers
+            segments = await loop.run_in_executor(
+                None, _run_pipeline, waveform, min_speakers, max_speakers
             )
         speakers = sorted({s["speaker"] for s in segments})
         # Echtzeitfaktor mitloggen: ohne ihn liess sich der Rueckstand gegenueber
         # Whisper nur muehsam aus Zeitstempeln benachbarter Logzeilen rekonstruieren.
         elapsed = time.perf_counter() - t0
-        audio_s = _wav_duration(wav_path)
-        rtf = f", {audio_s / elapsed:.1f}x Echtzeit" if audio_s and elapsed else ""
+        audio_s = waveform.shape[-1] / TARGET_SR
+        rtf = f", {audio_s / elapsed:.1f}x Echtzeit" if elapsed else ""
         logger.info(
             f"Diarisation: {len(segments)} Segmente, {len(speakers)} Sprecher — "
             f"{audio_s:.0f}s Audio in {elapsed:.1f}s{rtf} auf {_device.type if _device else '?'}"
@@ -250,12 +244,4 @@ async def diarize(
         logger.error(f"Diarisations-Fehler: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        for p in (tmp_path, wav_path):
-            if p and p.exists():
-                p.unlink()
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        tmp_path.unlink(missing_ok=True)

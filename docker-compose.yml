@@ -16,6 +16,10 @@ services:
       - OLLAMA_HOST=ollama
       - OLLAMA_PORT=11434
       - OLLAMA_MODEL=gemma4:12b
+      # Kontextfenster (Untergrenze). ollamas eigener Default auf einer
+      # 16-GB-Karte ist 4096 — dann wird jedes laengere Gespraech vorne
+      # abgeschnitten. Bei gemma4:12b kosten 16k nur ~260 MiB VRAM.
+      - OLLAMA_NUM_CTX=16384
       - WHISPER_LANGUAGE=de
       - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
       - WHISPER_FAST_MODEL=small

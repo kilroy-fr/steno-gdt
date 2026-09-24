@@ -420,6 +420,7 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 }
 
 .loop-warning-icon { flex-shrink: 0; }
+#loopWarningText { white-space: pre-line; }
 
 .status-box {
   display: flex;

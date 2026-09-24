@@ -12,8 +12,10 @@ Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter F
 - Sprachschalter im Frontend: „Gespräch nicht auf Deutsch" wechselt auf Standard-Modell mit Auto-Spracherkennung
 - **Medizinisches Fachvokabular** (`medical_vocab.py`): kuratiertes Glossar aus Diagnosen, Wirkstoffen, Impfstoffen und Untersuchungen, das dem LLM mitgegeben wird, damit phonetisch verzerrte Begriffe erkannt statt geraten werden
 - KI-gestützte Analyse des Arzt-Patienten-Gesprächs (ollama LLM)
-- **Sprechertrennung (Diarisation)** via pyannote.audio: trennt Arzt, Patient und weitere Anwesende im Transkript (`SPRECHER A:` / `SPRECHER B:` …). Läuft auf der CPU in einem eigenen Container, parallel zur Transkription
+- **Sprechertrennung (Diarisation)** via pyannote.audio: trennt Arzt, Patient und weitere Anwesende im Transkript (`SPRECHER A:` / `SPRECHER B:` …). Läuft auf der GPU in einem eigenen Container, parallel zur Transkription. Jeder Satz wird geschlossen einem Sprecher zugeordnet, damit Wechsel nicht mitten im Satz liegen
 - Sprecherzuordnung: das LLM erschließt aus dem Gesprächsverlauf, welcher Marker der Arzt ist – so werden Arzt-Überlegungen nicht als gesicherte Diagnosen und Patienten-Rückfragen nicht als Verordnungen dokumentiert. Ohne Diarisation greift weiterhin die reine Kontext-Heuristik
+- **Vollständige Dokumentation auch langer Gespräche:** das Kontextfenster des LLM wird an die Transkriptlänge angepasst (`OLLAMA_NUM_CTX`), und die Prompts verlangen jedes Anliegen einzeln – gerade bei Vorsorgeuntersuchungen mit mehreren unabhängigen Beschwerden
+- **Schutz vor Whisper-Wiederholschleifen:** gepatchter Whisper-Router (`whisper-patch/`), VAD, automatisches Kürzen verbliebener Schleifen und eine Warnung, wenn dem Transkript dadurch Gespräch fehlt
 - Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO, Standard), Zusammenfassung, Bereinigung
 - A/B/PRO-Modus zeigt zusätzlich drei separat kopierbare Karten (Anamnese / Befund / Procedere)
 - Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe, auch nachträglich per Rerun auf der Analyse-Karte
@@ -38,7 +40,7 @@ Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter F
 
 - Docker & Docker Compose
 - NVIDIA GPU für faster-whisper (Standard-Image nutzt CUDA; ohne GPU auf `latest-cpu` umstellen)
-- Mindestens 4 GB RAM (Diarisation belegt zusätzlich ~1,5 GB und einige CPU-Kerne)
+- Mindestens 4 GB RAM; die GPU teilen sich Whisper, ollama und die Diarisation (16 GB VRAM reichen)
 - Kostenloser **Hugging-Face-Account** für die Sprechertrennung: die pyannote-Modelle sind MIT-lizenziert, aber „gated" (siehe [`diarize/README.md`](diarize/README.md))
 - Bestehender **ollama-Container** mit Modell (z. B. `gemma4:12b`), erreichbar über das externe Netzwerk `ollama-net`
 - (Optional) Caddy oder anderer Reverse-Proxy im externen Netzwerk `caddy-proxy-network`
@@ -98,12 +100,15 @@ environment:
   - OLLAMA_HOST=ollama
   - OLLAMA_PORT=11434
   - OLLAMA_MODEL=gemma4:12b        # Standard-Modell für die Web-UI
+  - OLLAMA_NUM_CTX=16384           # Kontextfenster (Untergrenze, wächst bei langen Gesprächen)
   - WHISPER_LANGUAGE=de
   - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
   - DIARIZE_HOST=diarize
   - DIARIZE_PORT=8000
   - DIARIZE_MIN_SPEAKERS=0         # 0 = pyannote schätzt die Sprecherzahl selbst
   - DIARIZE_MAX_SPEAKERS=0         # 0 = ohne Obergrenze (Begleitperson, MFA)
+  - AUDIO_TIMEOUT=1800             # Wartezeit (s) auf Whisper und Diarisation
+  - LOOP_WARN_SHARE=0.15           # ab diesem Schleifenanteil warnt die Oberfläche
   - LOG_DIR=/logs                  # Ziel für optionalen Logging-Modus
 ```
 
@@ -142,6 +147,24 @@ Das Medizin-Modell wird beim ersten deutschen Aufruf automatisch von HuggingFace
 
 > **Hinweis:** Der `faster-whisper`-Container (`diktat-whisper`) wird mit dem Projekt `ki-atteste` geteilt. Änderungen an Modell-Env-Vars wirken sich auf beide Projekte aus.
 
+### Kontextfenster des LLM (`OLLAMA_NUM_CTX`)
+
+Ohne Vorgabe arbeitet ollama auf einer 16-GB-Karte mit nur **4096 Tokens** Kontext
+und schneidet längere Prompts **vorne** ab – stillschweigend, nur mit
+`truncating input prompt` im ollama-Log. Das Modell sieht dann nur das
+Gesprächsende; Beschwerden vom Anfang fehlen in der Dokumentation. Bis
+September 2026 betraf das zwei Drittel aller Analysen.
+
+`server.py` setzt `num_ctx` deshalb bei jedem Aufruf: mindestens
+`OLLAMA_NUM_CTX`, bei langen Gesprächen in 8k-Schritten mehr. Bei `gemma4:12b`
+kosten 16k Kontext nur ~260 MiB VRAM; bei Modellen ohne Gleitfenster-Aufmerksamkeit
+(qwen3, llama) ein Vielfaches. Prüfen, ob noch etwas abgeschnitten wird:
+
+```bash
+docker logs ollama 2>&1 | grep "truncating input prompt"
+docker logs gespraech-web 2>&1 | grep "Prompt-Tokens"
+```
+
 ### Erlaubte Ollama-Modelle (Frontend-Dropdown)
 
 Nur Modelle mit passendem Namens-Präfix erscheinen in der Modellauswahl (`MODEL_WHITELIST` in `server.py`):
@@ -159,7 +182,7 @@ ollama list
 
 ### Analyse-Prompts anpassen
 
-Die Prompts für alle Modi liegen zentral in `prompts.py` (`ANALYZE_PROMPT`, `ABPRO_PROMPT`, `SUMMARY_PROMPT`, `SUBJECT_PROMPT`, `CLEAN_PROMPT`). Nach Änderungen:
+Die Prompts für alle Modi liegen zentral in `prompts.py` (`ANALYZE_PROMPT`, `ABPRO_PROMPT`, `SUMMARY_PROMPT`, `SUBJECT_PROMPT`, `CLEAN_PROMPT`). Die Vollständigkeitsregeln (`COMPLETENESS_RULES`) stehen in Vollanalyse und A/B/PRO bewusst **nach** dem Transkript – bei langen Gesprächen wirken Anweisungen am Ende stärker. Nach Änderungen:
 
 ```bash
 docker-compose restart gespraech-web
@@ -206,6 +229,29 @@ curl http://localhost:11434/api/tags
 2. Richtiges Mikrofon im Einstellungen-Modal (Zahnrad-Icon) auswählen
 3. Betriebssystem-Mikrofonrechte für den Browser prüfen
 
+### Mikrofon: EPOS Expand 40
+
+Die Web-App schaltet Rauschunterdrückung, automatische Pegelregelung und
+Echounterdrückung des Browsers ab (`MIC_PROCESSING` in `static/app.js`) – die
+Konferenzspinne erledigt das selbst, die Browser-Verarbeitung schneidet leise,
+entfernte Stimmen mit weg und hebt in Pausen das Rauschen an, aus dem Whisper
+halluziniert.
+
+1. Per **USB** anschließen, nicht per Bluetooth-Direktverbindung: das
+   Bluetooth-Headset-Profil überträgt das Mikrofon nur schmalbandig
+2. Mittig zwischen Arzt und Patient stellen, weg von PC-Lüfter und Tastatur
+3. Da der Browser den Pegel nicht mehr nachregelt: Windows-Aufnahmepegel des
+   Geräts einmal prüfen (Probeaufnahme, beide Stimmen gut verständlich)
+
+### Problem: „In der Dokumentation fehlen Beschwerden"
+
+1. ollama-Log auf `truncating input prompt` prüfen (siehe *Kontextfenster des
+   LLM*) – falls vorhanden, `OLLAMA_NUM_CTX` erhöhen
+2. Transkript prüfen: fehlt der Inhalt schon dort, liegt es an der Aufnahme
+   (Pegel, Abstand) oder an einer Wiederholschleife (gelbe Warnung)
+3. Anderes Modell über das Zahnrad-Icon testen; die Regeln dazu stehen in
+   `COMPLETENESS_RULES` (`prompts.py`)
+
 ### Problem: „Transkription ist schlecht"
 
 1. Näher am Mikrofon sprechen, ruhige Umgebung wählen
@@ -234,7 +280,7 @@ Ein Raummikrofon liefert einen Mono-Kanal — die Trennung ist gut, aber nicht
 perfekt; Fehler sitzen vor allem an Sprecherwechseln und bei kurzen Einwürfen.
 
 1. Mikrofon mittig zwischen Arzt und Patient platzieren (Freisprecheinrichtungen
-   wie das EPOS Expand 40 sind deutlich besser als Laptop-Mikrofone)
+   wie das EPOS Expand 40 sind deutlich besser als Laptop-Mikrofone, siehe oben)
 2. Bei mehr als zwei Anwesenden ist das erwartbar — die Prompts sind darauf
    ausgelegt, bei Widersprüchen dem Inhalt statt dem Marker zu folgen
 3. `DIARIZE_MIN_SPEAKERS`/`DIARIZE_MAX_SPEAKERS` nur setzen, wenn die
@@ -284,6 +330,16 @@ faster-whisper:
 
 Ohne GPU: Image auf `fedirz/faster-whisper-server:latest-cpu` ändern und den `deploy`-Block entfernen.
 
+Der Router des Whisper-Servers wird durch `whisper-patch/stt.py` ersetzt
+(Bind-Mount, `condition_on_previous_text=False` gegen Wiederholschleifen). Der
+Container hat deshalb kein Watchtower-Label mehr; Image-Updates von Hand nach
+[`whisper-patch/README.md`](whisper-patch/README.md).
+
+Die Diarisation läuft ebenfalls auf der GPU (`diarize`, PyTorch-Variante per
+Build-Argument `TORCH_INDEX_URL`, Rechenwerk per `DIARIZE_DEVICE`); ohne
+nutzbare Karte fällt sie auf die CPU zurück. Details in
+[`diarize/README.md`](diarize/README.md).
+
 ### Logging-Modus
 
 Über das Einstellungen-Modal aktivierbar. Speichert bei jeder Analyse Transkript + Ergebnis als JSON in `LOG_DIR` (Server-seitig, Dateiname `YYYYMMDD_HHMMSS_<mode>.json`). Standardmäßig deaktiviert.
@@ -302,8 +358,10 @@ ki-transcribe/
 ├── requirements-server.txt    # Server-Python-Dependencies
 ├── VERSION                    # Aktuelle Versionsnummer
 ├── README.md                  # Diese Datei
-├── QUICKSTART.md              # Schnellstart-Anleitung
 ├── CLAUDE.md                  # Technische Referenz für KI-gestützte Entwicklung
+│
+├── diarize/                   # Diarisations-Container (pyannote, GPU)
+├── whisper-patch/             # Gepatchter Whisper-Router gegen Wiederholschleifen
 │
 ├── templates/index.html       # Web-UI HTML-Template (Jinja2)
 ├── static/                    # CSS, JS, Favicon, Logo

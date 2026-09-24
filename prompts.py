@@ -12,7 +12,23 @@ SPEAKER_CONTEXT_DIARIZED = """SPRECHER: Die Sprecher wurden automatisch getrennt
 Die Sprechertrennung ist fehleranfällig, vor allem an Sprecherwechseln und bei kurzen Einwürfen. Wenn Marker und Inhalt sich widersprechen, hat der Inhalt Vorrang; bleibt die Zuordnung unklar, formuliere neutral ("es wurde besprochen") statt zu raten. Laut überlegte Verdachtsdiagnosen des Arztes sind keine gesicherten Diagnosen; Rückfragen zu bestehenden Medikamenten sind keine neuen Verordnungen.
 Übernimm die Marker NICHT in deine Ausgabe."""
 
-ANALYZE_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
+# ============================================================
+# VOLLSTAENDIGKEIT
+# ============================================================
+# Steht in ANALYZE_PROMPT und ABPRO_PROMPT NACH dem Transkript: bei langen
+# Gespraechen wiegen Anweisungen am Ende schwerer als solche vor zehntausend
+# Zeichen Transkript. Anlass war die Klage, dass bei Vorsorgeuntersuchungen nur
+# eines von mehreren Anliegen uebrig blieb. Die Hauptursache war zwar ein zu
+# kleines Kontextfenster (siehe OLLAMA_NUM_CTX in server.py), aber auch der
+# alte Prompt lud dazu ein: "extrem kompakt", "nur das Wesentliche".
+COMPLETENESS_RULES = """VOLLSTÄNDIGKEIT – die wichtigste Regel:
+- Geh das Transkript von Anfang bis Ende durch. Gespräche springen zwischen Themen; was am Anfang besprochen wurde, ist genauso wichtig wie das Ende.
+- Patienten kommen oft mit mehreren, voneinander unabhängigen Anliegen. Jede angesprochene Beschwerde und jedes Thema gehört in die Dokumentation – auch wenn es nur kurz oder nebenbei erwähnt wurde. Fasse unabhängige Beschwerden nicht zusammen und lass keine weg, weil eine andere wichtiger erscheint.
+- Bei Gesundheitsuntersuchung, Check-up oder Vorsorge ist der Anlass nicht das einzige Thema: dokumentiere zusätzlich jede dabei genannte Beschwerde, Vorerkrankung, Dauermedikation, Risikofaktoren (z. B. Rauchen, Gewicht, Blutdruck, familiäre Belastung), Impf- und Vorsorgestatus und jeden Befund – soweit im Gespräch vorkommend.
+- Übernimm Zahlen wörtlich: Messwerte, Laborwerte, Dosierungen, Zeitangaben.
+- Bewerte Befunde nur so, wie sie im Gespräch bewertet wurden – nichts als „unauffällig“ oder „gut“ zusammenfassen, was dort nicht so genannt wurde."""
+
+ANALYZE_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Hausarztpraxis.
 {gender_instruction}
 Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs und erstelle eine strukturierte Zusammenfassung für den Arzt. Halte dich ausschließlich an die Inhalte des Transkripts – keine Annahmen, keine Ergänzungen.
 {speaker_context}
@@ -20,61 +36,68 @@ WICHTIG: Wenn ein Begriff im Transkript unklar, unverständlich oder phonetisch 
 
 {medical_glossary}
 
-**Transkript:**
+<transkript>
 {transcript}
+</transkript>
 
----
+""" + COMPLETENESS_RULES + """
 
 Erstelle folgende strukturierte Übersicht:
 
 ## Zusammenfassung
-(2–3 Sätze zum Kern des Gesprächs)
+(2–3 Sätze zum Kern des Gesprächs; bei mehreren Anliegen alle nennen)
 
-## Vorstellungsgrund / Hauptbeschwerden
-(Was hat {patient_label} in die Praxis geführt?)
+## Vorstellungsgrund und Beschwerden
+(Jedes Anliegen und jede Beschwerde als eigener Aufzählungspunkt – mit Dauer, Verlauf und Begleitumständen, soweit genannt)
 
 ## Anamnese
-(Relevante Informationen zur Krankengeschichte, die im Gespräch erwähnt wurden)
+(Vorerkrankungen, Dauermedikation, Risikofaktoren, Sozial- und Familienanamnese – soweit im Gespräch erwähnt)
+
+## Befunde
+(Messwerte, Laborwerte, körperliche Untersuchung, Ergebnisse von Voruntersuchungen – mit Zahlen; sonst: Nicht besprochen)
 
 ## Diagnosen / Verdachtsdiagnosen
 (Falls erwähnt – sonst: Nicht besprochen)
 
 ## Maßnahmen und Empfehlungen
-(Untersuchungen, Medikamente, Überweisungen, Folgeberatung – falls besprochen)
+(Je Anliegen: Untersuchungen, Medikamente mit Dosierung, Überweisungen, Impfungen, Beratung, Kontrolltermine – falls besprochen)
 
 ## Hinweise für den Arzt
-(Auffälligkeiten, Besonderheiten oder dringender Follow-up-Bedarf)
+(Auffälligkeiten, offene Punkte oder dringender Follow-up-Bedarf)
 
 Antworte vollständig auf Deutsch."""
 
-ABPRO_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Arztpraxis.
+ABPRO_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Hausarztpraxis.
 {gender_instruction}
-Analysiere das folgende Transkript eines Arzt-Patienten-Gesprächs. Nur Transkript-Inhalte – keine Annahmen, keine Ergänzungen. Erfinde keine Wörter, Fachbegriffe oder Medikamente – unklare Stellen als [unverständlich] markieren. Antwort auf Deutsch.
+Erstelle aus dem folgenden Transkript eines Arzt-Patienten-Gesprächs eine Dokumentation nach dem A/B/PRO-Schema. Nur Transkript-Inhalte – keine Annahmen, keine Ergänzungen. Erfinde keine Wörter, Fachbegriffe oder Medikamente – unklare Stellen als [unverständlich] markieren.
 {speaker_context}
 Nutze das folgende Glossar ausschließlich, um bereits im Transkript angedeutete Begriffe korrekt zu erkennen – niemals, um neue Inhalte zu ergänzen.
 
 {medical_glossary}
 
-**Transkript:**
+<transkript>
 {transcript}
+</transkript>
 
----
+""" + COMPLETENESS_RULES + """
 
-Erstelle eine extrem kompakte Dokumentation im Telegrammstil:
+FORM:
+- Telegrammstil: knappe Stichworte statt ganzer Sätze, keine Einleitung, keine Erläuterungen. Knapp heißt kurz formuliert – nicht weniger Themen.
+- Mehrere Anliegen innerhalb eines Abschnitts durch Semikolon trennen, jedes mit eigenem Stichwort.
+- Verwende exakt diese drei Abschnitte, ohne die Klammertexte zu wiederholen:
 
-- Keine einleitenden Floskeln, keine Erläuterungen
-- Verwende exakt diese Abschnitte, ohne die Klammertexte zu wiederholen:
+A: (Anlass des Besuchs, dann jede Beschwerde bzw. jedes Anliegen einzeln mit Dauer und Verlauf; relevante Vorerkrankungen und Dauermedikation)
 
-A: (Besuchsanlass + Anamnese – nur das Wesentliche)
+B: (Messwerte, Laborwerte, körperlicher Befund, Untersuchungsergebnisse – mit Zahlen; Abschnitt weglassen, falls nichts davon vorkommt)
 
-B: (Messwerte / körperlicher Befund – weglassen falls nicht vorhanden)
+PRO: (Für jedes Anliegen aus A die besprochenen Maßnahmen: Medikation mit Dosierung, Untersuchungen, Überweisungen, Impfungen, Beratung, Kontrolltermine)
 
-PRO: (Maßnahmen, Überweisungen, Kontrolltermine)"""
+Antwort auf Deutsch."""
 
 SUMMARY_PROMPT = """Erstelle eine kurze, allgemeinverständliche Zusammenfassung des folgenden Gesprächs.
-- 5–8 Sätze, keine Fachbegriffe, kein Schema
+- Jedes besprochene Thema bekommt 1–2 Sätze – auch Nebenthemen, keines auslassen
+- Keine Fachbegriffe, kein Schema
 - Trenne jedes Thema durch eine Leerzeile (doppelter Zeilenumbruch) vom nächsten
-- Nur die wichtigsten Punkte, die im Gespräch besprochen wurden
 - Gib NUR die Zusammenfassung zurück, ohne Überschriften oder Meta-Kommentare
 
 Transkript:

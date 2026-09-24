@@ -12,6 +12,7 @@ import tempfile
 import os
 import re
 import json
+from collections import Counter
 from pathlib import Path
 from datetime import datetime
 import logging
@@ -29,7 +30,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -45,11 +46,10 @@ WHISPER_FAST_MODEL = os.getenv("WHISPER_FAST_MODEL", "small")
 # ausschliesslich "Vielen Dank." x9 und verlor die echte Sprache vollstaendig,
 # mit VAD beide Sprachpassagen fehlerfrei.
 #
-# Die eigentliche Ursache — condition_on_previous_text=True — laesst sich von
-# aussen nicht abschalten: der faster-whisper-Server reicht nur task, language,
-# initial_prompt, word_timestamps, temperature, vad_filter und hotwords an
-# faster-whisper durch (routers/stt.py). Der Container wird ausserdem mit
-# ki-atteste geteilt, ist also kein Ort fuer einen lokalen Patch.
+# Die eigentliche Ursache — condition_on_previous_text=True — ist ueber HTTP
+# nicht erreichbar und wird deshalb im Whisper-Server selbst abgeschaltet
+# (whisper-patch/stt.py). VAD bleibt trotzdem an: es spart Rechenzeit und
+# nimmt dem Modell die Stille, in die hinein es halluziniert.
 #
 # Wort-Zeitstempel bleiben trotz VAD auf der Original-Zeitachse (geprueft:
 # Abweichung < 1 s ueber 251 s Audio), die Sprecherzuordnung bricht also nicht.
@@ -77,6 +77,13 @@ AUDIO_TIMEOUT = float(os.getenv("AUDIO_TIMEOUT", "1800"))
 # ging, steht nirgends. Eine duenne Analyse darf nicht wie eine vollstaendige
 # aussehen.
 LOOP_WARN_SHARE = float(os.getenv("LOOP_WARN_SHARE", "0.15"))
+# Kontextfenster fuer ollama (Untergrenze, siehe _llm_options()). Ohne Angabe
+# nimmt ollama seinen eigenen Default — auf einer 16-GB-Karte 4096 Tokens —
+# und schneidet alles darueber VORNE ab, ohne Fehler, nur mit einer Warnung im
+# ollama-Log. Gemessen an den Logs bis 23.09.2026: bei 80 von 116 Analysen war
+# der Prompt laenger, das Modell sah nur noch das Gespraechsende. Daher die
+# "nur eine Beschwerde"-Dokumentationen: die anderen standen am Anfang.
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
 LOG_DIR = os.getenv("LOG_DIR", "/logs")
 
 logging_enabled = False
@@ -119,10 +126,10 @@ def _is_hallucination(transcript: str) -> bool:
 # bekannten Baustein besteht. Der haeufigere Schadensfall ist die Schleife
 # mitten im Text: Whisper wiederholt einen Baustein dutzendfach
 # ("Der aelteren. Der aelteren. ..."), weil condition_on_previous_text seine
-# eigene Ausgabe als Kontext zurueckbekommt. WHISPER_VAD_FILTER verhindert die
-# meisten dieser Schleifen; das hier ist die zweite Verteidigungslinie fuer den
-# Rest — und raeumt die Woerter weg, bevor sie mit unsinnigen Zeitstempeln die
-# Sprecherzuordnung verschmutzen.
+# eigene Ausgabe als Kontext zurueckbekommt. whisper-patch/stt.py und
+# WHISPER_VAD_FILTER verhindern die meisten dieser Schleifen; das hier ist das
+# Auffangnetz fuer den Rest — und raeumt die Woerter weg, bevor sie mit
+# unsinnigen Zeitstempeln die Sprecherzuordnung verschmutzen.
 _REPEAT_MAX_NGRAM = 12      # laengster Baustein, nach dem gesucht wird
 _WORD_CHARS_RE = re.compile(r"[^\wäöüßáéíóúàèìòùâêîôûñç]+", re.IGNORECASE)
 
@@ -382,9 +389,58 @@ class ThinkingFilter:
         return result
 
 
-async def _stream_llm(prompt: str, model: str):
+# Grobe Token-Schaetzung, nur fuer die Bemessung von num_ctx. Gemma 4 kommt auf
+# deutschem Transkripttext auf ~3,8 Zeichen pro Token (gemessen: 45 kB Prompt
+# -> 11801 Tokens); 3,0 laesst Luft fuer die Tokenizer anderer Modelle.
+_CHARS_PER_TOKEN = 3.0
+_NUM_PREDICT = 4096
+_CTX_STEP = 8192
+
+
+def _estimate_tokens(text: str) -> int:
+    return int(len(text) / _CHARS_PER_TOKEN) + 1
+
+
+def _num_predict(mode: str, transcript: str) -> int:
+    """Antwortbudget. Die Bereinigung gibt das ganze Transkript zurueck und
+    braucht deshalb mindestens so viel Platz, wie es lang ist."""
+    if mode == "clean":
+        return max(_NUM_PREDICT, int(_estimate_tokens(transcript) * 1.2))
+    return _NUM_PREDICT
+
+
+def _llm_options(prompt: str, num_predict: int, temperature: float) -> dict:
+    """Sampling und Kontextgroesse fuer einen ollama-Aufruf.
+
+    num_ctx muss Prompt UND Antwort fassen — was nicht passt, schneidet ollama
+    vorne vom Prompt ab (siehe OLLAMA_NUM_CTX). Die Untergrenze ist fest, weil
+    ollama das Modell bei jedem Wechsel von num_ctx neu laedt; nur ein
+    ueberlanger Prompt hebt sie an, in groben Stufen.
+
+    Gemma 4 hat nur 8 von 48 Schichten mit vollem Aufmerksamkeitsfenster, der
+    Rest arbeitet mit einem 1024er-Gleitfenster: 4096 Tokens kosten 64 MiB
+    KV-Cache, 16k also rund 260 MiB. Andere Modelle (qwen3, llama) brauchen pro
+    Token ein Vielfaches davon.
+
+    repeat_penalty=1.0 folgt der Empfehlung fuer Gemma; der ollama-Default 1.1
+    bestraft auch Fachbegriffe, die in einer Dokumentation zu Recht mehrfach
+    vorkommen.
+    """
+    need = _estimate_tokens(prompt) + num_predict
+    num_ctx = max(OLLAMA_NUM_CTX, -(-need // _CTX_STEP) * _CTX_STEP)
+    return {
+        "temperature": temperature,
+        "top_p": 0.9,
+        "repeat_penalty": 1.0,
+        "num_predict": num_predict,
+        "num_ctx": num_ctx,
+    }
+
+
+async def _stream_llm(prompt: str, model: str, num_predict: int = _NUM_PREDICT):
     """Yields SSE event data strings for a streamed LLM response."""
     thinking_filter = ThinkingFilter()
+    options = _llm_options(prompt, num_predict, temperature=0.3)
     async with httpx.AsyncClient(timeout=300) as client:
         async with client.stream(
             "POST",
@@ -394,13 +450,15 @@ async def _stream_llm(prompt: str, model: str):
                 "prompt": prompt,
                 "stream": True,
                 "think": False,
-                "options": {"temperature": 0.3, "top_p": 0.9, "num_predict": 4096},
+                "options": options,
             },
         ) as r:
             async for line in r.aiter_lines():
                 if not line:
                     continue
                 data = json.loads(line)
+                if data.get("error"):
+                    raise RuntimeError(data["error"])
                 raw = data.get("response", "")
                 if raw:
                     token = thinking_filter.feed(raw)
@@ -410,6 +468,17 @@ async def _stream_llm(prompt: str, model: str):
                     remainder = thinking_filter.flush()
                     if remainder:
                         yield f"data: {json.dumps({'type': 'token', 'text': remainder})}\n\n"
+                    logger.info(
+                        f"LLM {model}: {data.get('prompt_eval_count', '?')} Prompt-Tokens, "
+                        f"{data.get('eval_count', '?')} Antwort-Tokens, num_ctx={options['num_ctx']}, "
+                        f"Ende={data.get('done_reason', '?')}"
+                    )
+                    if data.get("done_reason") == "length":
+                        warning = (
+                            f"Die Antwort des Sprachmodells wurde nach {num_predict} Tokens "
+                            "abgeschnitten und ist unvollständig."
+                        )
+                        yield f"data: {json.dumps({'type': 'warning', 'text': warning})}\n\n"
                     break
 
 
@@ -419,7 +488,9 @@ async def _call_llm_sync(prompt: str, model: str) -> str:
         r = await client.post(
             f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
             json={"model": model, "prompt": prompt, "stream": False, "think": False,
-                  "options": {"temperature": 0.1, "num_predict": 150}},
+                  # Dieselbe num_ctx-Bemessung wie die Analyse, sonst laedt
+                  # ollama das Modell fuer die Betreffzeile eigens neu.
+                  "options": _llm_options(prompt, num_predict=150, temperature=0.1)},
         )
     text = r.json().get("response", "").strip()
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
@@ -636,10 +707,53 @@ def _speaker_at(start: float, end: float, segments: list) -> str:
     )["speaker"]
 
 
+# Whisper-Wortzeitstempel und pyannote-Grenzen liegen oft ein, zwei Woerter
+# auseinander. Das Ergebnis ist ein Sprecherwechsel mitten im Satz
+# ("SPRECHER B: ... Ja, ich wollte da einen / SPRECHER A: ausmachen mit ...") —
+# in den Logs bis 23.09.2026 fiel das bei 43 % aller Wechsel an. Ein Satz hat
+# aber genau einen Sprecher: er geht deshalb geschlossen an den, der die
+# meisten seiner Woerter hat.
+_SENTENCE_END_RE = re.compile(r"[.!?…][\"'»«)\]]*$")
+# Laengere "Saetze" sind meist ein Dialog, in dem Whisper keinen Punkt gesetzt
+# hat — die dortigen Wechsel koennen echt sein und bleiben stehen.
+_REALIGN_MAX_WORDS = 40
+
+
+def _sentence_spans(units: list) -> list:
+    spans, start = [], 0
+    for i, unit in enumerate(units):
+        if _SENTENCE_END_RE.search(unit["text"].strip()):
+            spans.append((start, i + 1))
+            start = i + 1
+    if start < len(units):
+        spans.append((start, len(units)))
+    return spans
+
+
+def _realign_sentences(units: list, speakers: list) -> list:
+    """Ordnet jeden Satz geschlossen seinem Mehrheitssprecher zu.
+
+    Bei Gleichstand bleibt der Satz unangetastet — dann gibt es keinen Grund,
+    einer der beiden Seiten mehr zu trauen. Laeuft Whisper im Segment-Rueckfall,
+    ist jede Einheit ein ganzer Satz, und hier aendert sich nichts.
+    """
+    speakers = list(speakers)
+    for start, end in _sentence_spans(units):
+        if end - start > _REALIGN_MAX_WORDS:
+            continue
+        votes = Counter(speakers[start:end]).most_common(2)
+        if len(votes) < 2 or votes[0][1] == votes[1][1]:
+            continue
+        speakers[start:end] = [votes[0][0]] * (end - start)
+    return speakers
+
+
 def _group_turns(units: list, segments: list) -> list:
+    speakers = _realign_sentences(
+        units, [_speaker_at(u["start"], u["end"], segments) for u in units]
+    )
     turns = []
-    for unit in units:
-        speaker = _speaker_at(unit["start"], unit["end"], segments)
+    for unit, speaker in zip(units, speakers):
         if turns and turns[-1]["speaker"] == speaker:
             turns[-1]["units"].append(unit)
             turns[-1]["end"] = unit["end"]
@@ -945,7 +1059,7 @@ async def analyze(
 
             analysis_tokens = []
             try:
-                async for chunk in _stream_llm(prompt, used_model):
+                async for chunk in _stream_llm(prompt, used_model, _num_predict(mode, transcript)):
                     yield chunk
                     try:
                         payload = json.loads(chunk[6:].strip())
@@ -994,7 +1108,7 @@ async def analyze_text(
         yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
         analysis_tokens = []
         try:
-            async for chunk in _stream_llm(prompt, used_model):
+            async for chunk in _stream_llm(prompt, used_model, _num_predict(mode, transcript)):
                 yield chunk
                 try:
                     payload = json.loads(chunk[6:].strip())

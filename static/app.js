@@ -9,8 +9,6 @@ let audioBlob = null;
 let uploadedFile = null;
 let timerInterval = null;
 let timerSeconds = 0;
-let analyzerCtx = null;
-let animFrame = null;
 let liveTranscriptIntervalId = null;
 let isTranscribingLive = false;
 let liveTranscriptText = null;
@@ -255,10 +253,32 @@ async function toggleRecording() {
   }
 }
 
+// Die Sprachverarbeitung des Browsers ist fuer Videotelefonie gebaut, nicht
+// fuer Transkription: die Rauschunterdrueckung schneidet leise, entfernte
+// Stimmen (der Patient gegenueber) mit weg und hinterlaesst Artefakte, die
+// Whisper und die Sprechererkennung stoeren; die automatische Pegelregelung
+// zieht in Pausen das Grundrauschen hoch — genau das, woraus Whisper
+// halluziniert — und verstellt nebenbei den Windows-Mikrofonpegel. Die
+// Echounterdrueckung hat nichts zu tun, weil waehrend der Aufnahme nichts
+// abgespielt wird. Eine Konferenzspinne wie die EPOS Expand 40 macht all das
+// ohnehin schon selbst im Geraet.
+const MIC_PROCESSING = {
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+  channelCount: 1,
+};
+// Explizit statt Browser-Default (Chrome und Firefox unterscheiden sich).
+// 64 kbit/s Opus mono ist fuer Sprache verlustfrei genug, eine Stunde sind
+// knapp 30 MB.
+const RECORDER_BITRATE = 64000;
+
 async function startRecording() {
   try {
     const selectedMic = document.getElementById("micSelect")?.value;
-    const audioConstraints = selectedMic ? { deviceId: { exact: selectedMic } } : true;
+    const audioConstraints = selectedMic
+      ? { ...MIC_PROCESSING, deviceId: { exact: selectedMic } }
+      : MIC_PROCESSING;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
     // Labels sind jetzt verfügbar — Liste mit echten Namen füllen
     await populateMicrophoneList();
@@ -275,7 +295,7 @@ async function startRecording() {
       ? "audio/webm;codecs=opus"
       : "audio/webm";
 
-    mediaRecorder = new MediaRecorder(stream, { mimeType });
+    mediaRecorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: RECORDER_BITRATE });
     mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) audioChunks.push(e.data);
     };
@@ -327,7 +347,6 @@ function stopRecording() {
   clearInterval(timerInterval);
   clearTimeout(liveTranscriptIntervalId);
   liveTranscriptIntervalId = null;
-  cancelAnimationFrame(animFrame);
 
   const btn = document.getElementById("recordBtn");
   btn.textContent = "● Aufnahme starten";
@@ -713,7 +732,7 @@ function handleSSE(evt) {
       break;
 
     case "warning":
-      showLoopWarning(evt.text);
+      showLoopWarning(evt.text, true);
       break;
 
     case "error":
@@ -734,9 +753,18 @@ function handleSSE(evt) {
 // einem halben Transkript darf nicht wie eine vollstaendige aussehen. Beim
 // Neulauf ueber /analyze-text bleibt sie deshalb ebenfalls stehen - das
 // Transkript ist dasselbe lueckenhafte.
-function showLoopWarning(text) {
-  document.getElementById("loopWarningText").textContent = text;
-  document.getElementById("loopWarning").style.display = "flex";
+// append: eine zweite Warnung (z. B. abgeschnittene LLM-Antwort) ergaenzt die
+// stehende Schleifenwarnung, statt sie zu ueberschreiben.
+function showLoopWarning(text, append = false) {
+  const box = document.getElementById("loopWarning");
+  const el = document.getElementById("loopWarningText");
+  const visible = box.style.display !== "none" && el.textContent;
+  if (append && visible) {
+    if (!el.textContent.includes(text)) el.textContent += "\n\n" + text;
+  } else {
+    el.textContent = text;
+  }
+  box.style.display = "flex";
 }
 
 function hideLoopWarning() {
@@ -784,7 +812,7 @@ function resetAll() {
   if (mediaRecorder && mediaRecorder.state === "recording") {
     stopRecording();
   }
-  clearInterval(liveTranscriptIntervalId);
+  clearTimeout(liveTranscriptIntervalId);
   liveTranscriptIntervalId = null;
 
   // Aufnahme-UI
