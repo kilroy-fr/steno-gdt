@@ -15,15 +15,16 @@
 # Abweichend von der ~=-Konvention des Projekts (siehe requirements-server.txt):
 # die PyTorch-Indizes fuehren nicht alle Minor-Versionen.
 #
-# Obergrenze <2.9 ist PFLICHT, nicht Vorsicht: torchaudio 2.9.0 hat
-# `torchaudio.AudioMetaData` entfernt, pyannote.audio 3.4 benutzt es in
-# pyannote/audio/core/io.py. Mit 2.9+ bricht schon der Import mit
-# `AttributeError: module 'torchaudio' has no attribute 'AudioMetaData'`.
-# Geprueft: 2.6.0 / 2.7.1 / 2.8.0 haben das Attribut, 2.9.0 nicht.
+# Obergrenze <2.9: urspruenglich Pflicht fuer pyannote.audio 3.4 (torchaudio
+# 2.9.0 hat `torchaudio.AudioMetaData` entfernt). pyannote 4 liest Audio ueber
+# torchcodec statt torchaudio, der Grund ist damit weg. Die Grenze bleibt
+# trotzdem, weil torchcodec an die torch-Version gekoppelt ist (2.8 <-> 0.7,
+# siehe requirements.txt) — wer torch anhebt, muss torchcodec mitziehen.
 #
-# Untergrenze 2.7, weil erst ab da alle drei Indizes (cpu, cu128, xpu) dieselbe
-# Spanne fuehren — so bleibt die Versionswahl unabhaengig von der Kartenwahl.
-# Aktuell faellt die Wahl auf alle drei Indizes gleich: 2.8.0.
+# Untergrenze 2.8 ist PFLICHT: pyannote.audio 4 verlangt torch>=2.8. Stuende hier
+# eine niedrigere Version, wuerde der zweite pip-Schritt (requirements.txt) torch
+# von PyPI nachziehen und dabei die gerade installierte cu128-/xpu-Variante
+# ueberschreiben. Alle drei Indizes (cpu, cu128, xpu) fuehren 2.8.0.
 # torch und torchaudio erscheinen im Gleichschritt, daher dieselbe Spanne.
-torch>=2.7,<2.9
-torchaudio>=2.7,<2.9
+torch>=2.8,<2.9
+torchaudio>=2.8,<2.9

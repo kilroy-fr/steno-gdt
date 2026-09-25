@@ -2,9 +2,16 @@ FROM python:3.12-slim
 
 # HF_HOME muss zur Build- und Laufzeit identisch sein, sonst findet die
 # Pipeline die vorgeladenen Modelle nicht.
+#
+# PYANNOTE_METRICS_ENABLED=0 ist PFLICHT: pyannote.audio 4 schickt per Default
+# Telemetrie an otel.pyannote.ai — je Analyse Audiolaenge, Sprecherzahl und eine
+# Sitzungs-ID (pyannote/audio/telemetry/config.yaml: metrics_enabled: true).
+# Kein Audio, aber ein Protokoll jeder Sprechstunde nach aussen. Als ENV ganz
+# oben, damit es schon fuer den Modell-Download beim Build gilt.
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/models \
-    TORCH_HOME=/models/torch
+    TORCH_HOME=/models/torch \
+    PYANNOTE_METRICS_ENABLED=0
 
 # Bewusst KEIN OMP_NUM_THREADS mehr: die Variable deckelte den Container still
 # auf 4 der 32 Kerne und liess nebenbei `nproc` 4 melden, was die Fehlersuche

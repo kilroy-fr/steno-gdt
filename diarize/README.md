@@ -1,7 +1,7 @@
 # Diarisations-Service
 
-Sprechertrennung via [pyannote.audio](https://github.com/pyannote/pyannote-audio),
-auf der GPU. Wird von `server.py` (`/analyze`) parallel zur Transkription
+Sprechertrennung via [pyannote.audio](https://github.com/pyannote/pyannote-audio) 4
+mit der Pipeline `pyannote/speaker-diarization-community-1`, auf der GPU. Wird von `server.py` (`/analyze`) parallel zur Transkription
 aufgerufen; `/analyze` wartet auf beide, die Diarisation muss also mit Whisper
 mithalten. Auf der CPU tat sie das nicht (~0,6x Echtzeit) und bestimmte die
 Gesamtdauer der Analyse — Hintergrund im Kopfkommentar von `app.py`.
@@ -53,14 +53,15 @@ Dienst beim Start auf die CPU zurueck statt auszufallen — die Logzeile
 
 ## Hugging-Face-Token (einmalig vor dem ersten Build)
 
-Die pyannote-Modelle sind kostenlos und MIT-lizenziert, aber "gated" — man muss
-eingeloggt die Nutzungsbedingungen akzeptieren:
+Das Modell ist kostenlos (CC-BY-4.0), aber "gated" — man muss eingeloggt die
+Nutzungsbedingungen akzeptieren:
 
 1. Account auf https://huggingface.co anlegen.
-2. Bedingungen auf **allen drei** Modellseiten akzeptieren:
-   - https://huggingface.co/pyannote/speaker-diarization-3.1
-   - https://huggingface.co/pyannote/segmentation-3.0
-   - https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM
+2. Bedingungen auf https://huggingface.co/pyannote/speaker-diarization-community-1
+   akzeptieren. Das eine Repo enthaelt Segmentierung, Embedding und PLDA — die
+   drei Repos, die 3.1 brauchte, sind nicht mehr noetig. Umgekehrt gilt: mit
+   pyannote 4 laedt selbst die alte 3.1-Pipeline ihr PLDA aus diesem Repo, ohne
+   die Freigabe geht also gar nichts.
 3. Access-Token (Rolle `read`) erzeugen: https://huggingface.co/settings/tokens
 4. Token im Projekt-Root ablegen — die Datei ist gitignored:
 
@@ -71,6 +72,24 @@ echo "hf_xxxxxxxxxxxxxxxxxxxx" > .hf_token
 Der Token wird ausschliesslich beim Build als BuildKit-Secret gemountet und
 landet **nicht** im Image. Zur Laufzeit laeuft der Container mit
 `HF_HUB_OFFLINE=1`, also ohne Netzzugang.
+
+Beim Build wird das Modell aus dem Default in `download_model.py` geladen —
+`PYANNOTE_MODEL` in `docker-compose.yml` wirkt erst zur Laufzeit und muss dazu
+passen.
+
+## Telemetrie ist abgeschaltet
+
+pyannote.audio 4 meldet per Default an `otel.pyannote.ai`, je Analyse mit
+Audiolaenge, Sprecherzahl und Sitzungs-ID (kein Audio). Das Dockerfile setzt
+`PYANNOTE_METRICS_ENABLED=0` fuer Build und Laufzeit, `app.py` schaltet sie
+zusaetzlich per `set_telemetry_metrics(False)` ab. Beides nicht entfernen.
+
+## Welche Ausgabe?
+
+pyannote 4 liefert `speaker_diarization` und `exclusive_speaker_diarization`.
+`/diarize` gibt die **exklusive** zurueck: hoechstens ein Sprecher pro Zeitpunkt,
+von pyannote fuer den Abgleich mit Transkript-Zeitstempeln gedacht — genau das,
+was `server.py` mit den Whisper-Wortzeitstempeln tut.
 
 ## Bauen und starten
 

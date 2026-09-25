@@ -84,7 +84,9 @@ services:
     ports:
       - "127.0.0.1:8002:8000"
     environment:
-      - PYANNOTE_MODEL=pyannote/speaker-diarization-3.1
+      # Muss zum Default in diarize/download_model.py passen: beim Build wird
+      # nur dieser vorgeladen, zur Laufzeit ist der Container offline.
+      - PYANNOTE_MODEL=pyannote/speaker-diarization-community-1
       - DIARIZE_DEVICE=auto
       # Greift nur, wenn kein Grafikgeraet gefunden wird (CPU-Rueckfall).
       - TORCH_THREADS=8

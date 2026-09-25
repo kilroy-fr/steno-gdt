@@ -34,7 +34,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PYANNOTE_MODEL = os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1")
+PYANNOTE_MODEL = os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-community-1")
 # Nur noch fuer den CPU-Fall relevant (GPU rechnet nicht mit Torch-Threads).
 TORCH_THREADS = int(os.getenv("TORCH_THREADS", "8"))
 # "auto" | "cuda" | "xpu" | "cpu" — siehe _select_device().
@@ -100,6 +100,16 @@ def _load_pipeline():
     global _pipeline, _device, _load_error
     try:
         from pyannote.audio import Pipeline
+
+        # Doppelt zu PYANNOTE_METRICS_ENABLED=0 im Dockerfile — falls der Dienst
+        # je ausserhalb des Images laeuft. Siehe dort; pyannote 3.x kennt das Modul
+        # nicht.
+        try:
+            from pyannote.audio.telemetry import set_telemetry_metrics
+
+            set_telemetry_metrics(False)
+        except ImportError:
+            pass
 
         from torch_compat import allow_pyannote_checkpoint_globals
 
@@ -180,7 +190,15 @@ def _run_pipeline(waveform: torch.Tensor, min_speakers: int, max_speakers: int) 
     if max_speakers > 0:
         kwargs["max_speakers"] = max_speakers
 
-    diarization = _pipeline({"waveform": waveform, "sample_rate": TARGET_SR}, **kwargs)
+    output = _pipeline({"waveform": waveform, "sample_rate": TARGET_SR}, **kwargs)
+    # pyannote 4 liefert zwei Fassungen. Die exklusive hat keine Ueberlappungen —
+    # zu jedem Zeitpunkt hoechstens ein Sprecher — und ist von pyannote eigens fuer
+    # den Abgleich mit Transkript-Zeitstempeln gedacht. Genau das tut server.py
+    # (jedes Wort an den Sprecher mit der groessten Ueberlappung): in der normalen
+    # Fassung liegt ein Wort bei Durcheinanderreden in zwei Turns zugleich, und
+    # die Laenge der Ueberlappung entscheidet dann eher zufaellig. pyannote 3.x
+    # gibt direkt eine Annotation zurueck.
+    diarization = getattr(output, "exclusive_speaker_diarization", output)
     return [
         {"start": round(turn.start, 3), "end": round(turn.end, 3), "speaker": label}
         for turn, _, label in diarization.itertracks(yield_label=True)

@@ -11,7 +11,7 @@ Image-History landet.
 import os
 import sys
 
-MODEL = os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1")
+MODEL = os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-community-1")
 
 
 def main() -> int:
@@ -33,9 +33,9 @@ def main() -> int:
 
     allow_pyannote_checkpoint_globals()
 
-    # pyannote 3.4 nimmt `use_auth_token`, neuere Versionen `token`. Statt auf
-    # TypeError zu pokern (das erzeugt verschachtelte Tracebacks) die Signatur
-    # fragen. Siehe auch den huggingface_hub<1.0-Pin in requirements.txt.
+    # pyannote 3.x nahm `use_auth_token`, 4.x nimmt `token`. Die Signatur zu
+    # fragen haelt einen Rueckbau auf pyannote 3.x (requirements.txt) frei von
+    # Aenderungen an dieser Datei.
     import inspect
 
     params = inspect.signature(Pipeline.from_pretrained).parameters
@@ -48,10 +48,8 @@ def main() -> int:
         print(
             f"FEHLER: Pipeline '{MODEL}' konnte nicht geladen werden.\n"
             "Meist sind die Nutzungsbedingungen noch nicht akzeptiert — auf\n"
-            "huggingface.co fuer ALLE drei Repos bestaetigen:\n"
-            "  - pyannote/speaker-diarization-3.1\n"
-            "  - pyannote/segmentation-3.0\n"
-            "  - pyannote/wespeaker-voxceleb-resnet34-LM",
+            f"https://huggingface.co/{MODEL} bestaetigen (bei 3.1 zusaetzlich\n"
+            "pyannote/segmentation-3.0 und pyannote/wespeaker-voxceleb-resnet34-LM).",
             file=sys.stderr,
         )
         return 1

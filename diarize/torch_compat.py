@@ -10,6 +10,10 @@ Statt `weights_only=False` zu erzwingen (das erlaubt beliebige Code-Ausfuehrung
 beim Laden) werden hier nur die konkret benoetigten Klassen freigegeben. Die
 Checkpoints stammen aus den beim Build festgelegten pyannote-Repos und liegen
 im Image, sind also keine fremde Eingabe.
+
+Nur fuer pyannote.audio 3.x noetig: 4.x laedt seine Checkpoints selbst mit
+weights_only=False (core/model.py). Bleibt fuer einen Rueckbau stehen, unter 4.x
+ist der Aufruf wirkungslos.
 """
 import logging
 
