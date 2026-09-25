@@ -30,7 +30,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.9.5"
+VERSION = "0.9.6"
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
