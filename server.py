@@ -31,7 +31,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 
 
 def _flag(value: str) -> bool:
@@ -955,7 +955,8 @@ async def index(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"version": VERSION, "default_model": OLLAMA_MODEL},
+        context={"version": VERSION, "default_model": OLLAMA_MODEL,
+                 "loop_warn_share": LOOP_WARN_SHARE},
     )
 
 

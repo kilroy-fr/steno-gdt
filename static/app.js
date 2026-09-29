@@ -22,6 +22,9 @@ let currentTranscript = "";
 let selectedGender = "neutral";   // Geschlecht für die laufende Aufnahme (linke Spalte)
 let analysisGender = "neutral";   // Geschlecht der angezeigten Analyse (rechte Spalte)
 
+// Dieselbe Schwelle wie die Warnung in /analyze (LOOP_WARN_SHARE in server.py).
+const LOOP_WARN_SHARE = window.APP_CONFIG?.loopWarnShare ?? 0.15;
+
 // --- Init ---
 document.addEventListener("DOMContentLoaded", () => {
   initTabs();
@@ -388,7 +391,7 @@ async function transcribeLiveChunk() {
       // Schon die Vorschau meldet eine Schleife - dann laeuft das Mikrofon
       // vermutlich gegen Stille oder Rauschen, und das sollte auffallen,
       // solange die Aufnahme noch laeuft und man reagieren kann.
-      if ((data.loop_share || 0) >= 0.15) {
+      if ((data.loop_share || 0) >= LOOP_WARN_SHARE) {
         showLoopWarning(
           `Vorschau: ${Math.round(data.loop_share * 100)} % des zuletzt transkribierten ` +
           `Abschnitts waren Wiederholschleife. Bitte Mikrofon und Aussteuerung prüfen.`
@@ -514,6 +517,8 @@ function escapeHtml(s) {
 // ============================================================
 // ANALYSE STARTEN
 // ============================================================
+// Zwei Einstiege — Audio (/analyze) und vorhandenes Transkript (/analyze-text,
+// Neulauf mit anderem Geschlecht) — und ein gemeinsamer Ablauf in runAnalysis().
 async function startAnalysis() {
   // Das Live-Transkript dient nur als Vorschau während der Aufnahme; für die
   // eigentliche Analyse wird die komplette Aufnahme in einem Stück transkribiert,
@@ -522,17 +527,8 @@ async function startAnalysis() {
   if (!blob) return;
 
   const activeTab = document.querySelector(".tab-button.active").dataset.tab;
-  const model = document.getElementById("modelSelect").value;
-  const mode = document.querySelector('input[name="mode"]:checked').value;
   if (activeTab !== "record") recordingStartTime = new Date();
-  document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
-  // UI vorbereiten
-  setAnalysisMode(mode);
-  showStatus("Sende Audio...");
-  document.getElementById("analyzeBtn").disabled = true;
-  document.getElementById("emptyState").style.display = "none";
-  document.getElementById("analysisSection").style.display = "none";
-  document.getElementById("genderRerun").style.display = "none";
+
   // Live-Vorschau-Transkript sichtbar lassen (blinkender Cursor), bis das fertige
   // Transkript aus /analyze eintrifft und es ersetzt (siehe handleSSE "transcript")
   const transcriptTextEl = document.getElementById("transcriptText");
@@ -543,161 +539,107 @@ async function startAnalysis() {
     document.getElementById("transcriptSection").style.display = "none";
     transcriptTextEl.textContent = "";
   }
-  document.getElementById("analysisText").innerHTML = "";
-  document.getElementById("analysisText").style.display = "";
-  document.getElementById("abproCards").style.display = "none";
-
-  const analysisEl = document.getElementById("analysisText");
-  analysisEl.classList.add("streaming");
-  analysisEl.classList.remove("done");
-
+  document.getElementById("genderRerun").style.display = "none";
   hideLoopWarning();
 
   const formData = new FormData();
-  const filename = blob instanceof File ? blob.name : "recording.webm";
-  formData.append("audio", blob, filename);
-  formData.append("model", model);
-  formData.append("mode", mode);
-  formData.append("gender", selectedGender);
+  formData.append("audio", blob, blob instanceof File ? blob.name : "recording.webm");
   formData.append("lang_mode", getLangMode());
   formData.append("diarize", getDiarize());
-
-  let analysisRaw = "";
-
-  try {
-    const response = await fetch("/analyze", { method: "POST", body: formData });
-
-    if (!response.ok) {
-      document.getElementById("transcriptText").classList.remove("streaming");
-      showStatus(`Fehler: HTTP ${response.status}`, true);
-      nextPatientPending = false;
-      return;
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop(); // unvollständiges Paket aufheben
-
-      for (const part of parts) {
-        if (!part.startsWith("data: ")) continue;
-        try {
-          const evt = JSON.parse(part.slice(6));
-          handleSSE(evt);
-          if (evt.type === "token") analysisRaw += evt.text;
-        } catch {
-          // ignore malformed
-        }
-      }
-    }
-  } catch (e) {
-    document.getElementById("transcriptText").classList.remove("streaming");
-    showStatus(`Verbindungsfehler: ${e.message}`, true);
-  }
-
-  // Fertig
-  if (analysisRaw) {
-    finishAnalysis(analysisRaw, currentTranscript, mode, model, selectedGender);
-    document.getElementById("genderRerun").style.display = "flex";
-    if (mode === "abpro") showAbproCards(analysisRaw);
-  }
-  hideStatus();
-  analysisEl.classList.remove("streaming");
-  analysisEl.classList.add("done");
-  document.getElementById("analyzeBtn").disabled = false;
-
-  if (nextPatientPending && analysisRaw) {
-    nextPatientPending = false;
-    resetAll();
-    await startRecording();
-  } else {
-    nextPatientPending = false;
-  }
+  // Das Transkript liefert erst der Server (handleSSE -> currentTranscript).
+  await runAnalysis("/analyze", formData, "Sende Audio...", { gender: selectedGender });
 }
 
-async function startAnalysisFromTranscript(transcript, gender = null, rerunId = null) {
-  const useGender = gender !== null ? gender : selectedGender;
+function startAnalysisFromTranscript(transcript, gender = null, rerunId = null) {
+  const formData = new FormData();
+  formData.append("transcript", transcript);
+  return runAnalysis(
+    "/analyze-text", formData, "Analysiere Transkript (Whisper-Schritt übersprungen)...",
+    { gender: gender ?? selectedGender, transcript, rerunId }
+  );
+}
+
+async function runAnalysis(url, formData, statusText, { gender, transcript = null, rerunId = null }) {
   const model = document.getElementById("modelSelect").value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
+  formData.append("model", model);
+  formData.append("mode", mode);
+  formData.append("gender", gender);
+
   document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
   setAnalysisMode(mode);
-  showStatus("Analysiere Transkript (Whisper-Schritt übersprungen)...");
+  showStatus(statusText);
   document.getElementById("analyzeBtn").disabled = true;
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("analysisSection").style.display = "none";
-  document.getElementById("analysisText").innerHTML = "";
-  document.getElementById("analysisText").dataset.raw = "";
-  document.getElementById("analysisText").style.display = "";
   document.getElementById("abproCards").style.display = "none";
-
   const analysisEl = document.getElementById("analysisText");
+  analysisEl.innerHTML = "";
+  analysisEl.dataset.raw = "";   // sonst haengen die Tokens an die vorige Analyse an
+  analysisEl.style.display = "";
   analysisEl.classList.add("streaming");
   analysisEl.classList.remove("done");
 
-  const formData = new FormData();
-  formData.append("transcript", transcript);
-  formData.append("model", model);
-  formData.append("mode", mode);
-  formData.append("gender", useGender);
-
   let analysisRaw = "";
-
+  let failed = false;
   try {
-    const response = await fetch("/analyze-text", { method: "POST", body: formData });
+    const response = await fetch(url, { method: "POST", body: formData });
     if (!response.ok) {
+      failed = true;
       showStatus(`Fehler: HTTP ${response.status}`, true);
-      nextPatientPending = false;
-      return;
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop();
-      for (const part of parts) {
-        if (!part.startsWith("data: ")) continue;
-        try {
-          const evt = JSON.parse(part.slice(6));
-          handleSSE(evt);
-          if (evt.type === "token") analysisRaw += evt.text;
-        } catch {
-          // ignore malformed
-        }
-      }
+    } else {
+      await readSSE(response, (evt) => {
+        handleSSE(evt);
+        if (evt.type === "token") analysisRaw += evt.text;
+        if (evt.type === "error") failed = true;
+      });
     }
   } catch (e) {
+    failed = true;
     showStatus(`Verbindungsfehler: ${e.message}`, true);
   }
 
   if (analysisRaw) {
-    finishAnalysis(analysisRaw, transcript, mode, model, useGender, rerunId);
+    finishAnalysis(analysisRaw, transcript ?? currentTranscript, mode, model, gender, rerunId);
     document.getElementById("genderRerun").style.display = "flex";
     if (mode === "abpro") showAbproCards(analysisRaw);
   }
-  hideStatus();
+  // Eine Fehlermeldung bleibt stehen, bis die naechste Analyse sie ersetzt.
+  if (!failed) hideStatus();
+  document.getElementById("transcriptText").classList.remove("streaming");
   analysisEl.classList.remove("streaming");
   analysisEl.classList.add("done");
   document.getElementById("analyzeBtn").disabled = false;
 
-  if (nextPatientPending && analysisRaw) {
-    nextPatientPending = false;
+  const restart = nextPatientPending && analysisRaw;
+  nextPatientPending = false;
+  if (restart) {
     resetAll();
     await startRecording();
-  } else {
-    nextPatientPending = false;
+  }
+}
+
+// Liest einen SSE-Strom ("data: {...}\n\n") und reicht jedes Event weiter.
+async function readSSE(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop(); // unvollständiges Paket aufheben
+    for (const part of parts) {
+      if (!part.startsWith("data: ")) continue;
+      let evt;
+      try {
+        evt = JSON.parse(part.slice(6));
+      } catch {
+        continue; // ignore malformed
+      }
+      onEvent(evt);
+    }
   }
 }
 
@@ -776,15 +718,7 @@ function showStatus(text, isError = false) {
   const textEl = document.getElementById("statusText");
   box.style.display = "flex";
   textEl.textContent = text;
-  if (isError) {
-    box.style.background = "rgba(239,68,68,0.1)";
-    box.style.borderColor = "rgba(239,68,68,0.3)";
-    box.style.color = "var(--danger)";
-  } else {
-    box.style.background = "rgba(16,185,129,0.1)";
-    box.style.borderColor = "rgba(16,185,129,0.3)";
-    box.style.color = "var(--primary)";
-  }
+  box.classList.toggle("error", isError);
 }
 
 function hideStatus() {
@@ -933,23 +867,16 @@ function restoreHistory(entry) {
 // ============================================================
 // IN ZWISCHENABLAGE KOPIEREN
 // ============================================================
-function copySection(id, isMarkdown = false) {
+// Die Buttons uebergeben sich selbst (onclick="...(…, this)") — kein Suchen
+// ueber den Text ihres onclick-Attributs.
+function copySection(id, isMarkdown, btn) {
   const el = document.getElementById(id);
-  let text;
-  if (isMarkdown && el.dataset.raw) {
-    text = el.dataset.raw; // Markdown-Rohtext kopieren
-  } else {
-    text = el.textContent || el.innerText;
-  }
+  // Markdown-Rohtext kopieren, sonst den sichtbaren Text
+  const text = isMarkdown && el.dataset.raw ? el.dataset.raw : el.textContent;
   navigator.clipboard.writeText(text).then(() => {
-    const btns = document.querySelectorAll(".btn-small");
-    btns.forEach((b) => {
-      if (b.getAttribute("onclick")?.includes(id)) {
-        const orig = b.textContent;
-        b.textContent = "✓ Kopiert!";
-        setTimeout(() => (b.textContent = orig), 1500);
-      }
-    });
+    const orig = btn.textContent;
+    btn.textContent = "✓ Kopiert!";
+    setTimeout(() => (btn.textContent = orig), 1500);
   });
 }
 
@@ -985,15 +912,12 @@ function showAbproCards(raw) {
   document.getElementById("abproCards").style.display = "flex";
 }
 
-function copyAbproField(id) {
+function copyAbproField(id, btn) {
   const el = document.getElementById(id);
   const raw = el.dataset.raw || el.textContent || "";
   const prefix = { abproA: "A:", abproB: "B:", abproPro: "PRO:" }[id] ?? "";
-  const text = prefix ? prefix + raw : raw;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.querySelector(`[onclick="copyAbproField('${id}')"]`);
-    if (!btn) return;
-    const svg = btn.querySelector("svg");
+  navigator.clipboard.writeText(prefix + raw).then(() => {
+    // lastChild ist der Beschriftungs-Textknoten hinter dem SVG-Icon
     const origLabel = btn.lastChild?.textContent?.trim() || "Kopieren";
     btn.lastChild.textContent = " ✓";
     setTimeout(() => { btn.lastChild.textContent = " " + origLabel; }, 1500);

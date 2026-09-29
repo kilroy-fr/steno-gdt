@@ -434,6 +434,13 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
   color: var(--primary);
 }
 
+.status-box.error {
+  background: rgba(239,68,68,0.1);
+  border-color: rgba(239,68,68,0.3);
+  color: var(--danger);
+}
+.status-box.error .spinner-small { display: none; }
+
 .spinner-small {
   width: 18px;
   height: 18px;

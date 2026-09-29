@@ -252,6 +252,8 @@ def test_logging_mode_roundtrip(client):
     assert client.get("/logging-mode").json() == {"enabled": True}
 
 
-def test_index(client):
+def test_index(client, monkeypatch):
+    monkeypatch.setattr(server, "LOOP_WARN_SHARE", 0.2)
     r = client.get("/")
     assert r.status_code == 200 and server.VERSION in r.text
+    assert "loopWarnShare: 0.2\n" in r.text

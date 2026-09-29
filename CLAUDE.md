@@ -32,6 +32,8 @@ ki-transcribe/
 ├── Dockerfile                 # Docker-Image für server.py
 ├── docker-compose.yml         # Docker-Setup (gespraech-web + faster-whisper)
 ├── requirements-server.txt    # Server-Python-Dependencies
+├── requirements-dev.txt       # + pytest
+├── tests/                     # pytest: reine Funktionen + Endpoints gegen Dienst-Attrappen
 │
 ├── templates/index.html       # Jinja2-Template für Web-UI
 ├── static/                    # CSS, JS, SVG, logo.jpg für Web-UI
@@ -222,6 +224,15 @@ Mit Docker:
 docker-compose up -d
 docker-compose logs -f gespraech-web
 ```
+
+**Tests** (`tests/`, kein Docker nötig):
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+Abgedeckt sind die reinen Funktionen (Schleifen, Sprecherzuordnung, `ThinkingFilter`, Prompt-Bau) und alle Endpoints. Die Endpoint-Tests ersetzen Whisper, Diarisation und ollama durch eine Attrappe an `httpx.AsyncClient` (`tests/conftest.py`) und legen die **SSE-Abfolge** fest — sie ist der Vertrag mit dem Frontend. Ein `xfail` markiert einen bekannten Fehler: `_collapse_degenerate()` schneidet bis zum Ende des letzten entarteten 40er-Fensters und nimmt dabei echte Wörter direkt hinter einer Schleife mit.
+
+Das Frontend hat keine Tests. Zum Durchspielen den Server lokal gegen die echten Dienste starten, ohne den Container anzufassen — alle drei sind auf localhost veröffentlicht: `WHISPER_HOST=127.0.0.1 WHISPER_PORT=8001 DIARIZE_HOST=127.0.0.1 DIARIZE_PORT=8002 OLLAMA_HOST=127.0.0.1 uvicorn server:app --port 8099`.
 
 ---
 

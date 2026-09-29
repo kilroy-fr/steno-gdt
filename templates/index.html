@@ -192,7 +192,7 @@
         <div class="result-header">
           <h2>📝 Transkript</h2>
           <div class="result-actions">
-            <button class="btn-small" onclick="copySection('transcriptText')">Kopieren</button>
+            <button class="btn-small" onclick="copySection('transcriptText', false, this)">Kopieren</button>
           </div>
         </div>
         <div id="transcriptText" class="result-text"></div>
@@ -217,7 +217,7 @@
               <button class="gender-btn" data-gender="male">Patient (m)</button>
               <button class="gender-btn" data-gender="female">Patientin (w)</button>
             </div>
-            <button class="btn-small" onclick="copySection('analysisText', true)">Kopieren</button>
+            <button class="btn-small" onclick="copySection('analysisText', true, this)">Kopieren</button>
           </div>
         </div>
         <div id="analysisText" class="result-text markdown-body streaming"></div>
@@ -230,7 +230,7 @@
                 <span class="abpro-key">A</span>
                 <span class="abpro-card-title">Anamnese</span>
               </div>
-              <button class="btn-abpro-copy" onclick="copyAbproField('abproA')" title="Kopieren">
+              <button class="btn-abpro-copy" onclick="copyAbproField('abproA', this)" title="Kopieren">
                 <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                 Kopieren
               </button>
@@ -243,7 +243,7 @@
                 <span class="abpro-key">B</span>
                 <span class="abpro-card-title">Befund</span>
               </div>
-              <button class="btn-abpro-copy" onclick="copyAbproField('abproB')" title="Kopieren">
+              <button class="btn-abpro-copy" onclick="copyAbproField('abproB', this)" title="Kopieren">
                 <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                 Kopieren
               </button>
@@ -256,7 +256,7 @@
                 <span class="abpro-key">PRO</span>
                 <span class="abpro-card-title">Procedere</span>
               </div>
-              <button class="btn-abpro-copy" onclick="copyAbproField('abproPro')" title="Kopieren">
+              <button class="btn-abpro-copy" onclick="copyAbproField('abproPro', this)" title="Kopieren">
                 <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                 Kopieren
               </button>
@@ -307,7 +307,8 @@
   <script>
     window.APP_CONFIG = {
       defaultModel: "{{ default_model }}",
-      version: "{{ version }}"
+      version: "{{ version }}",
+      loopWarnShare: {{ loop_warn_share }}
     };
   </script>
   <!-- marked.js für Markdown-Rendering -->
