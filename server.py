@@ -13,6 +13,7 @@ import os
 import re
 import json
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
 import logging
@@ -30,7 +31,13 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.9.7"
+VERSION = "0.9.8"
+
+
+def _flag(value: str) -> bool:
+    """Schalter aus Umgebung oder Formular: alles ausser false/0/off/leer ist an."""
+    return str(value).lower() not in ("false", "0", "off", "")
+
 
 WHISPER_HOST = os.getenv("WHISPER_HOST", "faster-whisper")
 WHISPER_PORT = os.getenv("WHISPER_PORT", "8000")
@@ -53,7 +60,7 @@ WHISPER_FAST_MODEL = os.getenv("WHISPER_FAST_MODEL", "small")
 #
 # Wort-Zeitstempel bleiben trotz VAD auf der Original-Zeitachse (geprueft:
 # Abweichung < 1 s ueber 251 s Audio), die Sprecherzuordnung bricht also nicht.
-WHISPER_VAD_FILTER = os.getenv("WHISPER_VAD_FILTER", "true").lower() not in ("false", "0", "off", "")
+WHISPER_VAD_FILTER = _flag(os.getenv("WHISPER_VAD_FILTER", "true"))
 DIARIZE_HOST = os.getenv("DIARIZE_HOST", "diarize")
 DIARIZE_PORT = os.getenv("DIARIZE_PORT", "8000")
 # Beide 0 = pyannote schaetzt die Sprecherzahl selbst. Bewusst keine Vorgabe:
@@ -85,6 +92,10 @@ LOOP_WARN_SHARE = float(os.getenv("LOOP_WARN_SHARE", "0.15"))
 # "nur eine Beschwerde"-Dokumentationen: die anderen standen am Anfang.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
 LOG_DIR = os.getenv("LOG_DIR", "/logs")
+
+WHISPER_URL = f"http://{WHISPER_HOST}:{WHISPER_PORT}"
+OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
+DIARIZE_URL = f"http://{DIARIZE_HOST}:{DIARIZE_PORT}"
 
 logging_enabled = False
 
@@ -344,12 +355,13 @@ def _exc_text(exc: BaseException) -> str:
     Logzeile, die nach dem Doppelpunkt aufhoert und nicht verraet, dass der
     Dienst gar nicht geantwortet hat.
     """
-    return f"{type(exc).__name__}: {exc}" if isinstance(exc, BaseException) else str(exc)
+    return f"{type(exc).__name__}: {exc}"
 
 
-app = FastAPI(title="KI-Gesprächsanalyse")
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+def _sse(kind: str, text: str | None = None) -> str:
+    """Ein SSE-Event; `kind` ist der Event-Typ (status, transcript, token, ...)."""
+    event = {"type": kind} if text is None else {"type": kind, "text": text}
+    return f"data: {json.dumps(event)}\n\n"
 
 
 class ThinkingFilter:
@@ -438,13 +450,13 @@ def _llm_options(prompt: str, num_predict: int, temperature: float) -> dict:
 
 
 async def _stream_llm(prompt: str, model: str, num_predict: int = _NUM_PREDICT):
-    """Yields SSE event data strings for a streamed LLM response."""
+    """Streamt die LLM-Antwort als (Event-Typ, Text): "token", am Ende ggf. "warning"."""
     thinking_filter = ThinkingFilter()
     options = _llm_options(prompt, num_predict, temperature=0.3)
     async with httpx.AsyncClient(timeout=300) as client:
         async with client.stream(
             "POST",
-            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+            f"{OLLAMA_URL}/api/generate",
             json={
                 "model": model,
                 "prompt": prompt,
@@ -459,34 +471,31 @@ async def _stream_llm(prompt: str, model: str, num_predict: int = _NUM_PREDICT):
                 data = json.loads(line)
                 if data.get("error"):
                     raise RuntimeError(data["error"])
-                raw = data.get("response", "")
-                if raw:
-                    token = thinking_filter.feed(raw)
-                    if token:
-                        yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+                token = thinking_filter.feed(data.get("response", ""))
+                if token:
+                    yield "token", token
                 if data.get("done"):
                     remainder = thinking_filter.flush()
                     if remainder:
-                        yield f"data: {json.dumps({'type': 'token', 'text': remainder})}\n\n"
+                        yield "token", remainder
                     logger.info(
                         f"LLM {model}: {data.get('prompt_eval_count', '?')} Prompt-Tokens, "
                         f"{data.get('eval_count', '?')} Antwort-Tokens, num_ctx={options['num_ctx']}, "
                         f"Ende={data.get('done_reason', '?')}"
                     )
                     if data.get("done_reason") == "length":
-                        warning = (
+                        yield "warning", (
                             f"Die Antwort des Sprachmodells wurde nach {num_predict} Tokens "
                             "abgeschnitten und ist unvollständig."
                         )
-                        yield f"data: {json.dumps({'type': 'warning', 'text': warning})}\n\n"
                     break
 
 
-async def _call_llm_sync(prompt: str, model: str) -> str:
-    """Single non-streaming LLM call, returns complete response with thinking blocks stripped."""
+async def _call_llm(prompt: str, model: str) -> str:
+    """Einzelner LLM-Aufruf ohne Streaming, Denkbloecke entfernt."""
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
-            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+            f"{OLLAMA_URL}/api/generate",
             json={"model": model, "prompt": prompt, "stream": False, "think": False,
                   # Dieselbe num_ctx-Bemessung wie die Analyse, sonst laedt
                   # ollama das Modell fuer die Betreffzeile eigens neu.
@@ -552,13 +561,10 @@ def _whisper_model_fields(lang_mode: str, model_override: str = None) -> dict:
     30-s-Abschnitten besteht und damit reichlich Abschnittsgrenzen in Stille hat.
     """
     fields: dict = {"vad_filter": str(WHISPER_VAD_FILTER).lower()}
-    if model_override:
-        fields["model"] = model_override
-        if lang_mode == "de":
-            fields["language"] = WHISPER_LANGUAGE
-        return fields
+    model = model_override or (WHISPER_MEDICAL_MODEL if lang_mode == "de" else None)
+    if model:
+        fields["model"] = model
     if lang_mode == "de":
-        fields["model"] = WHISPER_MEDICAL_MODEL
         fields["language"] = WHISPER_LANGUAGE
     return fields
 
@@ -571,7 +577,7 @@ async def _post_whisper(audio_path: str, filename: str, data: dict) -> httpx.Res
     async with httpx.AsyncClient(timeout=AUDIO_TIMEOUT) as client:
         with open(audio_path, "rb") as f:
             response = await client.post(
-                f"http://{WHISPER_HOST}:{WHISPER_PORT}/v1/audio/transcriptions",
+                f"{WHISPER_URL}/v1/audio/transcriptions",
                 files={"file": (filename, f, _audio_mime(filename))},
                 data=data,
             )
@@ -582,14 +588,22 @@ async def _post_whisper(audio_path: str, filename: str, data: dict) -> httpx.Res
     return response
 
 
+@dataclass
+class Transcription:
+    """Ergebnis eines Whisper-Laufs, Schleifen bereits entfernt.
+
+    `loop_share` ist kein Protokolldetail: er ist das einzige Mass dafuer, wie
+    viel echtes Gespraech im Transkript fehlt. `units` ({"start", "end",
+    "text"}) gibt es nur bei transcribe_with_units().
+    """
+    text: str
+    loop_share: float = 0.0
+    units: list = field(default_factory=list)
+
+
 async def transcribe_audio(
     audio_path: str, filename: str = "audio.webm", lang_mode: str = "de", model_override: str = None
-) -> tuple:
-    """Liefert (Transkript, Schleifenanteil).
-
-    Der Anteil ist kein Protokolldetail: er ist das einzige Mass dafuer, wie
-    viel echtes Gespraech im Transkript fehlt.
-    """
+) -> Transcription:
     data = {"response_format": "text", **_whisper_model_fields(lang_mode, model_override)}
     response = await _post_whisper(audio_path, filename, data)
     raw = response.text.strip()
@@ -597,16 +611,14 @@ async def transcribe_audio(
     share = _loop_share(len(re.findall(r"\S+", raw)), len(re.findall(r"\S+", text)))
     if share:
         logger.warning(f"Wiederholschleife entfernt: {share:.0%} des Transkripts")
-    return text, share
+    return Transcription(text, share)
 
 
 async def transcribe_with_units(
     audio_path: str, filename: str = "audio.webm", lang_mode: str = "de"
-) -> tuple:
+) -> Transcription:
     """Transkribiert mit Zeitstempeln - Grundlage fuer die Sprecherzuordnung.
 
-    Liefert (Volltext, Einheiten, Schleifenanteil); eine Einheit ist
-    {"start", "end", "text"}.
     Angefragt wird Wort-Granularitaet: Whisper-Segmente laufen regelmaessig ueber
     Sprecherwechsel hinweg und wuerden ganze Antworten dem Falschen zuordnen.
     Liefert der Whisper-Server keine Woerter, wird auf Segmentebene
@@ -655,7 +667,7 @@ async def transcribe_with_units(
             f"Wiederholschleife entfernt: {before - len(units)} von {before} Einheiten "
             f"({share:.0%})"
         )
-    return text, units, share
+    return Transcription(text, share, units)
 
 
 # ============================================================
@@ -679,7 +691,7 @@ async def diarize_audio(audio_path: str, filename: str) -> list:
     async with httpx.AsyncClient(timeout=AUDIO_TIMEOUT) as client:
         with open(audio_path, "rb") as f:
             r = await client.post(
-                f"http://{DIARIZE_HOST}:{DIARIZE_PORT}/diarize",
+                f"{DIARIZE_URL}/diarize",
                 files={"audio": (filename, f, _audio_mime(filename))},
                 data={
                     "min_speakers": DIARIZE_MIN_SPEAKERS,
@@ -860,6 +872,84 @@ def _build_prompt(mode: str, transcript: str, gender: str, diarized: bool) -> st
     )
 
 
+async def _transcribe_and_diarize(
+    audio_path: str, filename: str, lang_mode: str
+) -> tuple[Transcription, str | None]:
+    """Transkription und Diarisation parallel; liefert (Transkription, beschriftet).
+
+    Beide Dienste lesen dieselbe Datei; die Diarisation ist auf der GPU um ein
+    Vielfaches schneller als Whisper (gemessen an einer 45-min-Datei: 41 s gegen
+    gut zwei Minuten) und kostet damit keine zusaetzliche Wartezeit.
+
+    Nur die Transkription ist Pflicht — scheitert sie, fliegt die Ausnahme.
+    Scheitert die Sprechertrennung, ist das beschriftete Transkript None: ein
+    Transkript ohne Sprecher ist immer noch brauchbar (Prompt schaltet auf PLAIN).
+    """
+    transcription, segments = await asyncio.gather(
+        transcribe_with_units(audio_path, filename, lang_mode),
+        diarize_audio(audio_path, filename),
+        return_exceptions=True,
+    )
+    if isinstance(transcription, BaseException):
+        # Nur die Zeitstempel-Variante ist gescheitert (z. B. ein Whisper-Server
+        # ohne verbose_json). Ein zweiter, einfacher Versuch ist billiger als die
+        # Analyse aufzugeben — dann eben ohne Sprecher.
+        logger.warning(f"Transkription mit Zeitstempeln fehlgeschlagen: {_exc_text(transcription)}")
+        transcription = await transcribe_audio(audio_path, filename, lang_mode)
+
+    if isinstance(segments, BaseException):
+        reason = _exc_text(segments)
+    elif not segments:
+        reason = "keine Sprecherintervalle"
+    elif not transcription.units:
+        reason = "keine Zeitstempel"
+    else:
+        return transcription, format_diarized_transcript(transcription.units, segments) or None
+    logger.warning(f"Diarisation nicht anwendbar: {reason}")
+    return transcription, None
+
+
+async def _analysis_events(transcript: str, mode: str, gender: str, model: str,
+                           diarized: bool, loop_share: float = 0.0):
+    """Gemeinsamer Schluss von /analyze und /analyze-text: LLM-Antwort streamen,
+    im Logging-Modus mitschreiben, mit `done` abschliessen."""
+    yield _sse("status", f"Analysiere mit {model}...")
+    prompt = _build_prompt(mode, transcript, gender, diarized)
+    tokens = []
+    try:
+        async for kind, text in _stream_llm(prompt, model, _num_predict(mode, transcript)):
+            if kind == "token":
+                tokens.append(text)
+            yield _sse(kind, text)
+    except Exception as e:
+        yield _sse("error", f"KI-Fehler: {e}")
+        return
+
+    if logging_enabled and tokens:
+        _save_log(transcript, "".join(tokens), mode, model, gender, diarized, loop_share)
+    yield _sse("done")
+
+
+async def _save_upload(audio: UploadFile) -> str:
+    """Schreibt den Upload in eine Temp-Datei (Endung bleibt, ffmpeg braucht sie).
+
+    Der Aufrufer loescht sie. Gelesen werden muss noch im Request-Handler:
+    bei einer StreamingResponse ist das UploadFile danach schon geschlossen.
+    """
+    suffix = Path(audio.filename or "audio.webm").suffix or ".webm"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await audio.read())
+    return tmp.name
+
+
+# ============================================================
+# ROUTEN
+# ============================================================
+app = FastAPI(title="KI-Gesprächsanalyse")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(
@@ -873,7 +963,7 @@ async def index(request: Request):
 async def get_models():
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags")
+            r = await client.get(f"{OLLAMA_URL}/api/tags")
         all_models = [m["name"] for m in r.json().get("models", [])]
         allowed = [m for m in all_models if any(m.startswith(p) for p in MODEL_WHITELIST)]
         return {"models": allowed or all_models, "default": OLLAMA_MODEL}
@@ -881,29 +971,22 @@ async def get_models():
         return {"models": [OLLAMA_MODEL], "default": OLLAMA_MODEL, "error": str(e)}
 
 
+async def _probe(url: str, status=lambda r: "ok") -> str:
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            return status(await client.get(url))
+    except Exception:
+        return "error"
+
+
 @app.get("/health")
 async def health():
-    result: dict = {"version": VERSION, "whisper": "error", "ollama": "error",
-                    "diarize": "error"}
-    try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            await client.get(f"http://{WHISPER_HOST}:{WHISPER_PORT}/")
-        result["whisper"] = "ok"
-    except Exception:
-        pass
-    try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            await client.get(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags")
-        result["ollama"] = "ok"
-    except Exception:
-        pass
-    try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            r = await client.get(f"http://{DIARIZE_HOST}:{DIARIZE_PORT}/health")
-        result["diarize"] = r.json().get("status", "error")
-    except Exception:
-        pass
-    return result
+    whisper, ollama, diarize = await asyncio.gather(
+        _probe(f"{WHISPER_URL}/"),
+        _probe(f"{OLLAMA_URL}/api/tags"),
+        _probe(f"{DIARIZE_URL}/health", lambda r: r.json().get("status", "error")),
+    )
+    return {"version": VERSION, "whisper": whisper, "ollama": ollama, "diarize": diarize}
 
 
 @app.get("/logging-mode")
@@ -925,27 +1008,24 @@ async def transcribe_only(audio: UploadFile = File(...), lang_mode: str = Form(d
     """Live-Vorschau-Transkription mit dem schnellen Modell (WHISPER_FAST_MODEL) – keine LLM-Verarbeitung.
     Dient nur der Anzeige während der Aufnahme; die finale Analyse transkribiert die volle
     Aufnahme separat mit dem medizinischen Modell (siehe /analyze)."""
-    ext = Path(audio.filename or "audio.webm").suffix or ".webm"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-        tmp.write(await audio.read())
-        tmp_path = tmp.name
+    tmp_path = await _save_upload(audio)
     try:
-        transcript, loop_share = await transcribe_audio(
+        result = await transcribe_audio(
             tmp_path, audio.filename or "audio.webm", lang_mode, model_override=WHISPER_FAST_MODEL
         )
-        if _is_hallucination(transcript):
-            transcript = ""
         # Der Schleifenanteil geht auch an die Vorschau: laeuft das schnelle
         # Modell schon im Leerlauf, soll das waehrend der Aufnahme sichtbar
         # werden und nicht erst in der fertigen Analyse.
-        return {"transcript": transcript, "loop_share": round(loop_share, 3)}
+        return {
+            "transcript": "" if _is_hallucination(result.text) else result.text,
+            "loop_share": round(result.loop_share, 3),
+        }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 @app.post("/analyze")
@@ -959,13 +1039,9 @@ async def analyze(
 ):
     """Transkription + LLM-Analyse als SSE-Stream."""
     used_model = model or OLLAMA_MODEL
-    want_diarize = str(diarize).lower() not in ("false", "0", "off", "")
+    want_diarize = _flag(diarize)
     original_name = audio.filename or "audio.webm"
-    ext = Path(original_name).suffix or ".webm"
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-        tmp.write(await audio.read())
-        tmp_path = tmp.name
+    tmp_path = await _save_upload(audio)
 
     # Groesse mitloggen: eine hochgeladene Datei kann ein Vielfaches einer
     # Sprechstunden-Aufnahme sein, und genau daran haengen die Laufzeiten
@@ -979,107 +1055,41 @@ async def analyze(
     async def event_stream():
         try:
             model_label = "DE-Medizin" if lang_mode == "de" else "Sprache Auto"
-            diarized = False
-            loop_share = 0.0
+            suffix = " + Sprechertrennung" if want_diarize else ""
+            yield _sse("status", f"Transkribiere Audio ({model_label}){suffix}...")
 
-            if want_diarize:
-                status = f"Transkribiere Audio ({model_label}) + Sprechertrennung..."
-                yield f"data: {json.dumps({'type': 'status', 'text': status})}\n\n"
-                # Beide Dienste lesen dieselbe Datei und laufen parallel; die
-                # Diarisation ist auf der GPU um ein Vielfaches schneller als
-                # Whisper (gemessen an einer 45-min-Datei: 41 s gegen gut zwei
-                # Minuten) und kostet damit keine zusaetzliche Wartezeit.
-                transcription, diarization = await asyncio.gather(
-                    transcribe_with_units(tmp_path, original_name, lang_mode),
-                    diarize_audio(tmp_path, original_name),
-                    return_exceptions=True,
-                )
-                units = []
-                if isinstance(transcription, BaseException):
-                    # Nur die Zeitstempel-Variante ist gescheitert (z. B. ein
-                    # Whisper-Server ohne verbose_json). Ein zweiter, einfacher
-                    # Versuch ist billiger als die Analyse aufzugeben.
-                    logger.warning(
-                        f"Transkription mit Zeitstempeln fehlgeschlagen: {_exc_text(transcription)}"
-                    )
-                    try:
-                        transcript, loop_share = await transcribe_audio(
-                            tmp_path, original_name, lang_mode
-                        )
-                    except Exception as e:
-                        yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
-                        return
+            labeled = None
+            try:
+                if want_diarize:
+                    result, labeled = await _transcribe_and_diarize(tmp_path, original_name, lang_mode)
                 else:
-                    transcript, units, loop_share = transcription
-
-                if isinstance(diarization, BaseException) or not diarization or not units:
-                    # Bewusst kein Abbruch: ein Transkript ohne Sprechertrennung
-                    # ist immer noch brauchbar (Prompt schaltet auf PLAIN um).
-                    reason = (
-                        _exc_text(diarization)
-                        if isinstance(diarization, BaseException)
-                        else ("keine Sprecherintervalle" if not diarization else "keine Zeitstempel")
-                    )
-                    logger.warning(f"Diarisation nicht anwendbar: {reason}")
-                    yield f"data: {json.dumps({'type': 'status', 'text': 'Sprechertrennung nicht verfügbar – fahre ohne Sprecherkennzeichnung fort.'})}\n\n"
-                else:
-                    labeled = format_diarized_transcript(units, diarization)
-                    if labeled:
-                        diarized = True
-            else:
-                yield f"data: {json.dumps({'type': 'status', 'text': f'Transkribiere Audio ({model_label})...'})}\n\n"
-                try:
-                    transcript, loop_share = await transcribe_audio(
-                        tmp_path, original_name, lang_mode
-                    )
-                except Exception as e:
-                    yield f"data: {json.dumps({'type': 'error', 'text': f'Transkriptions-Fehler: {e}'})}\n\n"
-                    return
+                    result = await transcribe_audio(tmp_path, original_name, lang_mode)
+            except Exception as e:
+                yield _sse("error", f"Transkriptions-Fehler: {e}")
+                return
+            if want_diarize and not labeled:
+                yield _sse("status", "Sprechertrennung nicht verfügbar – fahre ohne Sprecherkennzeichnung fort.")
 
             # Halluzinations-Pruefung auf dem unbeschrifteten Text: mit Markern
             # davor wuerde kein Eintrag aus WHISPER_HALLUCINATIONS mehr greifen.
-            if _is_hallucination(transcript) or len(transcript.strip()) < 10:
-                yield f"data: {json.dumps({'type': 'error', 'text': 'Kein Audioinhalt erkannt – bitte erneut aufnehmen.'})}\n\n"
+            if _is_hallucination(result.text) or len(result.text.strip()) < 10:
+                yield _sse("error", "Kein Audioinhalt erkannt – bitte erneut aufnehmen.")
                 return
 
-            if diarized:
-                transcript = labeled
-
-            yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
+            transcript = labeled or result.text
+            yield _sse("transcript", transcript)
 
             # Vor der Analyse, nicht danach: wer hier mitliest, soll wissen, dass
             # gleich auf Luecken geantwortet wird.
-            warning = _loop_warning(loop_share)
+            warning = _loop_warning(result.loop_share)
             if warning:
-                yield f"data: {json.dumps({'type': 'warning', 'text': warning})}\n\n"
+                yield _sse("warning", warning)
 
-            yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
-
-            prompt = _build_prompt(mode, transcript, gender, diarized)
-
-            analysis_tokens = []
-            try:
-                async for chunk in _stream_llm(prompt, used_model, _num_predict(mode, transcript)):
-                    yield chunk
-                    try:
-                        payload = json.loads(chunk[6:].strip())
-                        if payload.get("type") == "token":
-                            analysis_tokens.append(payload["text"])
-                    except Exception:
-                        pass
-            except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'text': f'KI-Fehler: {e}'})}\n\n"
-                return
-
-            if logging_enabled and analysis_tokens:
-                _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender,
-                          diarized, loop_share)
-
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
+            async for event in _analysis_events(transcript, mode, gender, used_model,
+                                                labeled is not None, result.loop_share):
+                yield event
         finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            Path(tmp_path).unlink(missing_ok=True)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -1093,37 +1103,17 @@ async def analyze_text(
 ):
     """LLM-Analyse eines bereits vorhandenen Transkripts – kein Whisper-Schritt."""
     used_model = model or OLLAMA_MODEL
-    # Beim erneuten Analysieren kommt das Transkript aus dem Frontend zurueck -
-    # ob es diarisiert ist, steht an den Markern selbst.
-    diarized = has_speaker_labels(transcript)
-    prompt = _build_prompt(mode, transcript, gender, diarized)
 
     async def event_stream():
-        yield f"data: {json.dumps({'type': 'transcript', 'text': transcript})}\n\n"
-
+        yield _sse("transcript", transcript)
         if len(transcript.strip()) < 10:
-            yield f"data: {json.dumps({'type': 'error', 'text': 'Transkript ist leer oder zu kurz – bitte erneut aufnehmen.'})}\n\n"
+            yield _sse("error", "Transkript ist leer oder zu kurz – bitte erneut aufnehmen.")
             return
-
-        yield f"data: {json.dumps({'type': 'status', 'text': f'Analysiere mit {used_model}...'})}\n\n"
-        analysis_tokens = []
-        try:
-            async for chunk in _stream_llm(prompt, used_model, _num_predict(mode, transcript)):
-                yield chunk
-                try:
-                    payload = json.loads(chunk[6:].strip())
-                    if payload.get("type") == "token":
-                        analysis_tokens.append(payload["text"])
-                except Exception:
-                    pass
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'text': f'KI-Fehler: {e}'})}\n\n"
-            return
-
-        if logging_enabled and analysis_tokens:
-            _save_log(transcript, "".join(analysis_tokens), mode, used_model, gender, diarized)
-
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        # Beim erneuten Analysieren kommt das Transkript aus dem Frontend zurueck -
+        # ob es diarisiert ist, steht an den Markern selbst.
+        async for event in _analysis_events(transcript, mode, gender, used_model,
+                                            has_speaker_labels(transcript)):
+            yield event
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -1134,7 +1124,7 @@ async def get_subject(transcript: str = Form(...), model: str = Form(default=Non
     used_model = model or OLLAMA_MODEL
     prompt = SUBJECT_PROMPT.format(transcript=transcript[:2000])
     try:
-        subject = await _call_llm_sync(prompt, used_model)
+        subject = await _call_llm(prompt, used_model)
         if len(subject) > 100:
             subject = subject[:97] + "…"
         return {"subject": subject}
