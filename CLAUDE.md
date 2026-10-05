@@ -1,8 +1,14 @@
-# CLAUDE.md — KI-Transcribe Pro
+# CLAUDE.md — Steno
 
 ## Projektübersicht
 
-Medizinisches Transkriptions-System als Web-App / FastAPI-Server (`server.py`) — läuft als Docker-Container, bietet eine Browser-UI für Arzt-Patienten-Gesprächsanalyse sowie eine REST-API für Transkription und LLM-Analyse.
+**Steno** schreibt Arzt-Patienten-Gespräche und verhaltenstherapeutische Sitzungen mit, fasst sie per LLM zusammen und übergibt die Dokumentation per GDT an T2med. Zwei Teile:
+- **Server** (`server.py`, FastAPI im Docker-Container): Transkription, Sprechertrennung, LLM, GDT-Übergabe. Dazu die volle Browser-UI (`/`) und eine Nachschau (`/verlauf`).
+- **Steno-Knopf** (`client/steno.py`, Windows, PyInstaller-exe): ein runder ▶/■-Knopf, der immer vor T2med liegt. „Messung starten“ in T2med startet die Aufnahme, ein Klick beendet sie; der Server sendet automatisch. Bedienung und Einrichtung: `client/README.md`.
+
+Aufgenommen wird nur auf Anforderung (Auftrag aus T2med oder Klick), nie dauerhaft und ohne Ringpuffer — § 201 StGB stellt schon das Aufnehmen ohne Einwilligung unter Strafe, und ein Dauerstrom müsste selbst erkennen, wo ein Patient endet (genau dort entstünde die Doku beim falschen Patienten). Gegen vergessene Stopps: Ende nach `stille_minuten` (20) Stille, spätestens nach `max_minuten` (120).
+
+Container und Ordner heißen weiter `transcribe-gdt(-web)`; umbenannt ist das Programm (Titel, GDT-Kennungen `STENO`/`STNO`).
 
 **Abzweig von `../ki-transcribe` mit T2med-Anbindung per GDT.** `ki-transcribe` bleibt ohne GDT und läuft weiter produktiv; hier wird die Anbindung entwickelt. Abgezweigt bei `f6f5aa1` (Branch `refactor-server-frontend`). Das Git-Remote `ki-transcribe` zeigt auf den lokalen Ordner, Änderungen von dort mit `git fetch ki-transcribe && git merge ki-transcribe/<branch>` holen.
 
@@ -13,12 +19,15 @@ Medizinisches Transkriptions-System als Web-App / FastAPI-Server (`server.py`) �
 ## Architektur
 
 ```
-Browser ──► Caddy (Reverse Proxy) ──► transcribe-gdt-web (FastAPI, Port 8000, Host 127.0.0.1:8011)
-                                           ├── diktat-whisper  (Transkription, GPU)    ┐ aus ../ki-transcribe,
-                                           ├── diktat-diarize  (Sprechertrennung, GPU) ┘ geteilt
-                                           ├── ollama (LLM, externer Container, geteilt)
-                                           └── GDT-Austauschordner ◄──► T2med (Praxisverwaltung)
+Steno-Knopf (Sprechzimmer 1–3) ─┐
+Browser (volle UI, /verlauf) ───┴► Caddy (Reverse Proxy) ──► transcribe-gdt-web (FastAPI, Port 8000, Host 127.0.0.1:8011)
+                                                                ├── diktat-whisper  (Transkription, GPU)    ┐ aus ../ki-transcribe,
+                                                                ├── diktat-diarize  (Sprechertrennung, GPU) ┘ geteilt
+                                                                ├── ollama (LLM, externer Container, geteilt)
+                                                                └── GDT-Austauschordner ◄──► T2med (Praxisverwaltung)
 ```
+
+Der Knopf spricht nur mit dem Server, nie direkt mit dem GDT-Ordner: Aufträge holt er über `/gdt/order`, Aufnahmen gibt er über `/steno/jobs` ab. Damit liegt die ganze GDT-Logik an einer Stelle, und auf den Arbeitsplätzen braucht der Knopf keinen Zugriff auf die Freigabe (T2med selbst schon).
 
 **Netzwerke (Docker, alle extern):**
 - `diktat-network` — angelegt von `ki-transcribe`: transcribe-gdt-web ↔ diktat-whisper ↔ diktat-diarize (auch gespraech-web und ki-atteste-web hängen darin)
@@ -34,7 +43,7 @@ Angesprochen werden die Dienste über ihre **Containernamen** (`diktat-whisper`,
 ```
 transcribe-gdt/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
-├── prompts.py                 # LLM-Prompts: ANALYZE_PROMPT, ABPRO_PROMPT, SUMMARY_PROMPT, SUBJECT_PROMPT, CLEAN_PROMPT
+├── prompts.py                 # LLM-Prompts: ANALYZE, ABPRO, PSYCHO, SUMMARY, SUBJECT, CLEAN, PSY_CLASSIFY
 ├── medical_vocab.py           # Kuratiertes Fachvokabular (Diagnosen, Wirkstoffe, Impfstoffe, Untersuchungen)
 ├── gdt.py                     # GDT 2.1 für T2med: Auftrag 6302 lesen (OrderBook), Ergebnis 6310 bauen/ablegen
 ├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, Testplan
@@ -43,8 +52,10 @@ transcribe-gdt/
 ├── requirements-server.txt    # Server-Python-Dependencies
 ├── requirements-dev.txt       # + pytest
 ├── tests/                     # pytest: reine Funktionen + Endpoints gegen Dienst-Attrappen
+├── client/                    # Steno-Knopf (Windows): steno.py, requirements.txt, build.ps1, README.md
 │
 ├── templates/index.html       # Jinja2-Template für Web-UI
+├── templates/verlauf.html     # Nachschau der Knopf-Aufträge (/verlauf)
 ├── static/                    # CSS, JS, SVG, logo.jpg für Web-UI
 ├── gdt/                       # GDT-Austauschordner (Standard-Mount, gitignored, Patientendaten)
 │
@@ -68,9 +79,14 @@ transcribe-gdt/
 | POST | `/analyze` | Transkription + optionale Diarisation + LLM (SSE-Stream), Parameter: `audio`, `model`, `mode`, `gender`, `lang_mode`, `diarize` |
 | POST | `/analyze-text` | LLM-Analyse eines vorhandenen Transkripts – kein Whisper-Schritt, SSE-Stream, Parameter: `transcript`, `model`, `mode`, `gender` |
 | POST | `/subject` | Betreffzeile (max. 100 Zeichen) für ein Transkript per LLM generieren |
-| GET | `/gdt/order?ap=001` | Offener T2med-Messauftrag dieses Arbeitsplatzes (holt `KITRT2MD.<ap>` dabei ab); `{"order": {…} \| null}`. 404 ohne GDT-Anbindung |
+| GET | `/gdt/order?ap=001` | Offener T2med-Messauftrag dieses Arbeitsplatzes (holt `STNOT2MD.<ap>` dabei ab); `{"order": {…} \| null}`. 404 ohne GDT-Anbindung |
 | POST | `/gdt/order/claim` | Auftrag einer Aufnahme zuordnen (Body: `{"ap", "id"}`) — danach nicht mehr offen |
-| POST | `/gdt/send` | Dokumentation als 6310 nach `T2MDKITR.<ap>` (Body: `ap`, `order`\|null, `text`, `transcript`, `mode`, `model`, `started`, `warning`); 409, solange T2med die vorige Datei nicht abgeholt hat |
+| POST | `/gdt/send` | Dokumentation als 6310 nach `T2MDSTNO.<ap>` (Body: `ap`, `order`\|null, `text`, `transcript`, `mode`, `model`, `started`, `warning`); 409, solange T2med die vorige Datei nicht abgeholt hat |
+| GET | `/steno` | Für den Knopf: `version`, `gdt`, `workstations`, `psy_device` |
+| POST | `/steno/jobs` | Aufnahme vom Knopf (Multipart: `id` vom Knopf vergeben, `ap`, `audio`, `order` als JSON oder leer, `mode` = `auto`\|`sprechstunde`\|`psycho`, `started`, `duration`); läuft im Hintergrund bis zur GDT-Datei. Gleiche `id` noch einmal = derselbe Auftrag |
+| GET | `/steno/jobs/{id}` | Zustand: `wartet` → `transkribiert` → `schreibt` → `sendet` → `gesendet` \| `fehler` (`detail`); 404 = unbekannt (Server neu gestartet → Knopf lädt erneut hoch) |
+| GET | `/steno/jobs?ap=` | Alle Aufträge mit Text und Transkript, jüngste zuerst |
+| GET | `/verlauf?ap=` | Nachschau im Browser (der Knopf öffnet sie per Rechtsklick) |
 
 **`/analyze` und `/analyze-text` SSE-Event-Typen:** `status`, `transcript`, `token`, `warning`, `error`, `done`
 
@@ -83,6 +99,7 @@ transcribe-gdt/
 | `analyze` | `ANALYZE_PROMPT` | Strukturierte Arzt-Dokumentation (Anamnese, Diagnose, …) |
 | `abpro` | `ABPRO_PROMPT` | Kompakte Dokumentation im Telegrammstil (A/B/PRO-Schema) |
 | `summary` | `SUMMARY_PROMPT` | Kurze, allgemeinverständliche Zusammenfassung; Themen durch Leerzeile getrennt |
+| `psycho` | `PSYCHO_PROMPT` | Verhaltenstherapeutische Sitzung: Themen, Verlauf je Thema in ganzen Sätzen, Vereinbarungen, Gefährdung (nur wenn thematisiert) |
 | `clean` | `CLEAN_PROMPT` | Transkript bereinigen (Füllwörter entfernen, Fehler korrigieren) |
 
 **`gender`-Parameter** (`neutral` / `male` / `female`): Steuert Patientenbezeichnung im LLM-Output (`_gender_context()` in `server.py`).
@@ -157,22 +174,39 @@ Das Modell ist auf Hugging Face gated (CC-BY-4.0, nur Registrierung; ein Repo st
 
 **Gescheiterte Diarisation wird mit Typ geloggt** (`_exc_text()`): httpx-Timeouts tragen eine leere Meldung, `Diarisation nicht anwendbar: ` endete deshalb nach dem Doppelpunkt und verschwieg gerade den Fall, der hier auftrat. `/analyze` loggt außerdem Dateiname und -größe, damit ein langer Lauf von einem hängenden unterscheidbar bleibt.
 
-**Sprecher-Kontext in den Prompts (`prompts.py`):** `ANALYZE_PROMPT` und `ABPRO_PROMPT` enthalten den Platzhalter `{speaker_context}`, den `_build_prompt()` in `server.py` je nach Diarisations-Status mit `SPEAKER_CONTEXT_DIARIZED` oder `SPEAKER_CONTEXT_PLAIN` füllt. `/analyze-text` erkennt über `has_speaker_labels()` an den Markern selbst, welche Variante gilt. `CLEAN_PROMPT` weist zusätzlich an, vorhandene Marker unverändert zu übernehmen.
+**Sprecher-Kontext in den Prompts (`prompts.py`):** `ANALYZE_PROMPT`, `ABPRO_PROMPT` und `PSYCHO_PROMPT` enthalten den Platzhalter `{speaker_context}`, den `_build_prompt()` in `server.py` je nach Diarisations-Status mit `SPEAKER_CONTEXT_DIARIZED` oder `SPEAKER_CONTEXT_PLAIN` füllt — bei `mode=psycho` mit `SPEAKER_CONTEXT_PSY_DIARIZED`/`_PLAIN` (Therapeut/in statt Arzt, „wer fragt, strukturiert, Übungen vorschlägt“ statt „wer Anamnesefragen stellt“; Fragen und Hypothesen der Therapeutin sind keine Aussagen der Patientin). `PSYCHO_PROMPT` bekommt bewusst kein `MEDICAL_GLOSSARY`: das Hausarzt-Vokabular würde das Modell in einer Sitzung eher zu Fachbegriffen verleiten, die nicht fielen. `/analyze-text` erkennt über `has_speaker_labels()` an den Markern selbst, welche Variante gilt. `CLEAN_PROMPT` weist zusätzlich an, vorhandene Marker unverändert zu übernehmen.
 
-**Mikrofon (`MIC_PROCESSING` in `static/app.js`):** aufgenommen wird mit einer EPOS Expand 40 (Konferenzspinne mit eigener Echo-/Rauschunterdrückung). Die Browser-Sprachverarbeitung (`echoCancellation`, `noiseSuppression`, `autoGainControl`) ist deshalb aus: die Rauschunterdrückung schneidet leise, entfernte Stimmen mit weg und stört Whisper wie pyannote, die Pegelregelung zieht in Pausen das Grundrauschen hoch (Halluzinationsfutter) und verstellt den Windows-Mikrofonpegel. Opus-Bitrate fest 64 kbit/s (`RECORDER_BITRATE`), statt je Browser verschieden. Die Expand 40 per **USB** anschließen, nicht per Bluetooth-Direktverbindung — das Headset-Profil überträgt das Mikrofon nur schmalbandig.
+**Mikrofon:** aufgenommen wird mit einer EPOS Expand 40 (Konferenzspinne mit eigener Echo-/Rauschunterdrückung), per **USB**, nicht per Bluetooth-Direktverbindung — das Headset-Profil überträgt das Mikrofon nur schmalbandig. In der Browser-UI (`MIC_PROCESSING` in `static/app.js`) ist die Browser-Sprachverarbeitung (`echoCancellation`, `noiseSuppression`, `autoGainControl`) aus: die Rauschunterdrückung schneidet leise, entfernte Stimmen mit weg und stört Whisper wie pyannote, die Pegelregelung zieht in Pausen das Grundrauschen hoch (Halluzinationsfutter) und verstellt den Windows-Mikrofonpegel. Opus-Bitrate fest 64 kbit/s (`RECORDER_BITRATE`). Der Knopf nimmt über PortAudio ohnehin ohne solche Verarbeitung auf, verlustfrei als FLAC (siehe unten).
 
 **Live-Transkript während der Aufnahme (`static/app.js`):** Während der Aufnahme wird alle 30s ein neuer Audio-Abschnitt an `/transcribe-only` geschickt (mit `WHISPER_FAST_MODEL`, z. B. `small`) und im UI angezeigt — dient nur als schnelle Vorschau. Nach Aufnahmeende wird die **komplette** Aufnahme in einem Stück über `/analyze` mit `WHISPER_MEDICAL_MODEL` transkribiert (durchgehender Kontext, weniger Segmentgrenzen-Halluzinationen) und ersetzt die Vorschau, sobald das `transcript`-SSE-Event eintrifft.
 
-**T2med-Anbindung per GDT (`gdt.py`, Abschnitt T2MED in `server.py` und `static/app.js`):** Muster und Feldwerte aus `sono-gdt` (`../t2med-gdt`, Ultraschallbilder an T2med, im Praxisbetrieb erprobt). Einrichtung und Testplan: `T2MED-EINRICHTUNG.md`. Ablauf: In T2med „Messung starten“ → T2med schreibt 6302 nach `KITRT2MD.<ap>` → das Frontend fragt alle 3 s `/gdt/order` ab, der Server liest die Datei erst, wenn Größe und mtime bei zwei Abrufen gleich sind (halb geschriebene Sätze; ein Uhrvergleich hinge an der Uhr der Freigabe), und löscht sie → `startRecording()` ordnet den Auftrag der Aufnahme zu (`claimOpenOrder()`, Upload: bei der ersten Analyse der Datei) → der Verlaufseintrag trägt ihn (`entry.order`) → „An T2med senden“ schreibt 6310 nach `T2MDKITR.<ap>`.
-- **Patientensicherheit vor Bequemlichkeit** (Konvention aus sono-gdt): ohne Auftrag geht `3000=0` raus, T2med legt die Dokumentation unter „Ext. Aufträge“ zur manuellen Zuordnung ab. Ein Auftrag gilt für **genau eine** Aufnahme (`OrderBook.claim`) und verfällt nach `GDT_AUFTRAG_GUELTIG` — das Risiko ist der vergessene Klick beim nächsten Patienten, der sonst beim vorigen landen würde. Nachträglich zuordnen („Zuordnen: <Name>“) nur für die jüngste Analyse und nicht während einer Aufnahme. Der Senden-Knopf nennt den Zielpatienten; gesendet wird nur auf Klick.
-- **Der Auftrag kommt beim Senden aus dem Frontend zurück**, nicht aus dem `OrderBook`: dort ist er längst zugeordnet, und ein Server-Neustart zwischen Aufnahme und Senden soll die Zuordnung nicht kosten. `Order.from_dict()` prüft ihn. Das `OrderBook` selbst ist bewusst nur im Speicher — nach einem Neustart lieber erneut „Messung starten“ als ein Auftrag unbestimmten Alters.
-- **Feste Dateinamen je Arbeitsplatz** (`{ap}` = Endung, wie bei sono-gdt): T2med liest je Arbeitsplatz nur seine Datei. Liegt sie noch, antwortet `/gdt/send` mit 409 statt zu überschreiben. Der Arbeitsplatz steht im Browser (`localStorage`, Einstellungen-Modal), bei nur einem konfigurierten automatisch.
-- **6220-Text:** `plain_text()` entfernt Markdown; jede Zeile ein Feld, auf `GDT_ZEILENBREITE` (60, GDT 2.1) umgebrochen, Leerzeilen fallen weg. Typografie, die es in CP437 nicht gibt („“ – …), wird vor dem Kodieren umgeschrieben (`_TYPOGRAPHY`), sonst stünde in T2med `?`. Wie T2med die umgebrochenen Zeilen zusammensetzt, ist noch ungetestet (Testplan Punkt 6).
-- **Name und Geburtsdatum gehen nicht ans LLM.** Das Geschlecht aus dem Auftrag belegt nur die Geschlechtsauswahl vor (zwischen zwei Aufnahmen, nie mittendrin).
-- **Anhang:** nur mit `GDT_PVS_PFAD` (Windows-Sicht auf den Austauschordner) — Textdatei mit ungekürzter Dokumentation und Transkript in `<GDT_DIR>/anhaenge/`, UTF-8 mit BOM, 6302–6305. Bei 409 wird er wieder gelöscht.
-- **`TZ=Europe/Berlin`** im Container: `started` kommt als lokale Zeit ohne Zone aus dem Browser (`localIsoTime()`), nur der Rückfall nimmt `datetime.now()`; außerdem benennt `_save_log()` die Logs damit in Ortszeit.
+**T2med-Anbindung per GDT (`gdt.py`, Abschnitt T2MED in `server.py`, `client/steno.py`, `static/app.js`):** Muster und Feldwerte aus `sono-gdt` (`../t2med-gdt`, Ultraschallbilder an T2med, seit 05.10.2026 in Sprechzimmer 2 im Betrieb). Einrichtung und Testplan: `T2MED-EINRICHTUNG.md` — dort sind die von sono-gdt übernommenen Werte markiert (Betriebsmodus „Aufruf für jede einzelne Messung“, Netzlaufwerk statt UNC, Einleseverzögerung 10 ms …). Dateien je Arbeitsplatz: Auftrag `STNOT2MD.<ap>`, Ergebnis `T2MDSTNO.<ap>`, GDT-ID Gerät `STENO`.
 
-**Logging-Modus:** Globaler In-Memory-Schalter `logging_enabled` (per `/logging-mode` gesetzt, UI-Toggle im Einstellungen-Modal). Wenn aktiv, schreibt `_save_log()` Transkript + Analyse als JSON nach `LOG_DIR` (Dateiname `YYYYMMDD_HHMMSS_<mode>.json`).
+Ablauf mit dem **Knopf** (Normalfall): In T2med „Messung starten“ → T2med schreibt 6302 → der Knopf fragt alle 2 s `/gdt/order` ab, der Server liest die Datei erst, wenn Größe und mtime bei zwei Abrufen gleich sind (halb geschriebene Sätze; ein Uhrvergleich hinge an der Uhr der Freigabe), und löscht sie → der Knopf beansprucht den Auftrag (`/gdt/order/claim`) und startet die Aufnahme → ■ → `/steno/jobs` → `_steno_run()`: Transkription + Diarisation, Modus (`_steno_mode()`), LLM, `_deliver_gdt()` — **automatisch**, ohne Klick. Mit der **Browser-UI** wie bisher: `startRecording()` ordnet den Auftrag zu (`claimOpenOrder()`), „An T2med senden“ schreibt auf Klick.
+- **Patientensicherheit vor Bequemlichkeit** (Konvention aus sono-gdt): ohne Auftrag geht `3000=0` raus, T2med legt die Dokumentation unter „Ext. Aufträge“ zur manuellen Zuordnung ab. Ein Auftrag gilt für **genau eine** Aufnahme (`OrderBook.claim`) und verfällt nach `GDT_AUFTRAG_GUELTIG` — das Risiko ist der vergessene Klick beim nächsten Patienten, der sonst beim vorigen landen würde.
+- **Automatisch senden (Knopf) ist vertretbar, weil die Zuordnung ausschließlich aus dem beim Start beanspruchten Auftrag kommt** und T2med jede Dokumentation als „KI-generiert … Vor Übernahme prüfen“ zeigt. Deshalb auch: Der Knopf wechselt bei einem neuen Auftrag während einer Aufnahme **nie ungefragt** (ein versehentliches „Messung starten“ würde sonst die zweite Gesprächshälfte dem falschen Patienten geben); ein Auftrag, der beim Start des Knopfs schon da lag, startet keine Aufnahme; ein Auftrag desselben Patienten während der Aufnahme wird nur abgeräumt. In der Browser-UI gilt weiter: nachträglich zuordnen nur für die jüngste Analyse, gesendet wird nur auf Klick.
+- **Knopf-Aufträge (`StenoJob`) nur im Speicher**, fertige nach `STENO_AUFBEWAHRUNG` Stunden samt Text verworfen. Die Aufnahme liegt bis „gesendet“ auf dem Arbeitsplatz (`%LOCALAPPDATA%\Steno\aufnahmen`); kennt der Server die ID nicht mehr (404), lädt der Knopf erneut hoch. Die `id` vergibt der Knopf, ein wiederholter Upload legt keinen zweiten Eintrag in T2med an. Ein Auftrag nach dem anderen auf die GPU (`_steno_gpu`); liegt die vorige GDT-Datei noch, wartet `_steno_send()` bis `STENO_SENDEN_WARTEN` statt zu überschreiben (`write_exclusive` prüft und benennt ohne `await` dazwischen um — innerhalb eines Prozesses also kein Wettlauf).
+- **Psychotherapie** (verhaltenstherapeutische Sitzungen, 25/50 min, `mode=psycho`): Vorrang hat die Wahl am Knopf (Rechtsklick), dann das T2med-Gerät des Auftrags (zweites Gerät „Steno Psychotherapie“, `GDT_PSY_*`, Dateien `STNPT2MD`/`T2MDSTNP`, `Order.device == "psy"`), zuletzt — nur ab `STENO_PSY_AB_MINUTEN` — eine Rückfrage beim LLM (`PSY_CLASSIFY_PROMPT`, vermerkt in 6227). Die Dauer allein entscheidet nie, ein Check-up dauert auch 25 min. Das Ergebnis geht an das Gerät zurück, von dem der Auftrag kam (`Settings.result_target()`), denn dort wartet T2med. `PSYCHO_PROMPT` fasst zusammen statt zu schematisieren, kürzt bewusst weniger (`_num_predict` doppelt), keine Diagnosen/Deutungen, Gefährdung nur wenn thematisiert; eigener Sprecher-Kontext (Therapeut/in statt Arzt). Psychotherapie bekommt **nie** einen Transkript-Anhang und landet **nie** im Log. `GDT_PSY_*` erst setzen, wenn das Gerät an allen Arbeitsplätzen eingerichtet ist — eine Ergebnisdatei ohne Gerät holt niemand ab.
+- **Der Auftrag kommt beim Senden aus dem Frontend zurück**, nicht aus dem `OrderBook`: dort ist er längst zugeordnet, und ein Server-Neustart zwischen Aufnahme und Senden soll die Zuordnung nicht kosten. `Order.from_dict()` prüft ihn. Das `OrderBook` selbst ist bewusst nur im Speicher — nach einem Neustart lieber erneut „Messung starten“ als ein Auftrag unbestimmten Alters.
+- **Feste Dateinamen je Arbeitsplatz** (`{ap}` = Endung, wie bei sono-gdt): T2med liest je Arbeitsplatz nur seine Datei. Liegt sie noch, antwortet `/gdt/send` mit 409 statt zu überschreiben. Der Arbeitsplatz steht beim Knopf in `%APPDATA%\Steno\steno.ini`, im Browser in `localStorage` (Einstellungen-Modal), bei nur einem konfigurierten automatisch.
+- **6220-Text:** `plain_text()` entfernt Markdown; jede Zeile ein Feld, auf `GDT_ZEILENBREITE` (60, GDT 2.1) umgebrochen, Leerzeilen fallen weg. Typografie, die es in CP437 nicht gibt („“ – …), wird vor dem Kodieren umgeschrieben (`_TYPOGRAPHY`), sonst stünde in T2med `?`. Wie T2med die umgebrochenen Zeilen zusammensetzt, ist noch ungetestet (Testplan Punkt 6).
+- **Name und Geburtsdatum gehen nicht ans LLM.** Das Geschlecht aus dem Auftrag steuert nur „der Patient / die Patientin“: beim Knopf direkt (`_steno_process()`), in der Browser-UI belegt es die Geschlechtsauswahl vor (zwischen zwei Aufnahmen, nie mittendrin).
+- **Anhang:** nur mit `GDT_PVS_PFAD` (Windows-Sicht auf den Austauschordner) und nicht bei Psychotherapie — Textdatei mit ungekürzter Dokumentation und Transkript in `<GDT_DIR>/anhaenge/`, UTF-8 mit BOM, 6302–6305. Bei 409 wird er wieder gelöscht.
+- **`TZ=Europe/Berlin`** im Container: `started` kommt als lokale Zeit ohne Zone aus dem Browser (`localIsoTime()`) bzw. vom Knopf (`local_iso()`), nur der Rückfall nimmt `datetime.now()`; außerdem benennt `_save_log()` die Logs damit in Ortszeit.
+
+**Steno-Knopf (`client/steno.py`):** Tkinter, ein Fenster ohne Rahmen (`overrideredirect`), `-topmost`, alle 500 ms erneut nach vorn geholt (andere Programme holen sich „topmost“ gelegentlich). Bedienung und Einstellungen (`%APPDATA%\Steno\steno.ini`): `client/README.md`. Bewusste Entscheidungen:
+- **Nativer Client statt Browser:** ein Browser-Tab kann nicht über T2med liegen. Document-Picture-in-Picture könnte es, schließt sich aber mit dem Tab, braucht nach jedem Browserstart einen Klick und lässt sich nicht automatisch starten.
+- **Fokus bleibt bei T2med:** `windows_tweaks()` setzt `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` (kein Taskleisteneintrag). Für das Rechtsklick-Menü holt `on_menu()` das Fenster per `SetForegroundWindow` nach vorn, sonst schließt sich das Menü beim Klick daneben nicht. Beides ist auf den Praxisrechnern noch nicht erprobt.
+- **Aufnahme:** `sounddevice` (PortAudio) mono 16 kHz `int16` — das, was Whisper und pyannote ohnehin rechnen; geht die Rate nicht (WASAPI exklusiv), die des Geräts. Geschrieben wird laufend als FLAC (`soundfile`) in einem eigenen Thread, damit ein Absturz nach 45 min nicht die Sitzung kostet; libsndfile schreibt die Länge erst beim Schließen, ffmpeg auf dem Server liest den Rest trotzdem. Der Pegel je Block (RMS) setzt `last_sound` für den Stille-Stopp.
+- **Ausgang (`Spool`):** `<id>.flac` + `<id>.json` in `%LOCALAPPDATA%\Steno\aufnahmen`, Zustände `aufnahme` → `bereit` → `hochgeladen` → gelöscht, oder `fehler`. `upload_loop()` arbeitet ihn alle 3 s ab; 4xx = `fehler` (wird nicht besser), Netzfehler = später erneut. `recover()` reiht nach einem Absturz halbfertige Aufnahmen ein. „Erneut senden“ (`renew()`) vergibt eine **neue** ID, denn unter der alten kennt der Server den Fehlschlag.
+- **Regeln für Aufträge (`on_order()`):** neuer Auftrag im Leerlauf → beanspruchen und aufnehmen; beim ersten Abruf nach dem Start nur anzeigen (könnte von vor einer Stunde sein); während einer Aufnahme → nachfragen (`ask_switch()`), gleicher Patient → nur abräumen. Kann der Auftrag wegen eines Netzfehlers nicht beansprucht werden, wird er trotzdem benutzt — er kam für diesen Arbeitsplatz und ist der jüngste; ein ausdrückliches `claimed: false` (verfallen) dagegen heißt „ohne Patient“.
+- **Fehlklick:** unter `mindest_sekunden` (5) wird verworfen, ein beanspruchter Auftrag geht zurück an den Knopf und gilt für die nächste Aufnahme. Die Wahl „Art des Gesprächs“ gilt für **eine** Aufnahme und springt danach auf „Automatisch“ zurück — eine liegengebliebene Psychotherapie-Einstellung beim nächsten Sprechstunden-Patienten wäre der schlechtere Fehler.
+- **Nur eine Instanz** (benannter Mutex `Local\Steno-Knopf`): Autostart plus Doppelklick sollen nicht zwei Knöpfe ergeben, die denselben Auftrag beanspruchen.
+- **DPI:** `SetProcessDpiAwareness(1)`, Maße mit `winfo_fpixels("1i") / 96` skaliert; Texte werden per `fit()` auf die Breite gekürzt statt umgebrochen.
+- **ini mit Kommentaren am Zeilenende** (`inline_comment_prefixes`): ohne das wäre `mikrofon =   ; Teil des Namens` der Wert „; Teil des Namens“.
+- Das Protokoll (`%LOCALAPPDATA%\Steno\steno.log`) enthält Patientennummern, keine Namen.
+
+**Logging-Modus:** Globaler In-Memory-Schalter `logging_enabled` (per `/logging-mode` gesetzt, UI-Toggle im Einstellungen-Modal). Wenn aktiv, schreibt `_save_log()` Transkript + Analyse als JSON nach `LOG_DIR` (Dateiname `YYYYMMDD_HHMMSS_<mode>.json`) — für Browser-UI und Knopf, **nie** für `mode=psycho`.
 
 ---
 
@@ -199,13 +233,19 @@ Das Modell ist auf Hugging Face gated (CC-BY-4.0, nur Registrierung; ein Repo st
 | `LOG_DIR` | `/logs` | Zielverzeichnis für Logging-Modus (`_save_log()`) |
 | `GDT_DIR` | leer (Compose: `/gdt`) | GDT-Austauschordner mit T2med; leer oder nicht vorhanden = Anbindung aus, Frontend blendet sie aus |
 | `GDT_ARBEITSPLAETZE` | `001` | `Nummer[=Name];…` — Nummer = Endung der Austauschdateien |
-| `GDT_DATEINAME` / `GDT_AUFTRAG_DATEINAME` | `T2MDKITR.{ap}` / `KITRT2MD.{ap}` | Ergebnis (T2med „Dateiname Import“) / Auftrag (T2med „Dateiname Export“) |
-| `GDT_ID_PVS` / `GDT_ID_GERAET` | `T2MED` / `KI_TRANS` | 8315 / 8316, müssen zur Gerätekonfiguration in T2med passen |
+| `GDT_DATEINAME` / `GDT_AUFTRAG_DATEINAME` | `T2MDSTNO.{ap}` / `STNOT2MD.{ap}` | Ergebnis (T2med „Dateiname Import“) / Auftrag (T2med „Dateiname Export“) |
+| `GDT_ID_PVS` / `GDT_ID_GERAET` | `T2MED` / `STENO` | 8315 / 8316, müssen zur Gerätekonfiguration in T2med passen |
+| `GDT_PSY_DATEINAME` / `GDT_PSY_AUFTRAG_DATEINAME` | leer (Compose: auskommentiert `T2MDSTNP.{ap}` / `STNPT2MD.{ap}`) | zweites T2med-Gerät „Steno Psychotherapie“; nur beide zusammen |
+| `GDT_PSY_ID_GERAET` | `STENO_PT` | 8316 für das Psychotherapie-Gerät |
 | `GDT_ZEICHENSATZ` | `2` | 9206: 1 = 7 Bit, 2 = CP437, 3 = CP1252 |
 | `GDT_KENNFELD` | `ALLG00` | 8402 |
 | `GDT_AUFTRAG_GUELTIG` | `60` | Minuten, die ein „Messung starten“ auf seine Aufnahme wartet |
 | `GDT_ZEILENBREITE` | `60` | Umbruch der Freitextzeilen (6220/6227) |
 | `GDT_PVS_PFAD` | leer | Windows-Pfad, unter dem T2med den Austauschordner sieht; nur für den Transkript-Anhang |
+| `STENO_MODUS` | `abpro` | Dokumentationsart des Knopfs für Sprechstunden |
+| `STENO_PSY_AB_MINUTEN` | `20` | ab dieser Länge ohne Vorgabe LLM-Rückfrage „Psychotherapie?“ |
+| `STENO_SENDEN_WARTEN` | `60` | Minuten, die eine fertige Dokumentation auf die Abholung der vorigen wartet |
+| `STENO_AUFBEWAHRUNG` | `12` | Stunden, die fertige Knopf-Aufträge (mit Text) für `/verlauf` im Speicher bleiben |
 
 Die Variablen der geteilten Container (Whisper: `WHISPER__*`; Diarisation: `PYANNOTE_MODEL`, `DIARIZE_DEVICE`, `TORCH_THREADS`, Build-Argument `TORCH_INDEX_URL`) stehen in `../ki-transcribe/docker-compose.yml` und dessen CLAUDE.md. `WHISPER__ALLOW_DOWNLOADS=true` dort ist Voraussetzung dafür, dass `WHISPER_MEDICAL_MODEL` und `WHISPER_FAST_MODEL` geladen werden.
 
@@ -233,9 +273,13 @@ curl localhost:8011/health      # whisper/ollama/diarize müssen "ok" melden
 pip install -r requirements-dev.txt
 pytest
 ```
-Abgedeckt sind die reinen Funktionen (Schleifen, Sprecherzuordnung, `ThinkingFilter`, Prompt-Bau, GDT-Satzbau und Auftragslesen) und alle Endpoints; die GDT-Endpoints laufen gegen einen Temp-Ordner (`tests/test_gdt.py`). Die Endpoint-Tests ersetzen Whisper, Diarisation und ollama durch eine Attrappe an `httpx.AsyncClient` (`tests/conftest.py`) und legen die **SSE-Abfolge** fest — sie ist der Vertrag mit dem Frontend. Ein `xfail` markiert einen bekannten Fehler: `_collapse_degenerate()` schneidet bis zum Ende des letzten entarteten 40er-Fensters und nimmt dabei echte Wörter direkt hinter einer Schleife mit.
+Abgedeckt sind die reinen Funktionen (Schleifen, Sprecherzuordnung, `ThinkingFilter`, Prompt-Bau, GDT-Satzbau und Auftragslesen) und alle Endpoints; die GDT-Endpoints laufen gegen einen Temp-Ordner (`tests/test_gdt.py`). Die Knopf-Aufträge (`tests/test_steno.py`) laufen als Hintergrund-Task und brauchen deshalb `with TestClient(...)` — ohne Kontextmanager endet die Ereignisschleife nach jeder Anfrage und mit ihr der Task. `tests/test_client.py` prüft den Knopf ohne Mikrofon: Ausgang, Pegel, Upload gegen den echten Server per HTTP und die Auftragsregeln (`App` mit verborgenem Tk-Fenster, Attrappen für Recorder und Server). Er wird übersprungen, wenn `client/requirements.txt` nicht installiert ist; die `App`-Tests auch ohne Anzeige (Tk wirft dann `TclError`). Die Endpoint-Tests ersetzen Whisper, Diarisation und ollama durch eine Attrappe an `httpx.AsyncClient` (`tests/conftest.py`) und legen die **SSE-Abfolge** fest — sie ist der Vertrag mit dem Frontend. Ein `xfail` markiert einen bekannten Fehler: `_collapse_degenerate()` schneidet bis zum Ende des letzten entarteten 40er-Fensters und nimmt dabei echte Wörter direkt hinter einer Schleife mit.
 
-Das Frontend hat keine Tests. Zum Durchspielen den Server lokal gegen die echten Dienste starten, ohne den Container anzufassen — alle drei sind auf localhost veröffentlicht: `WHISPER_HOST=127.0.0.1 WHISPER_PORT=8001 DIARIZE_HOST=127.0.0.1 DIARIZE_PORT=8002 OLLAMA_HOST=127.0.0.1 uvicorn server:app --port 8099`.
+Die Browser-UI hat keine Tests, am Knopf nur die Regeln, nicht Aussehen und Fensterverhalten. Zum Durchspielen den Server lokal gegen die echten Dienste starten, ohne den Container anzufassen — alle drei sind auf localhost veröffentlicht: `WHISPER_HOST=127.0.0.1 WHISPER_PORT=8001 DIARIZE_HOST=127.0.0.1 DIARIZE_PORT=8002 OLLAMA_HOST=127.0.0.1 uvicorn server:app --port 8099`. Für den Knopf zusätzlich `GDT_DIR` auf einen Testordner setzen und `python client/steno.py --server http://127.0.0.1:8099 --arbeitsplatz 001` starten; einen Auftrag simuliert eine 6302-Datei `STNOT2MD.001` in diesem Ordner (Aufbau: `t2med_order()` in `tests/test_gdt.py`). **Achtung:** der Knopf schreibt seine Einstellungen nach `%APPDATA%\Steno` — zum Probieren `APPDATA`/`LOCALAPPDATA` auf einen Testordner umbiegen, sonst landen Testaufnahmen im echten Ausgang.
+
+**Knopf bauen** (Windows, Python 3.13): `powershell -ExecutionPolicy Bypass -File client\build.ps1` → `client\dist\Steno.exe` (PyInstaller `--onefile --noconsole`, ~28 MB; `.venv`, `build`, `dist` sind gitignored). Die Hooks für `sounddevice`/`soundfile` bringt `pyinstaller-hooks-contrib` mit.
+
+**Versionen:** `VERSION` in `server.py`, `client/steno.py` und die Datei `VERSION` gemeinsam anheben.
 
 ---
 
@@ -243,6 +287,6 @@ Das Frontend hat keine Tests. Zum Durchspielen den Server lokal gegen die echten
 
 - **Alle Dienste hinter der Web-App sind geteilt und extern:** `diktat-whisper` und `diktat-diarize` (aus `../ki-transcribe`), `ollama` (eigener Container). Sie müssen laufen, und `diktat-network`, `ollama-net` und `caddy-proxy-network` müssen existieren — sonst bricht `docker compose up` hier mit „network … not found“ ab. Neustarts, Updates und Änderungen an Whisper-Patch oder Diarisation passieren in `../ki-transcribe` und wirken auf gespraech-web, ki-atteste und diesen Container zugleich.
 - **Geteilte Last:** Analysen aus gespraech-web und transcribe-gdt-web laufen auf derselben GPU, demselben Whisper und demselben ollama. Gleichzeitige Analysen warten aufeinander. `OLLAMA_NUM_CTX` und `OLLAMA_MODEL` bewusst gleich lassen wie in ki-transcribe: ein abweichendes `num_ctx` lässt ollama das Modell bei jedem Wechsel zwischen den Apps neu laden.
-- **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `gdt.py`, `templates/` und `static/` read-only in den Container — Änderungen wirken ohne Rebuild, nur `docker compose restart transcribe-gdt-web` ist nötig. Rebuild (`docker compose up -d --build`) braucht es nur bei `requirements-server.txt` oder `Dockerfile`.
-- **Erreichbarkeit:** nur `127.0.0.1:8011` auf dem Docker-Rechner. Für die Arbeitsplätze braucht es eine Caddy-Route in `../caddy-proxy/Caddyfile` (wie `transcribe.hausarzt-rothenburg.de` → `gespraech-web:8000`, hier → `transcribe-gdt-web:8000`) und einen DNS-Eintrag. Das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`.
+- **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `gdt.py`, `templates/` und `static/` read-only in den Container — Änderungen wirken ohne Rebuild, nur `docker compose restart transcribe-gdt-web` ist nötig. Rebuild (`docker compose up -d --build`) braucht es nur bei `requirements-server.txt` oder `Dockerfile`. Ein Neustart verwirft laufende Knopf-Aufträge (nur im Speicher) — harmlos, die Knöpfe laden nach dem 404 erneut hoch, aber eine Analyse beginnt dann von vorn. `client/` gehört nicht in den Container.
+- **Erreichbarkeit:** nur `127.0.0.1:8011` auf dem Docker-Rechner. Für die Arbeitsplätze braucht es eine Caddy-Route in `../caddy-proxy/Caddyfile` (wie `transcribe.hausarzt-rothenburg.de` → `gespraech-web:8000`, hier → `transcribe-gdt-web:8000`) und einen DNS-Eintrag. Das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`. Auch der Steno-Knopf braucht diese Route: er lädt Gesprächsaudio hoch, das gehört nicht unverschlüsselt ins Praxisnetz. Eine Anmeldung gibt es nicht — wer `/steno/jobs` erreicht, kann Einträge nach T2med schicken; die Route also auf das Praxisnetz beschränken.
 - **`depends_on` nicht wieder einführen:** in ki-transcribe stoppt `docker compose up -d --build gespraech-web` über `depends_on` den geteilten Whisper mit. Hier gibt es keine Abhängigkeiten, ein `up`/`down` fasst nur `transcribe-gdt-web` an.

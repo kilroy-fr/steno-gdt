@@ -1,7 +1,7 @@
 services:
 
   # ============================================================
-  # KI-Gesprächsanalyse mit T2med-Anbindung (GDT)
+  # Steno: Gespraeche mitschreiben, Dokumentation per GDT an T2med
   # ============================================================
   # Nur die Web-App. Whisper, Sprechertrennung und ollama laufen schon und
   # werden mitbenutzt — wie ki-transcribe und ki-atteste es auch tun:
@@ -51,17 +51,33 @@ services:
       # --- T2med per GDT (gdt.py, Einrichtung: T2MED-EINRICHTUNG.md) ---
       # Austauschordner im Container; der Mount unten legt fest, was dahinter liegt.
       - GDT_DIR=/gdt
-      # Arbeitsplatznummer = Endung der Austauschdateien (KITRT2MD.001 / T2MDKITR.001)
+      # Arbeitsplatznummer = Endung der Austauschdateien (STNOT2MD.001 / T2MDSTNO.001)
       - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3
       - GDT_ID_PVS=T2MED
-      - GDT_ID_GERAET=KI_TRANS
+      - GDT_ID_GERAET=STENO
       - GDT_ZEICHENSATZ=2
       - GDT_KENNFELD=ALLG00
       # Minuten, die ein "Messung starten" auf seine Aufnahme wartet
       - GDT_AUFTRAG_GUELTIG=60
       # Wie T2med den Austauschordner sieht - nur fuer den Transkript-Anhang,
-      # leer = kein Anhang. Beispiel: \\192.168.2.70\ki-transcribe-gdt
+      # leer = kein Anhang. Beispiel: T:\ (Netzlaufwerk, wie S:\ bei sono-gdt)
       - GDT_PVS_PFAD=
+      # Zweites T2med-Geraet "Steno Psychotherapie" (T2MED-EINRICHTUNG.md).
+      # Erst einkommentieren, wenn es an ALLEN Arbeitsplaetzen in T2med
+      # eingerichtet ist — sonst holt niemand die Ergebnisdatei ab.
+      # - GDT_PSY_DATEINAME=T2MDSTNP.{ap}
+      # - GDT_PSY_AUFTRAG_DATEINAME=STNPT2MD.{ap}
+      # - GDT_PSY_ID_GERAET=STENO_PT
+      # --- Steno-Knopf (client/, Einrichtung: client/README.md) ---
+      # Dokumentationsart fuer Sprechstunden (abpro | analyze | summary)
+      - STENO_MODUS=abpro
+      # Ab dieser Laenge fragt der Server ohne Vorgabe das Sprachmodell, ob es
+      # eine Psychotherapie-Sitzung war
+      - STENO_PSY_AB_MINUTEN=20
+      # Minuten, die eine fertige Dokumentation auf die Abholung durch T2med wartet
+      - STENO_SENDEN_WARTEN=60
+      # Stunden, die fertige Auftraege (mit Text) fuer /verlauf im Speicher bleiben
+      - STENO_AUFBEWAHRUNG=12
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
       - ./server.py:/app/server.py:ro
@@ -108,5 +124,5 @@ networks:
 #     driver: local
 #     driver_opts:
 #       type: cifs
-#       device: //192.168.2.70/ki-transcribe-gdt
+#       device: //192.168.2.70/steno-gdt
 #       o: "username=${GDT_SMB_USER},password=${GDT_SMB_PASSWORD},uid=0,gid=0,file_mode=0660,dir_mode=0770,vers=3.0"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-KI-Gesprächsanalyse – Transkription und strukturierte Analyse von Patientengesprächen
+Steno – Arzt-Patienten-Gespraeche und Psychotherapie-Sitzungen mitschreiben,
+zusammenfassen und per GDT an T2med uebergeben.
 """
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -23,8 +24,12 @@ from prompts import (
     ABPRO_PROMPT,
     ANALYZE_PROMPT,
     CLEAN_PROMPT,
+    PSY_CLASSIFY_PROMPT,
+    PSYCHO_PROMPT,
     SPEAKER_CONTEXT_DIARIZED,
     SPEAKER_CONTEXT_PLAIN,
+    SPEAKER_CONTEXT_PSY_DIARIZED,
+    SPEAKER_CONTEXT_PSY_PLAIN,
     SUBJECT_PROMPT,
     SUMMARY_PROMPT,
 )
@@ -33,7 +38,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.9.12"
+VERSION = "0.10.0"
 
 
 def _flag(value: str) -> bool:
@@ -98,6 +103,14 @@ LOG_DIR = os.getenv("LOG_DIR", "/logs")
 # vorhandenen Ordner zeigt — dann blendet das Frontend alles dazu aus.
 GDT = gdt.Settings.from_env()
 gdt_orders = gdt.OrderBook()
+# Steno-Knopf (client/steno.py): Dokumentationsart fuer Sprechstunden, ab
+# welcher Laenge ohne Vorgabe gefragt wird, ob es eine Psychotherapie-Sitzung
+# war, wie lange auf die Abholung durch T2med gewartet wird und wie lange
+# fertige Auftraege (mit Text!) im Speicher bleiben.
+STENO_MODUS = os.getenv("STENO_MODUS", "abpro")
+STENO_PSY_AB_MINUTEN = float(os.getenv("STENO_PSY_AB_MINUTEN", "20"))
+STENO_SENDEN_WARTEN = float(os.getenv("STENO_SENDEN_WARTEN", "60"))
+STENO_AUFBEWAHRUNG = float(os.getenv("STENO_AUFBEWAHRUNG", "12"))
 
 WHISPER_URL = f"http://{WHISPER_HOST}:{WHISPER_PORT}"
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
@@ -424,6 +437,10 @@ def _num_predict(mode: str, transcript: str) -> int:
     braucht deshalb mindestens so viel Platz, wie es lang ist."""
     if mode == "clean":
         return max(_NUM_PREDICT, int(_estimate_tokens(transcript) * 1.2))
+    if mode == "psycho":
+        # Ausfuehrliche Zusammenfassung einer 50-min-Sitzung: mehr Luft als
+        # fuer eine Sprechstunden-Doku, damit nichts mit done_reason=length endet.
+        return _NUM_PREDICT * 2
     return _NUM_PREDICT
 
 
@@ -865,11 +882,14 @@ def _build_prompt(mode: str, transcript: str, gender: str, diarized: bool) -> st
         "analyze": ANALYZE_PROMPT,
         "abpro": ABPRO_PROMPT,
         "summary": SUMMARY_PROMPT,
+        "psycho": PSYCHO_PROMPT,
     }.get(mode, CLEAN_PROMPT)
     gender_context = _gender_context(gender)
-    speaker_context = (
-        SPEAKER_CONTEXT_DIARIZED if diarized else SPEAKER_CONTEXT_PLAIN
-    ).format(**gender_context)
+    if mode == "psycho":
+        speaker = SPEAKER_CONTEXT_PSY_DIARIZED if diarized else SPEAKER_CONTEXT_PSY_PLAIN
+    else:
+        speaker = SPEAKER_CONTEXT_DIARIZED if diarized else SPEAKER_CONTEXT_PLAIN
+    speaker_context = speaker.format(**gender_context)
     return template.format(
         transcript=transcript,
         medical_glossary=MEDICAL_GLOSSARY,
@@ -931,7 +951,8 @@ async def _analysis_events(transcript: str, mode: str, gender: str, model: str,
         yield _sse("error", f"KI-Fehler: {e}")
         return
 
-    if logging_enabled and tokens:
+    # Psychotherapie-Sitzungen landen nie im Log — auch nicht zur Fehlersuche.
+    if logging_enabled and tokens and mode != "psycho":
         _save_log(transcript, "".join(tokens), mode, model, gender, diarized, loop_share)
     yield _sse("done")
 
@@ -951,7 +972,7 @@ async def _save_upload(audio: UploadFile) -> str:
 # ============================================================
 # ROUTEN
 # ============================================================
-app = FastAPI(title="KI-Gesprächsanalyse")
+app = FastAPI(title="Steno")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -1147,6 +1168,7 @@ async def get_subject(transcript: str = Form(...), model: str = Form(default=Non
 _MODE_LABELS = {
     "analyze": "Analyse", "abpro": "A/B/PRO-Dokumentation",
     "summary": "Zusammenfassung", "clean": "bereinigtes Transkript",
+    "psycho": "Psychotherapie-Sitzung",
 }
 
 
@@ -1168,6 +1190,21 @@ def _parse_started(value) -> datetime:
         return datetime.now()
 
 
+def _parse_order(value) -> gdt.Order | None:
+    """Auftrag, wie ihn Frontend oder Knopf zurueckschicken; wirft HTTP 400."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value.strip() else None
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Ungültiger Auftrag: {e}")
+    if not value:
+        return None
+    try:
+        return gdt.Order.from_dict(value)
+    except (ValueError, TypeError, AttributeError) as e:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Auftrag: {e}")
+
+
 def _write_transcript_attachment(ap: str, started: datetime, text: str, transcript: str):
     """Transkript als Textdatei neben die GDT-Datei; liefert (Datei, Anhang fuer 6302-6305).
 
@@ -1177,7 +1214,7 @@ def _write_transcript_attachment(ap: str, started: datetime, text: str, transcri
     """
     folder = Path(GDT.directory) / "anhaenge"
     folder.mkdir(exist_ok=True)
-    stem = f"KITR_{ap}_{started:%Y%m%d_%H%M%S}"
+    stem = f"STENO_{ap}_{started:%Y%m%d_%H%M%S}"
     path = folder / f"{stem}.txt"
     n = 1
     while path.exists():
@@ -1190,6 +1227,48 @@ def _write_transcript_attachment(ap: str, started: datetime, text: str, transcri
     path.write_text(content.replace("\n", "\r\n"), encoding="utf-8-sig", newline="")
     pvs = f"{GDT.pvs_path.rstrip(chr(92))}\\anhaenge\\{path.name}"
     return path, (path.stem, "TXT", f"Transkript {started:%d.%m.%Y %H:%M}", pvs)
+
+
+def _deliver_gdt(ap: str, order: gdt.Order | None, text: str, transcript: str, mode: str,
+                 model: str, started: datetime, warning: str = "",
+                 notes: tuple = ()) -> tuple[Path, gdt.Record]:
+    """Satz 6310 ablegen. Wirft FileExistsError, solange T2med die vorige Datei
+    dieses Arbeitsplatzes nicht abgeholt hat, und OSError, wenn der Ordner
+    nicht beschreibbar ist — in beiden Faellen bleibt nichts liegen.
+
+    Psychotherapie-Sitzungen bekommen nie einen Transkript-Anhang: in T2med
+    steht die Zusammenfassung, das Wortprotokoll einer Sitzung gehoert nicht
+    in die Kartei.
+    """
+    psycho = mode == "psycho"
+    pattern, id_device = GDT.result_target(order, psycho)
+    comments = [f"KI-generiert ({_MODE_LABELS.get(mode, 'Dokumentation')}, "
+                f"Steno {VERSION}, Modell {model or OLLAMA_MODEL}). Vor Übernahme prüfen."]
+    comments.extend(notes)
+    if warning:
+        comments.append(f"Warnung: {warning}")
+    if not order:
+        comments.append("Ohne Messauftrag gesendet, bitte Patient zuordnen.")
+    workstation = GDT.workstations[ap]
+    comments.append(f"Arbeitsplatz {ap}" + (f" ({workstation})" if workstation else ""))
+
+    attachment_file, attachments = None, []
+    if GDT.pvs_path and transcript and not psycho:
+        attachment_file, attachment = _write_transcript_attachment(ap, started, text, transcript)
+        attachments.append(attachment)
+
+    record = gdt.build_result(GDT, order, text, started, comments, attachments, VERSION, id_device)
+    target = GDT.path(pattern, ap)
+    try:
+        gdt.write_exclusive(record.encode(), target)
+    except OSError:
+        if attachment_file:
+            attachment_file.unlink(missing_ok=True)
+        raise
+    logger.info(f"An T2med übergeben: {target.name}, "
+                f"{order.label if order else 'ohne Auftrag (Pat.-Nr. 0)'}, "
+                f"{len(text)} Zeichen" + (f", Anhang {attachment_file.name}" if attachment_file else ""))
+    return target, record
 
 
 @app.get("/gdt/order")
@@ -1221,50 +1300,261 @@ async def gdt_send(request: Request):
     text = str(body.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Keine Dokumentation zum Senden.")
+    order = _parse_order(body.get("order"))
     try:
-        order = gdt.Order.from_dict(body["order"]) if body.get("order") else None
-    except (ValueError, TypeError) as e:
-        raise HTTPException(status_code=400, detail=f"Ungültiger Auftrag: {e}")
-    started = _parse_started(body.get("started"))
-
-    comments = [f"KI-generiert ({_MODE_LABELS.get(body.get('mode'), 'Dokumentation')}, "
-                f"KI-Transcribe {VERSION}, Modell {body.get('model') or OLLAMA_MODEL}). "
-                "Vor Übernahme prüfen."]
-    if body.get("warning"):
-        comments.append(f"Warnung: {body['warning']}")
-    if not order:
-        comments.append("Ohne Messauftrag gesendet, bitte Patient zuordnen.")
-    workstation = GDT.workstations[ap]
-    comments.append(f"Arbeitsplatz {ap}" + (f" ({workstation})" if workstation else ""))
-
-    attachment_file, attachments = None, []
-    transcript = str(body.get("transcript") or "").strip()
-    if GDT.pvs_path and transcript:
-        attachment_file, attachment = _write_transcript_attachment(ap, started, text, transcript)
-        attachments.append(attachment)
-
-    record = gdt.build_result(GDT, order, text, started, comments, attachments, VERSION)
-    target = GDT.path(GDT.result_filename, ap)
-    try:
-        gdt.write_exclusive(record.encode(), target)
-    except FileExistsError:
-        if attachment_file:
-            attachment_file.unlink(missing_ok=True)
+        target, record = _deliver_gdt(
+            ap, order, text, str(body.get("transcript") or "").strip(), body.get("mode") or "",
+            body.get("model") or OLLAMA_MODEL, _parse_started(body.get("started")),
+            str(body.get("warning") or ""),
+        )
+    except FileExistsError as e:
         raise HTTPException(
             status_code=409,
-            detail=f"T2med hat die vorige Übergabe ({target.name}) noch nicht abgeholt. "
-                   f"Läuft T2med an Arbeitsplatz {ap}?",
+            detail=f"T2med hat die vorige Übergabe ({Path(e.filename).name}) noch nicht "
+                   f"abgeholt. Läuft T2med an Arbeitsplatz {ap}?",
         )
     except OSError as e:
-        if attachment_file:
-            attachment_file.unlink(missing_ok=True)
-        logger.error(f"GDT-Datei {target} nicht schreibbar: {_exc_text(e)}")
+        logger.error(f"GDT-Datei nicht schreibbar: {_exc_text(e)}")
         raise HTTPException(status_code=500, detail=f"GDT-Datei nicht schreibbar: {e}")
-
-    logger.info(f"An T2med übergeben: {target.name}, "
-                f"{order.label if order else 'ohne Auftrag (Pat.-Nr. 0)'}, "
-                f"{len(text)} Zeichen" + (f", Anhang {attachment_file.name}" if attachment_file else ""))
     return {"file": target.name, "patid": record.get("3000")}
+
+
+# ============================================================
+# STENO-KNOPF (client/steno.py)
+# ============================================================
+# Der Knopf auf dem Arbeitsplatz nimmt auf und laedt die Aufnahme hoch, mehr
+# nicht. Alles Weitere laeuft hier ohne offenen Browser bis zur GDT-Datei:
+# Transkription + Sprechertrennung, Modus bestimmen, Dokumentation, Ablage.
+# Gesendet wird automatisch — geprueft wird in T2med; die Zuordnung kommt nur
+# aus dem Auftrag, den der Knopf beim Start beansprucht hat, ohne ihn geht
+# 3000=0 an "Ext. Aufträge".
+#
+# Bewusst nur im Speicher: die Aufnahme bleibt auf dem Arbeitsplatz liegen,
+# bis der Auftrag hier "gesendet" meldet. Kennt der Server die Auftrags-ID
+# nach einem Neustart nicht mehr, laedt der Knopf einfach noch einmal hoch.
+STENO_STATES_DONE = ("gesendet", "fehler")
+_STENO_ID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
+_STENO_REQUEST_MODES = ("auto", "sprechstunde", "psycho")
+_STENO_SEND_INTERVAL = 5.0
+
+
+class StenoError(Exception):
+    """Fehler mit einer Meldung, die so am Knopf stehen kann."""
+
+
+@dataclass
+class StenoJob:
+    id: str
+    ap: str
+    order: gdt.Order | None
+    request_mode: str          # auto | sprechstunde | psycho (Wahl am Knopf)
+    started: datetime
+    duration: float            # Sekunden laut Knopf
+    audio_path: str
+    filename: str
+    created: float = field(default_factory=time.time)
+    finished: float = 0.0
+    state: str = "wartet"      # wartet, transkribiert, schreibt, sendet, gesendet, fehler
+    detail: str = ""
+    mode: str = ""
+    mode_note: str = ""        # z. B. "automatisch als Psychotherapie erkannt"
+    transcript: str = ""
+    text: str = ""
+    warning: str = ""
+    file: str = ""
+    patid: str = ""
+
+    def to_dict(self, full: bool = False) -> dict:
+        d = {
+            "id": self.id, "ap": self.ap, "state": self.state, "detail": self.detail,
+            "mode": self.mode, "mode_note": self.mode_note, "warning": self.warning,
+            "file": self.file, "patid": self.patid,
+            "patient": self.order.label if self.order else "",
+            "started": self.started.isoformat(timespec="seconds"),
+            "duration": round(self.duration),
+        }
+        if full:
+            d.update(transcript=self.transcript, text=self.text)
+        return d
+
+
+steno_jobs: dict[str, StenoJob] = {}
+_steno_tasks: set = set()
+# Ein Auftrag nach dem anderen auf die GPU: Whisper, Diarisation und ollama
+# sind mit gespraech-web und ki-atteste geteilt, und drei gleichzeitig
+# beendete Sprechstunden sollen einander nicht in den Timeout treiben.
+_steno_gpu = asyncio.Semaphore(1)
+
+
+def _steno_prune(now: float):
+    """Fertige Auftraege nach STENO_AUFBEWAHRUNG Stunden vergessen — samt Text."""
+    limit = STENO_AUFBEWAHRUNG * 3600
+    for job_id in [j.id for j in steno_jobs.values() if j.finished and now - j.finished > limit]:
+        del steno_jobs[job_id]
+
+
+async def _steno_mode(job: StenoJob, text: str, seconds: float) -> tuple[str, str]:
+    """(Modus, Vermerk). Vorrang: Wahl am Knopf, dann das T2med-Geraet des
+    Auftrags, zuletzt — nur bei langen Aufnahmen — eine Rueckfrage beim
+    Sprachmodell. Die Dauer allein entscheidet nie: ein Check-up dauert auch
+    25 Minuten."""
+    if job.request_mode == "psycho":
+        return "psycho", ""
+    if job.request_mode == "sprechstunde":
+        return STENO_MODUS, ""
+    if job.order and job.order.device == "psy":
+        return "psycho", ""
+    if seconds < STENO_PSY_AB_MINUTEN * 60:
+        return STENO_MODUS, ""
+    try:
+        answer = await _call_llm(PSY_CLASSIFY_PROMPT.format(transcript=text[:6000]), OLLAMA_MODEL)
+    except Exception as e:
+        logger.warning(f"Steno {job.id}: Psychotherapie-Erkennung fehlgeschlagen: {_exc_text(e)}")
+        return STENO_MODUS, ""
+    logger.info(f"Steno {job.id}: {seconds / 60:.0f} min, Einordnung: {answer[:40]!r}")
+    if "PSYCHOTHERAPIE" in answer.upper():
+        return "psycho", "Automatisch als Psychotherapie-Sitzung erkannt."
+    return STENO_MODUS, ""
+
+
+async def _steno_process(job: StenoJob):
+    job.state, job.detail = "transkribiert", ""
+    result, labeled = await _transcribe_and_diarize(job.audio_path, job.filename, "de")
+    if _is_hallucination(result.text) or len(result.text.strip()) < 10:
+        raise StenoError("Kein Gespräch in der Aufnahme erkannt.")
+    job.transcript = labeled or result.text
+    job.warning = _loop_warning(result.loop_share) or ""
+    seconds = result.units[-1]["end"] if result.units else job.duration
+    job.mode, job.mode_note = await _steno_mode(job, result.text, max(seconds, job.duration))
+
+    job.state = "schreibt"
+    sex = job.order.sex if job.order else ""
+    gender = {"M": "male", "W": "female"}.get(sex, "neutral")
+    prompt = _build_prompt(job.mode, job.transcript, gender, labeled is not None)
+    tokens, warnings = [], []
+    async for kind, text in _stream_llm(prompt, OLLAMA_MODEL, _num_predict(job.mode, job.transcript)):
+        (tokens if kind == "token" else warnings).append(text)
+    job.text = "".join(tokens).strip()
+    if not job.text:
+        raise StenoError("Das Sprachmodell hat keine Dokumentation geliefert.")
+    job.warning = " ".join(w for w in (job.warning, *warnings) if w)
+    if logging_enabled and job.mode != "psycho":
+        _save_log(job.transcript, job.text, job.mode, OLLAMA_MODEL, gender,
+                  labeled is not None, result.loop_share)
+
+
+async def _steno_send(job: StenoJob):
+    """Ablegen; liegt die vorige Datei noch, wird gewartet statt ueberschrieben."""
+    job.state = "sendet"
+    deadline = time.monotonic() + STENO_SENDEN_WARTEN * 60
+    notes = (job.mode_note,) if job.mode_note else ()
+    while True:
+        try:
+            target, record = _deliver_gdt(job.ap, job.order, job.text, job.transcript, job.mode,
+                                          OLLAMA_MODEL, job.started, job.warning, notes)
+            break
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                raise StenoError(f"T2med hat die vorige Übergabe an Arbeitsplatz {job.ap} nicht "
+                                 "abgeholt. Läuft T2med dort?")
+            job.detail = "wartet, bis T2med die vorige Übergabe abgeholt hat"
+            await asyncio.sleep(_STENO_SEND_INTERVAL)
+        except OSError as e:
+            raise StenoError(f"GDT-Ordner nicht beschreibbar: {e}")
+    job.file, job.patid, job.detail = target.name, record.get("3000") or "", ""
+    job.state = "gesendet"
+
+
+async def _steno_run(job: StenoJob):
+    try:
+        async with _steno_gpu:
+            await _steno_process(job)
+        await _steno_send(job)
+    except StenoError as e:
+        job.state, job.detail = "fehler", str(e)
+    except Exception as e:
+        logger.exception(f"Steno {job.id} fehlgeschlagen")
+        job.state, job.detail = "fehler", f"Interner Fehler: {_exc_text(e)}"
+    finally:
+        job.finished = time.time()
+        Path(job.audio_path).unlink(missing_ok=True)
+        logger.info(f"Steno {job.id} ({job.ap}): {job.state}"
+                    + (f" – {job.detail}" if job.detail else "")
+                    + (f", {job.file}" if job.file else ""))
+
+
+@app.get("/steno")
+async def steno_config():
+    """Was der Knopf beim Start wissen muss."""
+    return {
+        "version": VERSION, "gdt": GDT.enabled,
+        "workstations": GDT.workstations if GDT.enabled else {},
+        "psy_device": GDT.enabled and GDT.psy_device,
+    }
+
+
+@app.post("/steno/jobs")
+async def steno_job_create(
+    id: str = Form(...),
+    ap: str = Form(...),
+    audio: UploadFile = File(...),
+    order: str = Form(default=""),
+    mode: str = Form(default="auto"),
+    started: str = Form(default=""),
+    duration: float = Form(default=0.0),
+):
+    """Aufnahme vom Knopf annehmen und im Hintergrund bis T2med durchreichen.
+
+    Die ID vergibt der Knopf: ein Wiederholungsversuch nach einem
+    Netzwerkfehler legt so keinen zweiten Auftrag an — und keine zweite
+    Karteikarte.
+    """
+    ap = _gdt_workstation(ap)
+    if not _STENO_ID_RE.fullmatch(id):
+        raise HTTPException(status_code=400, detail="Ungültige Auftrags-ID.")
+    if mode not in _STENO_REQUEST_MODES:
+        raise HTTPException(status_code=400, detail=f"Unbekannter Modus '{mode}'.")
+    _steno_prune(time.time())
+    if id in steno_jobs:
+        return steno_jobs[id].to_dict()
+    parsed_order = _parse_order(order)
+    tmp_path = await _save_upload(audio)
+    job = StenoJob(id=id, ap=ap, order=parsed_order, request_mode=mode,
+                   started=_parse_started(started), duration=max(0.0, duration),
+                   audio_path=tmp_path, filename=audio.filename or "aufnahme.flac")
+    steno_jobs[id] = job
+    logger.info(f"Steno {id} ({ap}): {os.path.getsize(tmp_path) / 1_048_576:.1f} MB, "
+                f"{job.duration / 60:.1f} min, Modus {mode}, "
+                f"{parsed_order.label if parsed_order else 'ohne Auftrag'}")
+    task = asyncio.create_task(_steno_run(job))
+    _steno_tasks.add(task)
+    task.add_done_callback(_steno_tasks.discard)
+    return job.to_dict()
+
+
+@app.get("/steno/jobs/{job_id}")
+async def steno_job_status(job_id: str):
+    job = steno_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Auftrag unbekannt.")
+    return job.to_dict()
+
+
+@app.get("/steno/jobs")
+async def steno_job_list(ap: str = ""):
+    """Juengste zuerst, mit Text — fuer die Nachschau im Browser (/verlauf)."""
+    _steno_prune(time.time())
+    jobs = [j for j in steno_jobs.values() if not ap or j.ap == ap]
+    return {"jobs": [j.to_dict(full=True) for j in sorted(jobs, key=lambda j: -j.created)]}
+
+
+@app.get("/verlauf", response_class=HTMLResponse)
+async def steno_history(request: Request, ap: str = ""):
+    return templates.TemplateResponse(
+        request=request, name="verlauf.html",
+        context={"version": VERSION, "ap": ap,
+                 "workstations": GDT.workstations if GDT.enabled else {}},
+    )
 
 
 if __name__ == "__main__":

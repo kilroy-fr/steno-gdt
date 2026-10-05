@@ -7,7 +7,7 @@ import gdt
 import server
 
 ORDER_FIELDS = [
-    ("8315", "KI_TRANS"), ("8316", "T2MED"), ("9206", "2"),
+    ("8315", "STENO"), ("8316", "T2MED"), ("9206", "2"),
     ("3000", "4711"), ("3101", "Müller"), ("3102", "Hans"),
     ("3103", "01021960"), ("3110", "1"), ("8402", "ALLG00"),
 ]
@@ -103,7 +103,7 @@ def test_settings_from_env():
     with pytest.raises(ValueError):
         gdt.Settings.from_env({"GDT_ZEICHENSATZ": "4"})
     with pytest.raises(ValueError):
-        gdt.Settings.from_env({"GDT_AUFTRAG_DATEINAME": "T2MDKITR.{ap}"})
+        gdt.Settings.from_env({"GDT_AUFTRAG_DATEINAME": "T2MDSTNO.{ap}"})
     with pytest.raises(ValueError):
         gdt.Settings.from_env({"GDT_ARBEITSPLAETZE": "Sprechzimmer"})
 
@@ -117,7 +117,7 @@ def settings(tmp_path):
 
 def test_orderbook_reads_only_stable_file_and_deletes_it(settings, tmp_path):
     book = gdt.OrderBook()
-    path = tmp_path / "KITRT2MD.001"
+    path = tmp_path / "STNOT2MD.001"
     path.write_bytes(t2med_order())
     assert book.poll(settings, "001", 1000) is None      # erster Blick: koennte noch geschrieben werden
     assert path.exists()
@@ -129,14 +129,14 @@ def test_orderbook_reads_only_stable_file_and_deletes_it(settings, tmp_path):
 
 def test_orderbook_claim_and_expiry(settings, tmp_path):
     book = gdt.OrderBook()
-    (tmp_path / "KITRT2MD.001").write_bytes(t2med_order())
+    (tmp_path / "STNOT2MD.001").write_bytes(t2med_order())
     book.poll(settings, "001", 1000)
     order = book.poll(settings, "001", 1000)
     assert not book.claim("001", "falsche-id")
     assert book.claim("001", order.id)
     assert book.poll(settings, "001", 1001) is None      # gilt fuer genau eine Aufnahme
 
-    (tmp_path / "KITRT2MD.001").write_bytes(t2med_order())
+    (tmp_path / "STNOT2MD.001").write_bytes(t2med_order())
     book.poll(settings, "001", 2000)
     assert book.poll(settings, "001", 2000) is not None
     assert book.poll(settings, "001", 2000 + 61 * 60) is None   # verfallen
@@ -144,7 +144,7 @@ def test_orderbook_claim_and_expiry(settings, tmp_path):
 
 def test_orderbook_newest_order_wins(settings, tmp_path):
     book = gdt.OrderBook()
-    path = tmp_path / "KITRT2MD.001"
+    path = tmp_path / "STNOT2MD.001"
     path.write_bytes(t2med_order())
     book.poll(settings, "001", 1000)
     book.poll(settings, "001", 1000)
@@ -156,7 +156,7 @@ def test_orderbook_newest_order_wins(settings, tmp_path):
 
 def test_orderbook_ignores_and_removes_foreign_record(settings, tmp_path):
     book = gdt.OrderBook()
-    path = tmp_path / "KITRT2MD.001"
+    path = tmp_path / "STNOT2MD.001"
     path.write_bytes(t2med_order("6310"))
     book.poll(settings, "001", 1000)
     assert book.poll(settings, "001", 1000) is None
@@ -164,12 +164,12 @@ def test_orderbook_ignores_and_removes_foreign_record(settings, tmp_path):
 
 
 def test_write_exclusive_refuses_to_overwrite(tmp_path):
-    target = tmp_path / "T2MDKITR.001"
+    target = tmp_path / "T2MDSTNO.001"
     gdt.write_exclusive(b"eins", target)
     with pytest.raises(FileExistsError):
         gdt.write_exclusive(b"zwei", target)
     assert target.read_bytes() == b"eins"
-    assert [p.name for p in tmp_path.iterdir()] == ["T2MDKITR.001"]   # keine Temp-Reste
+    assert [p.name for p in tmp_path.iterdir()] == ["T2MDSTNO.001"]   # keine Temp-Reste
 
 
 # ---------------------------------------------------------------- Endpoints
@@ -196,7 +196,7 @@ def test_gdt_disabled_by_default(client):
 
 
 def test_gdt_order_flow(client, gdt_dir):
-    (gdt_dir / "KITRT2MD.001").write_bytes(t2med_order())
+    (gdt_dir / "STNOT2MD.001").write_bytes(t2med_order())
     assert client.get("/gdt/order", params={"ap": "001"}).json() == {"order": None}
     order = client.get("/gdt/order", params={"ap": "001"}).json()["order"]
     assert order["last_name"] == "Müller" and order["birth_date"] == "1960-02-01"
@@ -212,9 +212,9 @@ def test_gdt_unknown_workstation(client, gdt_dir):
 def test_gdt_send_with_order(client, gdt_dir):
     order = gdt.order_from_fields(gdt.parse_fields(t2med_order()), "001", 1000.0).to_dict()
     r = send(client, order=order, warning="Whisper ist in eine Wiederholschleife gelaufen.")
-    assert r.json() == {"file": "T2MDKITR.001", "patid": "4711"}
-    f = fields_of(gdt_dir / "T2MDKITR.001")
-    assert f["8000"] == ["6310"] and f["8315"] == ["T2MED"] and f["8316"] == ["KI_TRANS"]
+    assert r.json() == {"file": "T2MDSTNO.001", "patid": "4711"}
+    f = fields_of(gdt_dir / "T2MDSTNO.001")
+    assert f["8000"] == ["6310"] and f["8315"] == ["T2MED"] and f["8316"] == ["STENO"]
     assert (f["3000"], f["3101"], f["3102"], f["3103"], f["3110"]) == \
         (["4711"], ["Müller"], ["Hans"], ["01021960"], ["1"])
     assert (f["6200"], f["6201"], f["8402"]) == (["03102026"], ["101530"], ["ALLG00"])
@@ -226,7 +226,7 @@ def test_gdt_send_with_order(client, gdt_dir):
 
 def test_gdt_send_without_order_goes_to_manual_assignment(client, gdt_dir):
     assert send(client).json()["patid"] == "0"
-    f = fields_of(gdt_dir / "T2MDKITR.001")
+    f = fields_of(gdt_dir / "T2MDSTNO.001")
     assert f["3000"] == ["0"] and "3101" not in f
     assert "Ohne Messauftrag" in " ".join(f["6227"])
 
@@ -235,22 +235,22 @@ def test_gdt_send_waits_for_t2med_pickup(client, gdt_dir):
     assert send(client).status_code == 200
     r = send(client, text="Zweite Dokumentation")
     assert r.status_code == 409 and "noch nicht abgeholt" in r.json()["detail"]
-    assert "Kopfschmerz" in (gdt_dir / "T2MDKITR.001").read_bytes().decode("cp437")
+    assert "Kopfschmerz" in (gdt_dir / "T2MDSTNO.001").read_bytes().decode("cp437")
 
 
 def test_gdt_send_rejects_empty_text_and_bad_order(client, gdt_dir):
     assert send(client, text="  ").status_code == 400
     assert send(client, order={"patid": "0", "last_name": "X"}).status_code == 400
-    assert not (gdt_dir / "T2MDKITR.001").exists()
+    assert not (gdt_dir / "T2MDSTNO.001").exists()
 
 
 def test_gdt_send_with_transcript_attachment(client, gdt_dir, monkeypatch):
     monkeypatch.setattr(server.GDT, "pvs_path", "\\\\nas\\ki-gdt\\")
     assert send(client).status_code == 200
-    f = fields_of(gdt_dir / "T2MDKITR.001")
-    attachment = gdt_dir / "anhaenge" / "KITR_001_20261003_101530.txt"
-    assert f["6305"] == ["\\\\nas\\ki-gdt\\anhaenge\\KITR_001_20261003_101530.txt"]
-    assert (f["6302"], f["6303"]) == (["KITR_001_20261003_101530"], ["TXT"])
+    f = fields_of(gdt_dir / "T2MDSTNO.001")
+    attachment = gdt_dir / "anhaenge" / "STENO_001_20261003_101530.txt"
+    assert f["6305"] == ["\\\\nas\\ki-gdt\\anhaenge\\STENO_001_20261003_101530.txt"]
+    assert (f["6302"], f["6303"]) == (["STENO_001_20261003_101530"], ["TXT"])
     content = attachment.read_text("utf-8-sig")
     assert "**Kopfschmerz**" in content and "SPRECHER A: Was führt Sie her?" in content
 

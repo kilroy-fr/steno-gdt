@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>KI-Gesprächsanalyse</title>
+  <title>Steno</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
@@ -19,8 +19,8 @@
       <div class="header-left">
         <img src="/static/logo.jpg" alt="Logo" class="logo">
         <div>
-          <h1>KI-Gesprächsanalyse</h1>
-          <p class="page-subtitle">Transkription und Analyse von Patientengesprächen</p>
+          <h1>Steno</h1>
+          <p class="page-subtitle">Gespräche mitschreiben und an T2med übergeben</p>
         </div>
       </div>
       <div class="header-right">
@@ -154,6 +154,13 @@
             <div class="radio-content">
               <span class="radio-title">📋 Kurzzusammenfassung</span>
               <small>Kompakte, allgemeinverständliche Zusammenfassung des Gesprächs</small>
+            </div>
+          </label>
+          <label class="radio-label" id="labelPsycho">
+            <input type="radio" name="mode" value="psycho">
+            <div class="radio-content">
+              <span class="radio-title">🛋️ Psychotherapie-Sitzung</span>
+              <small>Ausführliche Zusammenfassung des Gesagten, Thema für Thema</small>
             </div>
           </label>
           <label class="radio-label" id="labelClean">

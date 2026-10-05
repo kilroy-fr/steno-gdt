@@ -1,8 +1,19 @@
-# KI-Transcribe Pro mit T2med-Anbindung (transcribe-gdt)
+# Steno
 
-Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter FastAPI-Server mit Browser-UI: Audio aufnehmen oder hochladen, per faster-whisper transkribieren und per ollama-LLM strukturiert dokumentieren — und die Dokumentation per GDT an T2med übergeben.
+Schreibt Arzt-Patienten-Gespräche und Psychotherapie-Sitzungen mit, fasst sie zusammen und übergibt die Dokumentation per GDT an T2med. Lokal: faster-whisper für die Transkription, pyannote für die Sprechertrennung, ollama für die Zusammenfassung.
 
-Abzweig von [`ki-transcribe`](../ki-transcribe). Dieser Ordner bringt nur die Web-App mit (`transcribe-gdt-web`, Port 8011). Whisper, Sprechertrennung und ollama werden mitbenutzt: `diktat-whisper` und `diktat-diarize` aus `ki-transcribe`, `ollama` aus seinem eigenen Container.
+Abzweig von [`ki-transcribe`](../ki-transcribe). Dieser Ordner bringt den Server mit (`transcribe-gdt-web`, Port 8011) und den Steno-Knopf für die Arbeitsplätze ([`client/`](client/README.md)). Whisper, Sprechertrennung und ollama werden mitbenutzt: `diktat-whisper` und `diktat-diarize` aus `ki-transcribe`, `ollama` aus seinem eigenen Container.
+
+## 🔴 Steno-Knopf
+
+Ein runder Knopf, der immer vor T2med liegt:
+
+1. In T2med beim Patienten **„Messung starten“**. Der Knopf wird rot (■) und nimmt auf.
+2. Am Ende **■** klicken. 1–3 Minuten später steht die Dokumentation in der Karteikarte, als KI-generiert gekennzeichnet.
+
+Ohne „Messung starten“ nimmt ein Klick auf ▶ „ohne Patient“ auf, und die Dokumentation landet unter „Ext. Aufträge“. Für verhaltenstherapeutische Sitzungen gibt es eine eigene, ausführlichere Zusammenfassung. Sie wird über ein zweites T2med-Gerät, per Rechtsklick am Knopf oder bei langen Aufnahmen automatisch gewählt. Aufgenommen wird nur auf Anforderung, nie dauerhaft.
+
+Einrichtung: [`client/README.md`](client/README.md) (Knopf) und [`T2MED-EINRICHTUNG.md`](T2MED-EINRICHTUNG.md) (T2med, Austauschordner). Nachschau im Browser: `/verlauf`.
 
 ## 🎯 Features
 
@@ -18,7 +29,7 @@ Abzweig von [`ki-transcribe`](../ki-transcribe). Dieser Ordner bringt nur die We
 - Sprecherzuordnung: das LLM erschließt aus dem Gesprächsverlauf, welcher Marker der Arzt ist – so werden Arzt-Überlegungen nicht als gesicherte Diagnosen und Patienten-Rückfragen nicht als Verordnungen dokumentiert. Ohne Diarisation greift weiterhin die reine Kontext-Heuristik
 - **Vollständige Dokumentation auch langer Gespräche:** das Kontextfenster des LLM wird an die Transkriptlänge angepasst (`OLLAMA_NUM_CTX`), und die Prompts verlangen jedes Anliegen einzeln – gerade bei Vorsorgeuntersuchungen mit mehreren unabhängigen Beschwerden
 - **Schutz vor Whisper-Wiederholschleifen:** gepatchter Whisper-Router (`whisper-patch/` in `ki-transcribe`), VAD, automatisches Kürzen verbliebener Schleifen und eine Warnung, wenn dem Transkript dadurch Gespräch fehlt
-- Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO, Standard), Zusammenfassung, Bereinigung
+- Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO, Standard), Psychotherapie-Sitzung, Zusammenfassung, Bereinigung
 - A/B/PRO-Modus zeigt zusätzlich drei separat kopierbare Karten (Anamnese / Befund / Procedere)
 - Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe, auch nachträglich per Rerun auf der Analyse-Karte
 - „Nächster Patient"-Button: beendet Aufnahme, startet Analyse und sofort eine neue Aufnahme
@@ -294,9 +305,10 @@ docker compose restart transcribe-gdt-web
 ```
 transcribe-gdt/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
-├── prompts.py                 # LLM-Prompts (ANALYZE, ABPRO, SUMMARY, SUBJECT, CLEAN)
+├── prompts.py                 # LLM-Prompts (ANALYZE, ABPRO, PSYCHO, SUMMARY, SUBJECT, CLEAN)
 ├── medical_vocab.py           # Kuratiertes Fachvokabular (MEDICAL_GLOSSARY)
 ├── gdt.py                     # GDT 2.1: Messauftrag aus T2med lesen, Dokumentation zurückgeben
+├── client/                    # Steno-Knopf für die Arbeitsplätze (Windows-exe, siehe client/README.md)
 ├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, erster Test
 ├── Dockerfile                 # Docker-Build für server.py
 ├── docker-compose.yml         # nur transcribe-gdt-web; Whisper/Diarisation/ollama extern
@@ -306,6 +318,7 @@ transcribe-gdt/
 ├── CLAUDE.md                  # Technische Referenz für KI-gestützte Entwicklung
 │
 ├── templates/index.html       # Web-UI HTML-Template (Jinja2)
+├── templates/verlauf.html     # Nachschau der Knopf-Aufträge (/verlauf)
 ├── static/                    # CSS, JS, Favicon, Logo
 ├── logs/                      # Ziel für optionalen Logging-Modus (LOG_DIR)
 └── gdt/                       # GDT-Austauschordner mit T2med (Standard-Mount, gitignored)

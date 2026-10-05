@@ -5,10 +5,13 @@ Weg an T2med uebergibt und dort im Praxisbetrieb erprobt ist:
 
 - Klickt jemand in T2med beim Patienten auf "Messung starten", schreibt T2med einen
   6302-Satz mit Patientennummer und Stammdaten in den GDT-Ordner — feste Datei je
-  Arbeitsplatz, die Endung ist die Arbeitsplatznummer (KITRT2MD.001). Hier wird er
+  Arbeitsplatz, die Endung ist die Arbeitsplatznummer (STNOT2MD.001). Hier wird er
   abgeholt, die Datei geloescht.
-- Die Dokumentation geht als 6310 an die feste Datei T2MDKITR.<ap> zurueck. T2med
+- Die Dokumentation geht als 6310 an die feste Datei T2MDSTNO.<ap> zurueck. T2med
   liest sie und loescht sie; liegt sie noch dort, wird nicht ueberschrieben.
+- Optional ein zweites T2med-Geraet fuer Psychotherapie-Sitzungen mit eigenen
+  Dateien (GDT_PSY_*): ein Auftrag von dort legt den Modus fest, und das Ergebnis
+  geht an dasselbe Geraet zurueck, bei dem T2med darauf wartet.
 
 Patientensicherheit vor Bequemlichkeit (wie in sono-gdt): ohne Auftrag geht
 `3000=0` raus — laut GDT 2.1 genau der Fall "Geraet kennt die Patientennummer
@@ -17,6 +20,7 @@ Auftraege" ab. Ein Auftrag gilt fuer genau eine Aufnahme (OrderBook.claim) und
 verfaellt nach GDT_AUFTRAG_GUELTIG Minuten: wer beim naechsten Patienten
 "Messung starten" vergisst, soll nicht beim vorigen landen.
 """
+import errno
 import logging
 import os
 import re
@@ -50,15 +54,21 @@ class Settings:
     """Einstellungen aus GDT_*-Umgebungsvariablen (Tabelle in CLAUDE.md)."""
     directory: str = ""                     # GDT-Ordner im Container; leer = Anbindung aus
     workstations: dict = field(default_factory=lambda: {"001": ""})   # Nummer -> Name
-    result_filename: str = "T2MDKITR.{ap}"  # schreibt ki-transcribe, liest T2med ("Dateiname Import")
-    order_filename: str = "KITRT2MD.{ap}"   # schreibt T2med ("Dateiname Export")
+    result_filename: str = "T2MDSTNO.{ap}"  # schreibt Steno, liest T2med ("Dateiname Import")
+    order_filename: str = "STNOT2MD.{ap}"   # schreibt T2med ("Dateiname Export")
     id_pvs: str = "T2MED"                   # 8315 Empfaenger
-    id_device: str = "KI_TRANS"             # 8316 Sender, max. 8 Zeichen
+    id_device: str = "STENO"                # 8316 Sender, max. 8 Zeichen
+    # Zweites Geraet "Psychotherapie" in T2med; leer = gibt es nicht. Bewusst
+    # kein Default: eine Ergebnisdatei, fuer die in T2med kein Geraet
+    # eingerichtet ist, holt niemand ab — die naechste Uebergabe wartete ewig.
+    psy_result_filename: str = ""           # z. B. T2MDSTNP.{ap}
+    psy_order_filename: str = ""            # z. B. STNPT2MD.{ap}
+    psy_id_device: str = "STENO_PT"
     charset: int = 2                        # 9206
     test_ident: str = "ALLG00"              # 8402, muss zur Geraetekonfiguration in T2med passen
     order_valid_minutes: int = 60
     line_width: int = 60                    # Freitextzeilen (6220/6227); GDT 2.1: max. 60
-    # Wie T2med (Windows) den GDT-Ordner sieht, z. B. \\192.168.2.70\ki-transcribe-gdt.
+    # Wie T2med (Windows) den GDT-Ordner sieht, z. B. \\192.168.2.70\steno-gdt.
     # Nur fuer den Transkript-Anhang (6305) noetig; leer = kein Anhang.
     pvs_path: str = ""
 
@@ -84,6 +94,9 @@ class Settings:
             ("GDT_AUFTRAG_GUELTIG", "order_valid_minutes", int),
             ("GDT_ZEILENBREITE", "line_width", int),
             ("GDT_PVS_PFAD", "pvs_path", str),
+            ("GDT_PSY_DATEINAME", "psy_result_filename", str),
+            ("GDT_PSY_AUFTRAG_DATEINAME", "psy_order_filename", str),
+            ("GDT_PSY_ID_GERAET", "psy_id_device", str),
         ):
             if env.get(name, "").strip():
                 setattr(s, attr, typ(env[name].strip()))
@@ -91,9 +104,36 @@ class Settings:
             s.workstations = parse_workstations(env["GDT_ARBEITSPLAETZE"])
         if s.charset not in ENCODINGS:
             raise ValueError("GDT_ZEICHENSATZ muss 1, 2 oder 3 sein")
-        if s.result_filename.replace("{ap}", "") == s.order_filename.replace("{ap}", ""):
-            raise ValueError("GDT_DATEINAME und GDT_AUFTRAG_DATEINAME muessen verschieden sein")
+        names = [n.replace("{ap}", "") for n in (s.result_filename, s.order_filename,
+                                                 s.psy_result_filename, s.psy_order_filename) if n]
+        if len(names) != len(set(names)):
+            raise ValueError("GDT_DATEINAME, GDT_AUFTRAG_DATEINAME und GDT_PSY_* muessen verschieden sein")
+        if bool(s.psy_result_filename) != bool(s.psy_order_filename):
+            raise ValueError("GDT_PSY_DATEINAME und GDT_PSY_AUFTRAG_DATEINAME nur gemeinsam setzen")
         return s
+
+    @property
+    def psy_device(self) -> bool:
+        return bool(self.psy_result_filename)
+
+    def order_files(self) -> list[tuple[str, str]]:
+        """[(Dateimuster, Geraet)] der Auftragsdateien; Geraet "" = Standard, "psy"."""
+        files = [(self.order_filename, "")]
+        if self.psy_device:
+            files.append((self.psy_order_filename, "psy"))
+        return files
+
+    def result_target(self, order: "Order | None", psycho: bool) -> tuple[str, str]:
+        """(Dateimuster, GDT-ID Geraet) fuer das Ergebnis.
+
+        Mit Auftrag geht es an das Geraet, von dem der Auftrag kam — dort wartet
+        T2med darauf, auch wenn der Modus am Knopf umgestellt wurde. Ohne Auftrag
+        entscheidet der Modus.
+        """
+        device = order.device if order else ("psy" if psycho else "")
+        if device == "psy" and self.psy_device:
+            return self.psy_result_filename, self.psy_id_device
+        return self.result_filename, self.id_device
 
 
 def parse_workstations(text: str) -> dict:
@@ -175,6 +215,7 @@ class Order:
     birth_date: str = ""     # ISO (JJJJ-MM-TT) oder leer
     sex: str = ""            # "M", "W" oder leer
     received: float = 0.0    # Eingang hier (Unix-Zeit)
+    device: str = ""         # "" = Standardgeraet, "psy" = Psychotherapie-Geraet
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -194,6 +235,7 @@ class Order:
             first_name=str(d.get("first_name") or "").strip(), birth_date=birth,
             sex=d.get("sex") if d.get("sex") in ("M", "W") else "",
             received=float(d.get("received") or 0),
+            device="psy" if d.get("device") == "psy" else "",
         )
 
     @property
@@ -213,7 +255,8 @@ def parse_fields(data: bytes) -> list[tuple[str, str]]:
     return [(k, v.decode(encoding, "replace").strip()) for k, v in raw]
 
 
-def order_from_fields(fields: list[tuple[str, str]], ap: str, received: float) -> Order | None:
+def order_from_fields(fields: list[tuple[str, str]], ap: str, received: float,
+                      device: str = "") -> Order | None:
     """Auftrag aus einem 6301/6302-Satz; None bei anderer Satzart oder ohne Pat.-Nr./Nachname."""
     d: dict = {}
     for k, v in fields:
@@ -233,7 +276,7 @@ def order_from_fields(fields: list[tuple[str, str]], ap: str, received: float) -
     return Order(
         id=f"{ap}-{int(received * 1000)}", ap=ap, patid=patid, last_name=last_name,
         first_name=d.get("3102", ""), birth_date=birth,
-        sex={"1": "M", "2": "W"}.get(d.get("3110", ""), ""), received=received,
+        sex={"1": "M", "2": "W"}.get(d.get("3110", ""), ""), received=received, device=device,
     )
 
 
@@ -257,14 +300,18 @@ class OrderBook:
         hintereinander gleich sind — sonst koennte ein halb geschriebener Satz
         erwischt werden. Ein Uhrvergleich mit der Dateizeit waere einfacher,
         haengt auf einer Netzwerkfreigabe aber an der Uhr des Servers.
+
+        Mit Psychotherapie-Geraet gibt es zwei Auftragsdateien je Arbeitsplatz;
+        es gilt wie immer der zuletzt eingegangene Auftrag.
         """
-        path = settings.path(settings.order_filename, ap)
-        try:
-            st = path.stat()
-        except FileNotFoundError:
-            self._seen.pop(path, None)
-            self._consumed.pop(path, None)
-        else:
+        for pattern, device in settings.order_files():
+            path = settings.path(pattern, ap)
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                self._seen.pop(path, None)
+                self._consumed.pop(path, None)
+                continue
             stamp = (st.st_size, st.st_mtime)
             if self._consumed.get(path) == stamp:
                 pass
@@ -272,7 +319,7 @@ class OrderBook:
                 self._seen[path] = stamp
             else:
                 self._seen.pop(path, None)
-                self._take(path, stamp, ap, now)
+                self._take(path, stamp, ap, now, device)
 
         order = self._open.get(ap)
         if order and not 0 <= now - order.received <= settings.order_valid_minutes * 60:
@@ -281,7 +328,7 @@ class OrderBook:
             return None
         return order
 
-    def _take(self, path: Path, stamp: tuple, ap: str, now: float):
+    def _take(self, path: Path, stamp: tuple, ap: str, now: float, device: str = ""):
         try:
             data = path.read_bytes()
         except OSError as e:
@@ -295,14 +342,15 @@ class OrderBook:
             logger.error(f"Auftrag {path} nicht loeschbar: {e}")
             self._consumed[path] = stamp
         fields = parse_fields(data)
-        order = order_from_fields(fields, ap, now)
+        order = order_from_fields(fields, ap, now, device)
         if not order:
             logger.warning(
                 f"{path.name} ignoriert (kein Messauftrag mit Patientennummer und Name, "
                 f"Felder {', '.join(f'{k}={v}' for k, v in fields if k in ('8000', '3000', '3101'))})"
             )
             return
-        logger.info(f"Messauftrag an Arbeitsplatz {ap}: {order.label}")
+        logger.info(f"Messauftrag an Arbeitsplatz {ap}: {order.label}"
+                    + (" (Psychotherapie)" if device == "psy" else ""))
         self._open[ap] = order
 
     def claim(self, ap: str, order_id: str) -> bool:
@@ -337,15 +385,15 @@ def _gdt_date(d: date) -> str:
 
 def build_result(settings: Settings, order: Order | None, text: str, started: datetime,
                  comments: list[str], attachments: list[tuple[str, str, str, str]],
-                 version: str) -> Record:
+                 version: str, id_device: str | None = None) -> Record:
     """Satz 6310. attachments: [(Kennung, Format, Beschreibung, Pfad wie T2med ihn sieht)]."""
     r = Record("6310", settings.charset)
     r.field("8315", settings.id_pvs[:8])
-    r.field("8316", settings.id_device[:8])
+    r.field("8316", (id_device or settings.id_device)[:8])
     r.field("9206", settings.charset)
     r.field("9218", "02.10")
     r.field("0102", "Praxis overmans + kadnikov")
-    r.field("0103", "KI-Transcribe")
+    r.field("0103", "Steno")
     r.field("0132", version)
 
     # "0" = Geraet kennt die Pat.-Nr. nicht, T2med ordnet zu (GDT 2.1)
@@ -381,8 +429,8 @@ def write_exclusive(data: bytes, target: Path) -> Path:
     Dateinamen.
     """
     if target.exists():
-        raise FileExistsError(f"{target} wurde von T2med noch nicht abgeholt")
-    tmp = target.with_name(f".kitr-{os.getpid()}-{target.name}.tmp")
+        raise FileExistsError(errno.EEXIST, "von T2med noch nicht abgeholt", str(target))
+    tmp = target.with_name(f".steno-{os.getpid()}-{target.name}.tmp")
     with open(tmp, "wb") as f:
         f.write(data)
         f.flush()

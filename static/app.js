@@ -756,6 +756,7 @@ function setAnalysisMode(mode) {
   if (mode === "analyze") titleEl.textContent = "🧠 Analyse";
   else if (mode === "abpro") titleEl.textContent = "📝 A/B/PRO-Dokumentation";
   else if (mode === "summary") titleEl.textContent = "📋 Zusammenfassung";
+  else if (mode === "psycho") titleEl.textContent = "🛋️ Psychotherapie-Sitzung";
   else titleEl.textContent = "✏️ Bereinigtes Transkript";
 }
 

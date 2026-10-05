@@ -94,6 +94,64 @@ PRO: (Für jedes Anliegen aus A die besprochenen Maßnahmen: Medikation mit Dosi
 
 Antwort auf Deutsch."""
 
+# ============================================================
+# PSYCHOTHERAPIE (verhaltenstherapeutische Sitzung, 25/50 min)
+# ============================================================
+# Anders als in der Sprechstunde geht es nicht um ein Schema, sondern um eine
+# Zusammenfassung des Gesagten — mit wechselnden Themen und bewusst weniger
+# Kuerzung: in einer Sitzung traegt das Detail (welche Situation, welcher
+# Gedanke, wer hat was gesagt) die Information. Keine Diagnostik, keine
+# Deutung. Der eigene Sprecher-Kontext ersetzt "Arzt"/"Anamnesefragen".
+SPEAKER_CONTEXT_PSY_PLAIN = """SPRECHER: Das Transkript ist ein Dialog ohne Sprecherkennzeichnung zwischen Therapeut/in und {patient_label}. Ordne Aussagen anhand des Kontexts zu; wenn die Zuordnung unklar bleibt, formuliere neutral ("es wurde besprochen") statt zu raten. Was die Therapeutin/der Therapeut als Frage, Hypothese oder Beispiel einbringt, ist keine Aussage von {patient_label}."""
+
+SPEAKER_CONTEXT_PSY_DIARIZED = """SPRECHER: Die Sprecher wurden automatisch getrennt – jede Zeile beginnt mit einem anonymen Marker (SPRECHER A, SPRECHER B, ...). Welcher Marker Therapeut/in und welcher {patient_label} ist, steht NICHT fest: erschließe es aus dem Gesprächsverlauf – wer fragt, strukturiert, zusammenfasst und Übungen vorschlägt, ist die Therapeutin/der Therapeut.
+Die Sprechertrennung ist fehleranfällig, vor allem an Sprecherwechseln und bei kurzen Einwürfen. Wenn Marker und Inhalt sich widersprechen, hat der Inhalt Vorrang. Was die Therapeutin/der Therapeut als Frage, Hypothese oder Beispiel einbringt, ist keine Aussage von {patient_label}.
+Übernimm die Marker NICHT in deine Ausgabe."""
+
+PSYCHO_PROMPT = """Du bist ein KI-Assistent für die Dokumentation verhaltenstherapeutischer Sitzungen.
+{gender_instruction}
+Fasse das folgende Transkript einer Psychotherapiesitzung (Verhaltenstherapie) für die Therapeutin/den Therapeuten zusammen. Ziel ist eine inhaltlich vollständige Zusammenfassung des Gesagten – keine Diagnostik, keine Deutung, keine eigene Bewertung.
+{speaker_context}
+
+<transkript>
+{transcript}
+</transkript>
+
+REGELN:
+- Geh die Sitzung von Anfang bis Ende durch. Die Themen wechseln; jedes Thema gehört in die Zusammenfassung, auch wenn es nur kurz angesprochen wurde.
+- Kürze nicht zu stark. Gib wieder, was {patient_label} berichtet: konkrete Situationen und Ereignisse (auch seit der letzten Sitzung), Gedanken, Gefühle, Körperempfindungen, Verhalten und dessen Folgen, Beziehungen – mit den Einzelheiten, die genannt wurden (wer, wann, was).
+- Prägnante Formulierungen von {patient_label} als kurzes wörtliches Zitat in Anführungszeichen übernehmen.
+- Was die Therapeutin/der Therapeut tut, so benennen, wie es im Gespräch vorkommt (z. B. Situationsanalyse, Arbeit an Gedanken, Exposition, Psychoedukation, Übung, Rollenspiel) – nichts als Intervention bezeichnen, was nicht stattfand.
+- Keine Diagnosen, keine Deutungen, keine Empfehlungen, die nicht im Gespräch ausgesprochen wurden.
+- Suizidgedanken, Selbstverletzung oder Gefährdung anderer nur aufführen, wenn sie im Gespräch vorkamen – dann vollständig und möglichst wörtlich. Nichts erschließen.
+- Unklare oder phonetisch verzerrte Stellen exakt abschreiben oder als [unverständlich] markieren; nichts erfinden.
+
+Gliedere so:
+
+## Themen
+(Stichwortliste aller Themen in der Reihenfolge des Gesprächs)
+
+## Verlauf der Sitzung
+(Je Thema eine Zwischenüberschrift "### <Thema>" und darunter ein bis drei Absätze in ganzen Sätzen: was berichtet wurde, wie daran gearbeitet wurde, was dabei herauskam)
+
+## Vereinbarungen
+(Übungen, Hausaufgaben, Ziele bis zur nächsten Sitzung, nächster Termin – sonst: Keine besprochen)
+
+## Gefährdung
+(Nur was dazu gesagt wurde – sonst: Nicht thematisiert)
+
+Antworte auf Deutsch, in der dritten Person."""
+
+# Rueckfall, wenn am Knopf nichts vorgegeben war und kein Auftrag vom
+# Psychotherapie-Geraet kam: nur bei langen Aufnahmen gefragt (STENO_PSY_AB_MINUTEN).
+PSY_CLASSIFY_PROMPT = """Ist das folgende Gespräch eine psychotherapeutische Sitzung (z. B. Verhaltenstherapie) oder eine ärztliche Sprechstunde (Beschwerden, Untersuchung, Medikamente, Vorsorge)?
+Antworte mit genau einem Wort: PSYCHOTHERAPIE oder SPRECHSTUNDE.
+
+Gesprächsausschnitt:
+{transcript}
+
+Antwort:"""
+
 SUMMARY_PROMPT = """Erstelle eine kurze, allgemeinverständliche Zusammenfassung des folgenden Gesprächs.
 - Jedes besprochene Thema bekommt 1–2 Sätze – auch Nebenthemen, keines auslassen
 - Keine Fachbegriffe, kein Schema

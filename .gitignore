@@ -66,3 +66,9 @@ diktat-service/build/
 
 # Hugging-Face-Token fuer den Diarisations-Build (BuildKit-Secret)
 .hf_token
+
+# Steno-Knopf: Build-Umgebung und Ergebnis (client/build.ps1)
+client/.venv/
+client/build/
+client/dist/
+client/*.spec
