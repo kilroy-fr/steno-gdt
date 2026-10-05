@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
 import logging
+import time
+import gdt
 from prompts import (
     ABPRO_PROMPT,
     ANALYZE_PROMPT,
@@ -31,7 +33,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.9.9"
+VERSION = "0.9.10"
 
 
 def _flag(value: str) -> bool:
@@ -92,6 +94,10 @@ LOOP_WARN_SHARE = float(os.getenv("LOOP_WARN_SHARE", "0.15"))
 # "nur eine Beschwerde"-Dokumentationen: die anderen standen am Anfang.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
 LOG_DIR = os.getenv("LOG_DIR", "/logs")
+# Anbindung an T2med per GDT (gdt.py). Aus, solange GDT_DIR nicht auf einen
+# vorhandenen Ordner zeigt — dann blendet das Frontend alles dazu aus.
+GDT = gdt.Settings.from_env()
+gdt_orders = gdt.OrderBook()
 
 WHISPER_URL = f"http://{WHISPER_HOST}:{WHISPER_PORT}"
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
@@ -956,7 +962,8 @@ async def index(request: Request):
         request=request,
         name="index.html",
         context={"version": VERSION, "default_model": OLLAMA_MODEL,
-                 "loop_warn_share": LOOP_WARN_SHARE},
+                 "loop_warn_share": LOOP_WARN_SHARE,
+                 "gdt": {"enabled": GDT.enabled, "workstations": GDT.workstations}},
     )
 
 
@@ -1132,6 +1139,132 @@ async def get_subject(transcript: str = Form(...), model: str = Form(default=Non
     except Exception as e:
         logger.error(f"Subject generation failed: {e}")
         return {"subject": "—", "error": str(e)}
+
+
+# ============================================================
+# T2MED (GDT)
+# ============================================================
+_MODE_LABELS = {
+    "analyze": "Analyse", "abpro": "A/B/PRO-Dokumentation",
+    "summary": "Zusammenfassung", "clean": "bereinigtes Transkript",
+}
+
+
+def _gdt_workstation(ap) -> str:
+    """Arbeitsplatznummer aus dem Request pruefen — sie wird Teil eines Dateinamens."""
+    if not GDT.enabled:
+        raise HTTPException(status_code=404, detail="GDT-Anbindung ist nicht eingerichtet (GDT_DIR).")
+    ap = str(ap or "")
+    if ap not in GDT.workstations:
+        raise HTTPException(status_code=400, detail=f"Unbekannter Arbeitsplatz '{ap}'.")
+    return ap
+
+
+def _parse_started(value) -> datetime:
+    """Aufnahmebeginn als lokale Zeit vom Browser ("JJJJ-MM-TTTHH:MM:SS")."""
+    try:
+        return datetime.fromisoformat(str(value)).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return datetime.now()
+
+
+def _write_transcript_attachment(ap: str, started: datetime, text: str, transcript: str):
+    """Transkript als Textdatei neben die GDT-Datei; liefert (Datei, Anhang fuer 6302-6305).
+
+    Die Dokumentation steht vorne mit drin: in 6220 ist sie auf 60 Zeichen
+    umgebrochen, hier im Original. UTF-8 mit BOM, damit Windows-Programme die
+    Umlaute erkennen.
+    """
+    folder = Path(GDT.directory) / "anhaenge"
+    folder.mkdir(exist_ok=True)
+    stem = f"KITR_{ap}_{started:%Y%m%d_%H%M%S}"
+    path = folder / f"{stem}.txt"
+    n = 1
+    while path.exists():
+        n += 1
+        path = folder / f"{stem}_{n}.txt"
+    content = (
+        f"KI-Dokumentation (bitte prüfen) – Aufnahme vom {started:%d.%m.%Y %H:%M}\n\n"
+        f"{text.strip()}\n\n\n=== Transkript ===\n\n{transcript.strip()}\n"
+    )
+    path.write_text(content.replace("\n", "\r\n"), encoding="utf-8-sig", newline="")
+    pvs = f"{GDT.pvs_path.rstrip(chr(92))}\\anhaenge\\{path.name}"
+    return path, (path.stem, "TXT", f"Transkript {started:%d.%m.%Y %H:%M}", pvs)
+
+
+@app.get("/gdt/order")
+async def gdt_order(ap: str):
+    """Offener Messauftrag fuer diesen Arbeitsplatz (holt die Auftragsdatei dabei ab)."""
+    ap = _gdt_workstation(ap)
+    order = gdt_orders.poll(GDT, ap, time.time())
+    return {"order": order.to_dict() if order else None}
+
+
+@app.post("/gdt/order/claim")
+async def gdt_order_claim(request: Request):
+    """Auftrag einer Aufnahme zuordnen — danach ist er fuer die naechste nicht mehr offen."""
+    body = await request.json()
+    ap = _gdt_workstation(body.get("ap"))
+    return {"claimed": gdt_orders.claim(ap, str(body.get("id", "")))}
+
+
+@app.post("/gdt/send")
+async def gdt_send(request: Request):
+    """Dokumentation als GDT-Satz 6310 fuer T2med ablegen.
+
+    Der Auftrag kommt aus dem Frontend zurueck, nicht aus dem OrderBook: er ist
+    dort laengst zugeordnet, und ein Neustart des Servers zwischen Aufnahme und
+    Senden soll die Zuordnung nicht kosten.
+    """
+    body = await request.json()
+    ap = _gdt_workstation(body.get("ap"))
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Keine Dokumentation zum Senden.")
+    try:
+        order = gdt.Order.from_dict(body["order"]) if body.get("order") else None
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Auftrag: {e}")
+    started = _parse_started(body.get("started"))
+
+    comments = [f"KI-generiert ({_MODE_LABELS.get(body.get('mode'), 'Dokumentation')}, "
+                f"KI-Transcribe {VERSION}, Modell {body.get('model') or OLLAMA_MODEL}). "
+                "Vor Übernahme prüfen."]
+    if body.get("warning"):
+        comments.append(f"Warnung: {body['warning']}")
+    if not order:
+        comments.append("Ohne Messauftrag gesendet, bitte Patient zuordnen.")
+    workstation = GDT.workstations[ap]
+    comments.append(f"Arbeitsplatz {ap}" + (f" ({workstation})" if workstation else ""))
+
+    attachment_file, attachments = None, []
+    transcript = str(body.get("transcript") or "").strip()
+    if GDT.pvs_path and transcript:
+        attachment_file, attachment = _write_transcript_attachment(ap, started, text, transcript)
+        attachments.append(attachment)
+
+    record = gdt.build_result(GDT, order, text, started, comments, attachments, VERSION)
+    target = GDT.path(GDT.result_filename, ap)
+    try:
+        gdt.write_exclusive(record.encode(), target)
+    except FileExistsError:
+        if attachment_file:
+            attachment_file.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=409,
+            detail=f"T2med hat die vorige Übergabe ({target.name}) noch nicht abgeholt. "
+                   f"Läuft T2med an Arbeitsplatz {ap}?",
+        )
+    except OSError as e:
+        if attachment_file:
+            attachment_file.unlink(missing_ok=True)
+        logger.error(f"GDT-Datei {target} nicht schreibbar: {_exc_text(e)}")
+        raise HTTPException(status_code=500, detail=f"GDT-Datei nicht schreibbar: {e}")
+
+    logger.info(f"An T2med übergeben: {target.name}, "
+                f"{order.label if order else 'ohne Auftrag (Pat.-Nr. 0)'}, "
+                f"{len(text)} Zeichen" + (f", Anhang {attachment_file.name}" if attachment_file else ""))
+    return {"file": target.name, "patid": record.get("3000")}
 
 
 if __name__ == "__main__":

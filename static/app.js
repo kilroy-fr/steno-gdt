@@ -25,12 +25,21 @@ let analysisGender = "neutral";   // Geschlecht der angezeigten Analyse (rechte 
 // Dieselbe Schwelle wie die Warnung in /analyze (LOOP_WARN_SHARE in server.py).
 const LOOP_WARN_SHARE = window.APP_CONFIG?.loopWarnShare ?? 0.15;
 
+// T2med (GDT): siehe Abschnitt T2MED unten.
+const GDT = window.APP_CONFIG?.gdt ?? { enabled: false, workstations: {} };
+let openOrder = null;        // neuester, noch keiner Aufnahme zugeordneter Auftrag
+let recordingOrder = null;   // bei Aufnahmebeginn zugeordnet
+let displayedEntry = null;   // Verlaufseintrag, dessen Analyse gerade angezeigt wird
+let uploadOrder = null;      // Auftrag der hochgeladenen Datei ...
+let uploadOrderBound = false; // ... bei ihrer ersten Analyse festgelegt
+
 // --- Init ---
 document.addEventListener("DOMContentLoaded", () => {
   initTabs();
   initRadioHighlight();
   initGenderButtons();
   initSettings();
+  initT2med();
   loadModels();
   checkHealth();
   setInterval(checkHealth, 30000);
@@ -293,6 +302,7 @@ async function startRecording() {
     lastTranscribedChunkIndex = 0;
     stopHandled = false;
     recordingStartTime = new Date();
+    recordingOrder = claimOpenOrder();
 
     const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
       ? "audio/webm;codecs=opus"
@@ -304,6 +314,7 @@ async function startRecording() {
     };
     mediaRecorder.onstop = onRecordingStop;
     mediaRecorder.start(500);
+    renderPatientPanel();
 
     // Live-Transkription: erst 30s nach Abschluss des vorherigen Chunks starten
     liveTranscriptIntervalId = setTimeout(runLiveTranscriptionLoop, 30000);
@@ -321,6 +332,7 @@ async function startRecording() {
     document.getElementById("analysisSection").style.display = "none";
     document.getElementById("abproCards").style.display = "none";
     document.getElementById("genderRerun").style.display = "none";
+    showEntryT2med(null);
     const prevAe = document.getElementById("analysisText");
     prevAe.innerHTML = "";
     prevAe.dataset.raw = "";
@@ -358,6 +370,7 @@ function stopRecording() {
   document.getElementById("recordTimer").classList.remove("running");
   document.getElementById("recordHint").textContent =
     nextPatientPending ? "Analyse läuft... Neue Aufnahme startet danach automatisch." : "Aufnahme beendet. Analyse wird gestartet...";
+  renderPatientPanel();
 }
 
 async function runLiveTranscriptionLoop() {
@@ -467,6 +480,8 @@ function initUploadZone() {
 
 function setUploadFile(file) {
   uploadedFile = file;
+  uploadOrder = null;
+  uploadOrderBound = false;
   document.getElementById("uploadFileName").textContent = `✓ ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
   updateAnalyzeBtn();
 }
@@ -528,6 +543,13 @@ async function startAnalysis() {
 
   const activeTab = document.querySelector(".tab-button.active").dataset.tab;
   if (activeTab !== "record") recordingStartTime = new Date();
+  // Eine Aufnahme hat ihren Patienten seit dem Start; eine hochgeladene Datei
+  // bekommt ihn bei der ersten Analyse und behaelt ihn fuer jede weitere.
+  if (activeTab !== "record" && !uploadOrderBound) {
+    uploadOrder = claimOpenOrder();
+    uploadOrderBound = true;
+  }
+  const order = activeTab === "record" ? recordingOrder : uploadOrder;
 
   // Live-Vorschau-Transkript sichtbar lassen (blinkender Cursor), bis das fertige
   // Transkript aus /analyze eintrifft und es ersetzt (siehe handleSSE "transcript")
@@ -547,19 +569,21 @@ async function startAnalysis() {
   formData.append("lang_mode", getLangMode());
   formData.append("diarize", getDiarize());
   // Das Transkript liefert erst der Server (handleSSE -> currentTranscript).
-  await runAnalysis("/analyze", formData, "Sende Audio...", { gender: selectedGender });
+  await runAnalysis("/analyze", formData, "Sende Audio...", { gender: selectedGender, order });
 }
 
 function startAnalysisFromTranscript(transcript, gender = null, rerunId = null) {
   const formData = new FormData();
   formData.append("transcript", transcript);
+  // Neulauf desselben Gespraechs: derselbe Patient
   return runAnalysis(
     "/analyze-text", formData, "Analysiere Transkript (Whisper-Schritt übersprungen)...",
-    { gender: gender ?? selectedGender, transcript, rerunId }
+    { gender: gender ?? selectedGender, transcript, rerunId, order: displayedEntry?.order ?? null }
   );
 }
 
-async function runAnalysis(url, formData, statusText, { gender, transcript = null, rerunId = null }) {
+async function runAnalysis(url, formData, statusText,
+                           { gender, transcript = null, rerunId = null, order = null }) {
   const model = document.getElementById("modelSelect").value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
   formData.append("model", model);
@@ -573,6 +597,7 @@ async function runAnalysis(url, formData, statusText, { gender, transcript = nul
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("analysisSection").style.display = "none";
   document.getElementById("abproCards").style.display = "none";
+  showEntryT2med(null);
   const analysisEl = document.getElementById("analysisText");
   analysisEl.innerHTML = "";
   analysisEl.dataset.raw = "";   // sonst haengen die Tokens an die vorige Analyse an
@@ -600,7 +625,7 @@ async function runAnalysis(url, formData, statusText, { gender, transcript = nul
   }
 
   if (analysisRaw) {
-    finishAnalysis(analysisRaw, transcript ?? currentTranscript, mode, model, gender, rerunId);
+    finishAnalysis(analysisRaw, transcript ?? currentTranscript, mode, model, gender, rerunId, order);
     document.getElementById("genderRerun").style.display = "flex";
     if (mode === "abpro") showAbproCards(analysisRaw);
   }
@@ -766,6 +791,9 @@ function resetAll() {
   ae.dataset.raw = "";
   ae.style.display = "";
   document.getElementById("abproCards").style.display = "none";
+  showEntryT2med(null);
+  uploadOrder = null;
+  uploadOrderBound = false;
 
   hideLoopWarning();
   hideStatus();
@@ -775,25 +803,38 @@ function resetAll() {
 // ============================================================
 // HISTORY
 // ============================================================
-function finishAnalysis(analysisRaw, transcript, mode, model, gender = "neutral", rerunId = null) {
+function finishAnalysis(analysisRaw, transcript, mode, model, gender = "neutral", rerunId = null,
+                        order = null) {
+  // Die stehende Warnung (Schleife, abgeschnittene Antwort) geht mit nach T2med.
+  const warningBox = document.getElementById("loopWarning");
+  const warning = warningBox.style.display !== "none"
+    ? document.getElementById("loopWarningText").textContent : "";
   if (rerunId !== null) {
     const entry = analysisHistory.find(e => e.id === rerunId);
     if (entry) {
       entry.analysisRaw = analysisRaw;
       entry.gender = gender;
       entry.mode = mode;
+      entry.model = model;
+      entry.warning = warning;
+      entry.sent = null;   // neuer Text — die alte Uebergabe gilt nicht fuer ihn
       setAnalysisGender(gender);
       const existingBtn = document.querySelector(`.history-btn[data-id="${rerunId}"]`);
       if (existingBtn) existingBtn.classList.add("active");
+      showEntryT2med(entry);
       return;
     }
   }
   const time = recordingStartTime || new Date();
   const timeStr = time.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
-  const entry = { id: Date.now(), timeStr, transcript, analysisRaw, mode, gender };
+  const entry = {
+    id: Date.now(), timeStr, transcript, analysisRaw, mode, gender, model,
+    order, started: localIsoTime(time), warning, sent: null,
+  };
   analysisHistory.push(entry);
   addHistoryButton(entry, model);
   setAnalysisGender(gender);
+  showEntryT2med(entry);
 }
 
 function addHistoryButton(entry, model) {
@@ -846,6 +887,7 @@ function restoreHistory(entry) {
   setAnalysisMode(entry.mode);
   document.getElementById("analysisSection").style.display = "block";
   document.getElementById("genderRerun").style.display = "flex";
+  showEntryT2med(entry);
   const analysisEl = document.getElementById("analysisText");
   analysisEl.dataset.raw = entry.analysisRaw;
   analysisEl.classList.remove("streaming");
@@ -922,4 +964,214 @@ function copyAbproField(id, btn) {
     btn.lastChild.textContent = " ✓";
     setTimeout(() => { btn.lastChild.textContent = " " + origLabel; }, 1500);
   });
+}
+
+// ============================================================
+// T2MED (GDT)
+// ============================================================
+// In T2med beim Patienten "Messung starten" -> der Server holt den Auftrag ab
+// (GET /gdt/order), die naechste Aufnahme bekommt diesen Patienten
+// (claimOpenOrder) und die fertige Dokumentation geht per POST /gdt/send als
+// GDT-Satz zurueck. Ein Auftrag gilt fuer genau eine Aufnahme: wer beim
+// naechsten Patienten "Messung starten" vergisst, landet ohne Patient
+// (Pat.-Nr. 0, Zuordnung in T2med) statt beim vorigen.
+const WORKSTATION_KEY = "t2medWorkstation";
+const ORDER_POLL_MS = 3000;
+const claimedOrderIds = new Set();
+let orderPollRunning = false;
+
+function initT2med() {
+  if (!GDT.enabled) return;
+  const select = document.getElementById("workstationSelect");
+  select.innerHTML = '<option value="">– bitte wählen –</option>' +
+    Object.entries(GDT.workstations).map(([number, name]) =>
+      `<option value="${number}">${escapeHtml(name ? `${name} (${number})` : number)}</option>`
+    ).join("");
+  select.value = getWorkstation() || "";
+  select.addEventListener("change", () => {
+    try { localStorage.setItem(WORKSTATION_KEY, select.value); } catch { /* privat */ }
+    openOrder = null;
+    pollOrder();
+  });
+  document.getElementById("workstationRow").style.display = "flex";
+  document.getElementById("t2medSection").style.display = "";
+  document.getElementById("t2medSend").addEventListener("click", sendToT2med);
+  document.getElementById("t2medAdopt").addEventListener("click", adoptOpenOrder);
+  renderPatientPanel();
+  pollOrder();
+  setInterval(pollOrder, ORDER_POLL_MS);
+}
+
+// Der Arbeitsplatz gehoert zum Rechner, nicht zur Praxis: er steht im Browser.
+function getWorkstation() {
+  const numbers = Object.keys(GDT.workstations);
+  if (numbers.length === 1) return numbers[0];
+  let saved = null;
+  try { saved = localStorage.getItem(WORKSTATION_KEY); } catch { /* privat */ }
+  return numbers.includes(saved) ? saved : null;
+}
+
+function isRecording() {
+  return !!mediaRecorder && mediaRecorder.state === "recording";
+}
+
+async function pollOrder() {
+  const ap = getWorkstation();
+  if (!ap) { renderPatientPanel(); return; }
+  if (orderPollRunning) return;
+  orderPollRunning = true;
+  try {
+    const r = await fetch(`/gdt/order?ap=${encodeURIComponent(ap)}`);
+    if (!r.ok) return;
+    let { order } = await r.json();
+    // Ein gerade zugeordneter Auftrag kann noch einmal kommen, wenn diese
+    // Abfrage vor der Zuordnung losgeschickt wurde.
+    if (order && claimedOrderIds.has(order.id)) order = null;
+    if ((order?.id ?? null) === (openOrder?.id ?? null)) return;
+    openOrder = order;
+    // Geschlecht aus T2med vorbelegen — nur zwischen zwei Aufnahmen, nie mittendrin.
+    if (order?.sex && !isRecording()) setRecordingGender(order.sex === "M" ? "male" : "female");
+    renderPatientPanel();
+    if (displayedEntry) showEntryT2med(displayedEntry);
+  } catch {
+    // naechster Versuch in ORDER_POLL_MS
+  } finally {
+    orderPollRunning = false;
+  }
+}
+
+function claimOpenOrder() {
+  const order = openOrder;
+  if (!order) return null;
+  openOrder = null;
+  claimedOrderIds.add(order.id);
+  fetch("/gdt/order/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ap: order.ap, id: order.id }),
+  }).catch(() => {});
+  renderPatientPanel();
+  return order;
+}
+
+function orderName(order) {
+  return [order.last_name, order.first_name].filter(Boolean).join(", ");
+}
+
+function orderHtml(order) {
+  const details = [];
+  if (order.birth_date) {
+    const [y, m, d] = order.birth_date.split("-");
+    details.push(`* ${d}.${m}.${y}`);
+  }
+  details.push(`Nr. ${order.patid}`);
+  return `<strong>${escapeHtml(orderName(order))}</strong> ` +
+    `<span class="t2med-details">${escapeHtml(details.join(" · "))}</span>`;
+}
+
+function renderPatientPanel() {
+  if (!GDT.enabled) return;
+  const el = document.getElementById("t2medPatient");
+  const hint = document.getElementById("t2medPatientHint");
+  const show = (order, text) => {
+    el.classList.toggle("none", !order);
+    if (order) el.innerHTML = orderHtml(order);
+    else el.textContent = "Kein Patient";
+    hint.textContent = text;
+  };
+  if (!getWorkstation()) {
+    show(null, "Bitte in den Einstellungen (Zahnrad) den T2med-Arbeitsplatz dieses Rechners wählen.");
+  } else if (isRecording() && recordingOrder) {
+    show(recordingOrder, "Laufende Aufnahme – die Dokumentation geht an diesen Patienten." +
+      (openOrder ? ` Neuer Auftrag für ${orderName(openOrder)} gilt für die nächste Aufnahme.` : ""));
+  } else if (isRecording()) {
+    show(null, openOrder
+      ? `Auftrag für ${orderName(openOrder)} eingegangen – nach der Analyse mit „Zuordnen“ übernehmen.`
+      : "Laufende Aufnahme ohne Patient – nach der Analyse in T2med zuordnen.");
+  } else if (openOrder) {
+    show(openOrder, "Wird der nächsten Aufnahme zugeordnet.");
+  } else {
+    show(null, "In T2med beim Patienten „Messung starten“. Ohne Auftrag landet die " +
+      "Dokumentation in T2med unter „Ext. Aufträge“ zur Zuordnung.");
+  }
+}
+
+// Leiste ueber der Analyse: Zielpatient, ggf. "Zuordnen", Senden.
+function showEntryT2med(entry) {
+  displayedEntry = entry;
+  const bar = document.getElementById("t2medBar");
+  if (!GDT.enabled || !entry) { bar.style.display = "none"; return; }
+  bar.style.display = "flex";
+
+  const target = document.getElementById("t2medTarget");
+  target.classList.toggle("none", !entry.order);
+  if (entry.order) target.innerHTML = "→ " + orderHtml(entry.order);
+  else target.textContent = "Ohne Patient – Zuordnung in T2med (Ext. Aufträge)";
+
+  // Nachtraeglich zuordnen nur fuer die juengste Analyse und nicht waehrend
+  // einer Aufnahme — dann gehoert ein neuer Auftrag zu ihr.
+  const adopt = document.getElementById("t2medAdopt");
+  const canAdopt = !entry.order && openOrder && !isRecording() && analysisHistory.at(-1) === entry;
+  adopt.style.display = canAdopt ? "" : "none";
+  if (canAdopt) adopt.textContent = `Zuordnen: ${orderName(openOrder)}`;
+
+  document.getElementById("t2medSend").textContent = entry.sent ? "Erneut senden" : "An T2med senden";
+  setT2medResult(entry.sent ? `✓ gesendet um ${entry.sent}` : "");
+}
+
+function setT2medResult(text, isError = false) {
+  const el = document.getElementById("t2medResult");
+  el.textContent = text;
+  el.classList.toggle("error", isError);
+}
+
+function adoptOpenOrder() {
+  const entry = displayedEntry;
+  if (!entry || entry.order) return;
+  entry.order = claimOpenOrder();
+  showEntryT2med(entry);
+}
+
+async function sendToT2med() {
+  const entry = displayedEntry;
+  if (!entry) return;
+  const ap = getWorkstation();
+  if (!ap) {
+    setT2medResult("Bitte zuerst den Arbeitsplatz wählen (Einstellungen).", true);
+    return;
+  }
+  if (entry.sent && !confirm(`Diese Dokumentation wurde um ${entry.sent} schon an T2med gesendet. ` +
+                             "Noch einmal senden?")) return;
+
+  const btn = document.getElementById("t2medSend");
+  btn.disabled = true;
+  setT2medResult("Sende…");
+  try {
+    const r = await fetch("/gdt/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ap, order: entry.order, text: entry.analysisRaw, transcript: entry.transcript,
+        mode: entry.mode, model: entry.model, started: entry.started, warning: entry.warning,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      if (displayedEntry === entry) setT2medResult(data.detail || `Fehler: HTTP ${r.status}`, true);
+      return;
+    }
+    entry.sent = new Date().toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+    if (displayedEntry === entry) showEntryT2med(entry);
+  } catch (e) {
+    if (displayedEntry === entry) setT2medResult(`Verbindungsfehler: ${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Lokale Zeit ohne Zeitzone — wird in T2med zur Untersuchungszeit (6200/6201).
+function localIsoTime(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+    `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }

@@ -43,6 +43,8 @@ Transkripte_Raw/
 *.mp3
 temp/
 logs/
+# GDT-Austauschordner mit T2med (Patientendaten)
+gdt/
 
 # Config files with sensitive data
 *.env

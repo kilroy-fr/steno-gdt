@@ -422,6 +422,33 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 .loop-warning-icon { flex-shrink: 0; }
 #loopWarningText { white-space: pre-line; }
 
+/* T2med: Patient aus dem Messauftrag und Uebergabe-Leiste */
+.t2med-patient {
+  padding: 10px 12px;
+  background: var(--card-bg);
+  border-left: 4px solid var(--primary);
+  border-radius: var(--border-radius);
+  line-height: 1.5;
+}
+.t2med-patient.none { border-left-color: var(--secondary); color: var(--text-muted); }
+.t2med-details { color: var(--text-muted); font-size: 0.85rem; white-space: nowrap; }
+
+.t2med-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 0.88rem;
+}
+.t2med-target { flex: 1 1 auto; min-width: 0; }
+.t2med-target.none { color: var(--warning); }
+.btn-small.btn-t2med { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn-small.btn-t2med:hover:not(:disabled) { background: var(--primary-hover); }
+.btn-small:disabled { opacity: 0.6; cursor: default; }
+.t2med-result { color: var(--primary); font-size: 0.82rem; }
+.t2med-result.error { color: var(--danger); }
+
 .status-box {
   display: flex;
   align-items: center;

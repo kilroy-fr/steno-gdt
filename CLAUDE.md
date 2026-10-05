@@ -12,7 +12,8 @@ Medizinisches Transkriptions-System als Web-App / FastAPI-Server (`server.py`) �
 Browser ──► Caddy (Reverse Proxy) ──► gespraech-web (FastAPI, Port 8000)
                                            ├── faster-whisper (Transkription, GPU)
                                            ├── diarize (Sprechertrennung, GPU)
-                                           └── ollama (LLM, externer Container)
+                                           ├── ollama (LLM, externer Container)
+                                           └── GDT-Austauschordner ◄──► T2med (Praxisverwaltung)
 ```
 
 **Netzwerke (Docker):**
@@ -29,6 +30,8 @@ ki-transcribe/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
 ├── prompts.py                 # LLM-Prompts: ANALYZE_PROMPT, ABPRO_PROMPT, SUMMARY_PROMPT, SUBJECT_PROMPT, CLEAN_PROMPT
 ├── medical_vocab.py           # Kuratiertes Fachvokabular (Diagnosen, Wirkstoffe, Impfstoffe, Untersuchungen)
+├── gdt.py                     # GDT 2.1 für T2med: Auftrag 6302 lesen (OrderBook), Ergebnis 6310 bauen/ablegen
+├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, Testplan
 ├── Dockerfile                 # Docker-Image für server.py
 ├── docker-compose.yml         # Docker-Setup (gespraech-web + faster-whisper)
 ├── requirements-server.txt    # Server-Python-Dependencies
@@ -69,6 +72,9 @@ ki-transcribe/
 | POST | `/analyze` | Transkription + optionale Diarisation + LLM (SSE-Stream), Parameter: `audio`, `model`, `mode`, `gender`, `lang_mode`, `diarize` |
 | POST | `/analyze-text` | LLM-Analyse eines vorhandenen Transkripts – kein Whisper-Schritt, SSE-Stream, Parameter: `transcript`, `model`, `mode`, `gender` |
 | POST | `/subject` | Betreffzeile (max. 100 Zeichen) für ein Transkript per LLM generieren |
+| GET | `/gdt/order?ap=001` | Offener T2med-Messauftrag dieses Arbeitsplatzes (holt `KITRT2MD.<ap>` dabei ab); `{"order": {…} \| null}`. 404 ohne GDT-Anbindung |
+| POST | `/gdt/order/claim` | Auftrag einer Aufnahme zuordnen (Body: `{"ap", "id"}`) — danach nicht mehr offen |
+| POST | `/gdt/send` | Dokumentation als 6310 nach `T2MDKITR.<ap>` (Body: `ap`, `order`\|null, `text`, `transcript`, `mode`, `model`, `started`, `warning`); 409, solange T2med die vorige Datei nicht abgeholt hat |
 
 **`/analyze` und `/analyze-text` SSE-Event-Typen:** `status`, `transcript`, `token`, `warning`, `error`, `done`
 
@@ -161,6 +167,15 @@ Das Modell ist auf Hugging Face gated (CC-BY-4.0, nur Registrierung; ein Repo st
 
 **Live-Transkript während der Aufnahme (`static/app.js`):** Während der Aufnahme wird alle 30s ein neuer Audio-Abschnitt an `/transcribe-only` geschickt (mit `WHISPER_FAST_MODEL`, z. B. `small`) und im UI angezeigt — dient nur als schnelle Vorschau. Nach Aufnahmeende wird die **komplette** Aufnahme in einem Stück über `/analyze` mit `WHISPER_MEDICAL_MODEL` transkribiert (durchgehender Kontext, weniger Segmentgrenzen-Halluzinationen) und ersetzt die Vorschau, sobald das `transcript`-SSE-Event eintrifft.
 
+**T2med-Anbindung per GDT (`gdt.py`, Abschnitt T2MED in `server.py` und `static/app.js`):** Muster und Feldwerte aus `sono-gdt` (`../t2med-gdt`, Ultraschallbilder an T2med, im Praxisbetrieb erprobt). Einrichtung und Testplan: `T2MED-EINRICHTUNG.md`. Ablauf: In T2med „Messung starten“ → T2med schreibt 6302 nach `KITRT2MD.<ap>` → das Frontend fragt alle 3 s `/gdt/order` ab, der Server liest die Datei erst, wenn Größe und mtime bei zwei Abrufen gleich sind (halb geschriebene Sätze; ein Uhrvergleich hinge an der Uhr der Freigabe), und löscht sie → `startRecording()` ordnet den Auftrag der Aufnahme zu (`claimOpenOrder()`, Upload: bei der ersten Analyse der Datei) → der Verlaufseintrag trägt ihn (`entry.order`) → „An T2med senden“ schreibt 6310 nach `T2MDKITR.<ap>`.
+- **Patientensicherheit vor Bequemlichkeit** (Konvention aus sono-gdt): ohne Auftrag geht `3000=0` raus, T2med legt die Dokumentation unter „Ext. Aufträge“ zur manuellen Zuordnung ab. Ein Auftrag gilt für **genau eine** Aufnahme (`OrderBook.claim`) und verfällt nach `GDT_AUFTRAG_GUELTIG` — das Risiko ist der vergessene Klick beim nächsten Patienten, der sonst beim vorigen landen würde. Nachträglich zuordnen („Zuordnen: <Name>“) nur für die jüngste Analyse und nicht während einer Aufnahme. Der Senden-Knopf nennt den Zielpatienten; gesendet wird nur auf Klick.
+- **Der Auftrag kommt beim Senden aus dem Frontend zurück**, nicht aus dem `OrderBook`: dort ist er längst zugeordnet, und ein Server-Neustart zwischen Aufnahme und Senden soll die Zuordnung nicht kosten. `Order.from_dict()` prüft ihn. Das `OrderBook` selbst ist bewusst nur im Speicher — nach einem Neustart lieber erneut „Messung starten“ als ein Auftrag unbestimmten Alters.
+- **Feste Dateinamen je Arbeitsplatz** (`{ap}` = Endung, wie bei sono-gdt): T2med liest je Arbeitsplatz nur seine Datei. Liegt sie noch, antwortet `/gdt/send` mit 409 statt zu überschreiben. Der Arbeitsplatz steht im Browser (`localStorage`, Einstellungen-Modal), bei nur einem konfigurierten automatisch.
+- **6220-Text:** `plain_text()` entfernt Markdown; jede Zeile ein Feld, auf `GDT_ZEILENBREITE` (60, GDT 2.1) umgebrochen, Leerzeilen fallen weg. Typografie, die es in CP437 nicht gibt („“ – …), wird vor dem Kodieren umgeschrieben (`_TYPOGRAPHY`), sonst stünde in T2med `?`. Wie T2med die umgebrochenen Zeilen zusammensetzt, ist noch ungetestet (Testplan Punkt 6).
+- **Name und Geburtsdatum gehen nicht ans LLM.** Das Geschlecht aus dem Auftrag belegt nur die Geschlechtsauswahl vor (zwischen zwei Aufnahmen, nie mittendrin).
+- **Anhang:** nur mit `GDT_PVS_PFAD` (Windows-Sicht auf den Austauschordner) — Textdatei mit ungekürzter Dokumentation und Transkript in `<GDT_DIR>/anhaenge/`, UTF-8 mit BOM, 6302–6305. Bei 409 wird er wieder gelöscht.
+- **`TZ=Europe/Berlin`** im Container: `started` kommt als lokale Zeit ohne Zone aus dem Browser (`localIsoTime()`), nur der Rückfall nimmt `datetime.now()`; außerdem benennt `_save_log()` die Logs damit in Ortszeit.
+
 **Logging-Modus:** Globaler In-Memory-Schalter `logging_enabled` (per `/logging-mode` gesetzt, UI-Toggle im Einstellungen-Modal). Wenn aktiv, schreibt `_save_log()` Transkript + Analyse als JSON nach `LOG_DIR` (Dateiname `YYYYMMDD_HHMMSS_<mode>.json`).
 
 ---
@@ -186,6 +201,15 @@ Das Modell ist auf Hugging Face gated (CC-BY-4.0, nur Registrierung; ein Repo st
 | `AUDIO_TIMEOUT` | `1800` | Wartezeit (s) auf Whisper **und** Diarisation — bemisst die Rechenzeit, nicht die Netzlatenz |
 | `LOOP_WARN_SHARE` | `0.15` | Ab welchem Anteil entfernter Wiederholschleife die Oberfläche warnt |
 | `LOG_DIR` | `/logs` | Zielverzeichnis für Logging-Modus (`_save_log()`) |
+| `GDT_DIR` | leer (Compose: `/gdt`) | GDT-Austauschordner mit T2med; leer oder nicht vorhanden = Anbindung aus, Frontend blendet sie aus |
+| `GDT_ARBEITSPLAETZE` | `001` | `Nummer[=Name];…` — Nummer = Endung der Austauschdateien |
+| `GDT_DATEINAME` / `GDT_AUFTRAG_DATEINAME` | `T2MDKITR.{ap}` / `KITRT2MD.{ap}` | Ergebnis (T2med „Dateiname Import“) / Auftrag (T2med „Dateiname Export“) |
+| `GDT_ID_PVS` / `GDT_ID_GERAET` | `T2MED` / `KI_TRANS` | 8315 / 8316, müssen zur Gerätekonfiguration in T2med passen |
+| `GDT_ZEICHENSATZ` | `2` | 9206: 1 = 7 Bit, 2 = CP437, 3 = CP1252 |
+| `GDT_KENNFELD` | `ALLG00` | 8402 |
+| `GDT_AUFTRAG_GUELTIG` | `60` | Minuten, die ein „Messung starten“ auf seine Aufnahme wartet |
+| `GDT_ZEILENBREITE` | `60` | Umbruch der Freitextzeilen (6220/6227) |
+| `GDT_PVS_PFAD` | leer | Windows-Pfad, unter dem T2med den Austauschordner sieht; nur für den Transkript-Anhang |
 
 **Diarisations-Container-Variablen** (in `docker-compose.yml` unter `diarize`):
 
@@ -230,7 +254,7 @@ docker-compose logs -f gespraech-web
 pip install -r requirements-dev.txt
 pytest
 ```
-Abgedeckt sind die reinen Funktionen (Schleifen, Sprecherzuordnung, `ThinkingFilter`, Prompt-Bau) und alle Endpoints. Die Endpoint-Tests ersetzen Whisper, Diarisation und ollama durch eine Attrappe an `httpx.AsyncClient` (`tests/conftest.py`) und legen die **SSE-Abfolge** fest — sie ist der Vertrag mit dem Frontend. Ein `xfail` markiert einen bekannten Fehler: `_collapse_degenerate()` schneidet bis zum Ende des letzten entarteten 40er-Fensters und nimmt dabei echte Wörter direkt hinter einer Schleife mit.
+Abgedeckt sind die reinen Funktionen (Schleifen, Sprecherzuordnung, `ThinkingFilter`, Prompt-Bau, GDT-Satzbau und Auftragslesen) und alle Endpoints; die GDT-Endpoints laufen gegen einen Temp-Ordner (`tests/test_gdt.py`). Die Endpoint-Tests ersetzen Whisper, Diarisation und ollama durch eine Attrappe an `httpx.AsyncClient` (`tests/conftest.py`) und legen die **SSE-Abfolge** fest — sie ist der Vertrag mit dem Frontend. Ein `xfail` markiert einen bekannten Fehler: `_collapse_degenerate()` schneidet bis zum Ende des letzten entarteten 40er-Fensters und nimmt dabei echte Wörter direkt hinter einer Schleife mit.
 
 Das Frontend hat keine Tests. Zum Durchspielen den Server lokal gegen die echten Dienste starten, ohne den Container anzufassen — alle drei sind auf localhost veröffentlicht: `WHISPER_HOST=127.0.0.1 WHISPER_PORT=8001 DIARIZE_HOST=127.0.0.1 DIARIZE_PORT=8002 OLLAMA_HOST=127.0.0.1 uvicorn server:app --port 8099`.
 
@@ -245,6 +269,6 @@ Das Frontend hat keine Tests. Zum Durchspielen den Server lokal gegen die echten
 - **Die GPU teilen sich jetzt drei Dienste:** `faster-whisper`, `ollama` und `diarize`. pyannote braucht dabei am wenigsten (VRAM-Spitze 281 MiB) und belegt sie nur während einer Analyse. Auf der 16-GB-Karte ist das unkritisch; eng wird es erst, wenn ollama ein deutlich größeres Modell dauerhaft resident hält.
 - **`diarize` neu starten, ohne Whisper mitzuziehen:** `docker compose up -d --no-deps diarize`. Ohne `--no-deps` gilt derselbe Fallstrick wie unten bei `gespraech-web`.
 - **HF-Token für den Diarisations-Build:** `docker compose build diarize` braucht `./.hf_token` (gitignored). Fehlt die Datei oder sind die Nutzungsbedingungen der pyannote-Repos nicht akzeptiert, bricht der Build mit einer erklärenden Meldung ab. `docker compose up` ohne Build funktioniert auch ohne die Datei.
-- **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `templates/`, `static/`, `diarize/app.py` und `whisper-patch/stt.py` read-only in den jeweiligen Container — Änderungen wirken ohne Rebuild, nur ein `docker-compose restart gespraech-web` ist nötig. Rebuild braucht es nur bei `requirements-server.txt` oder `Dockerfile`.
+- **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `gdt.py`, `templates/`, `static/`, `diarize/app.py` und `whisper-patch/stt.py` read-only in den jeweiligen Container — Änderungen wirken ohne Rebuild, nur ein `docker-compose restart gespraech-web` ist nötig. Rebuild braucht es nur bei `requirements-server.txt` oder `Dockerfile`.
 - **Compose-Netzwerk-Altlast:** Bei „container … is not connected to the network ki-transcribe_diktat-network" während eines Recreates existiert neben `diktat-network` noch ein leeres, projekt-präfigiertes Netzwerk aus der Zeit vor dem `name:`-Eintrag. Beide tragen dasselbe Label `com.docker.compose.network=diktat-network`, Compose greift auf das falsche zu. Fix: `docker network rm ki-transcribe_diktat-network` (Container-Anzahl vorher per `docker network inspect` auf 0 prüfen).
 - **Geteilten Whisper nicht mitziehen:** `docker compose up -d --build gespraech-web` stoppt via `depends_on` auch `diktat-whisper` (und `diktat-diarize`) und legt damit kurzzeitig `ki-atteste` lahm. Mit `--no-deps` bleiben beide unangetastet.

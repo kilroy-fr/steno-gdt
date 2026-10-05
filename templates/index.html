@@ -54,6 +54,14 @@
     <!-- LINKE SPALTE: Eingabe -->
     <div class="panel panel-input">
 
+      <!-- Patient aus T2med (nur mit GDT-Anbindung). Steht oben, weil er
+           festlegt, wohin die Dokumentation am Ende geht. -->
+      <div class="section" id="t2medSection" style="display:none;">
+        <h2>🏥 Patient aus T2med</h2>
+        <div id="t2medPatient" class="t2med-patient"></div>
+        <p id="t2medPatientHint" class="hint-text"></p>
+      </div>
+
       <!-- Audio-Eingabe -->
       <div class="section">
         <h2>🎙️ Audio-Eingabe</h2>
@@ -220,6 +228,13 @@
             <button class="btn-small" onclick="copySection('analysisText', true, this)">Kopieren</button>
           </div>
         </div>
+        <!-- Uebergabe an T2med: nennt immer den Zielpatienten, bevor gesendet wird -->
+        <div id="t2medBar" class="t2med-bar" style="display:none;">
+          <span id="t2medTarget" class="t2med-target"></span>
+          <button id="t2medAdopt" class="btn-small" style="display:none;"></button>
+          <button id="t2medSend" class="btn-small btn-t2med">An T2med senden</button>
+          <span id="t2medResult" class="t2med-result"></span>
+        </div>
         <div id="analysisText" class="result-text markdown-body streaming"></div>
 
         <!-- A/B/PRO-Karten (nur für Modus abpro) -->
@@ -283,6 +298,10 @@
           <label for="modelSelect">KI-Modell</label>
           <select id="modelSelect" class="btn settings-select"></select>
         </div>
+        <div class="settings-row" id="workstationRow" style="display:none;">
+          <label for="workstationSelect">T2med-Arbeitsplatz (dieser Rechner)</label>
+          <select id="workstationSelect" class="btn settings-select"></select>
+        </div>
         <div class="settings-row" id="micSettingsRow" style="display:none;">
           <label for="micSelect">Mikrofon</label>
           <select id="micSelect" class="btn settings-select"></select>
@@ -308,7 +327,8 @@
     window.APP_CONFIG = {
       defaultModel: "{{ default_model }}",
       version: "{{ version }}",
-      loopWarnShare: {{ loop_warn_share }}
+      loopWarnShare: {{ loop_warn_share }},
+      gdt: {{ gdt | tojson }}
     };
   </script>
   <!-- marked.js für Markdown-Rendering -->

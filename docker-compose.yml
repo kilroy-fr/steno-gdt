@@ -37,14 +37,36 @@ services:
       # verdrahtet, und genau daran scheiterten lange Uploads.
       - AUDIO_TIMEOUT=1800
       - LOG_DIR=/logs
+      # Ortszeit: geht als Untersuchungszeit nach T2med und benennt die Logs
+      - TZ=Europe/Berlin
+      # --- T2med per GDT (gdt.py, Einrichtung: T2MED-EINRICHTUNG.md) ---
+      # Austauschordner im Container; der Mount unten legt fest, was dahinter liegt.
+      - GDT_DIR=/gdt
+      # Arbeitsplatznummer = Endung der Austauschdateien (KITRT2MD.001 / T2MDKITR.001)
+      - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3
+      - GDT_ID_PVS=T2MED
+      - GDT_ID_GERAET=KI_TRANS
+      - GDT_ZEICHENSATZ=2
+      - GDT_KENNFELD=ALLG00
+      # Minuten, die ein "Messung starten" auf seine Aufnahme wartet
+      - GDT_AUFTRAG_GUELTIG=60
+      # Wie T2med den Austauschordner sieht - nur fuer den Transkript-Anhang,
+      # leer = kein Anhang. Beispiel: \\192.168.2.70\ki-transcribe-gdt
+      - GDT_PVS_PFAD=
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
       - ./server.py:/app/server.py:ro
       - ./prompts.py:/app/prompts.py:ro
       - ./medical_vocab.py:/app/medical_vocab.py:ro
+      - ./gdt.py:/app/gdt.py:ro
       - ./templates:/app/templates:ro
       - ./static:/app/static:ro
       - ./logs:/logs
+      # GDT-Austauschordner, den auch T2med erreichen muss. Standard: ./gdt
+      # auf diesem Rechner (per Windows-Freigabe fuer die Arbeitsplaetze).
+      # Fuer eine NAS-Freigabe das Volume gdt-share unten einkommentieren und
+      # hier "gdt-share:/gdt" eintragen.
+      - ${GDT_HOST_DIR:-./gdt}:/gdt
     depends_on:
       - faster-whisper
       - diarize
@@ -189,3 +211,11 @@ networks:
 # ============================================================
 volumes:
   whisper-models:
+  # GDT-Austauschordner auf einer SMB-Freigabe (statt ./gdt), z. B. neben
+  # //192.168.2.70/sono-gdt. Zugangsdaten nicht einchecken - in .env ablegen.
+  # gdt-share:
+  #   driver: local
+  #   driver_opts:
+  #     type: cifs
+  #     device: //192.168.2.70/ki-transcribe-gdt
+  #     o: "username=${GDT_SMB_USER},password=${GDT_SMB_PASSWORD},uid=0,gid=0,file_mode=0660,dir_mode=0770,vers=3.0"

@@ -25,6 +25,7 @@ Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter F
 - Live-Streaming der LLM-Antwort (SSE)
 - Einstellungen-Modal (Zahnrad-Icon): KI-Modell-Auswahl, Mikrofon-Auswahl, Logging-Modus
 - Optionaler Logging-Modus: speichert Transkript + Analyse als JSON auf dem Server (`LOG_DIR`)
+- **Übergabe an T2med per GDT:** „Messung starten“ in T2med legt den Patienten fest, „An T2med senden“ schreibt die Dokumentation als Befund in seine Akte (Einrichtung: [`T2MED-EINRICHTUNG.md`](T2MED-EINRICHTUNG.md))
 - Live-Health-Anzeige für Whisper, Ollama und Sprechertrennung im Header
 
 ### ✨ Bedienung
@@ -85,6 +86,11 @@ curl http://localhost:8010/health
 7. Verarbeitung startet → Transkript und Analyse erscheinen live (SSE-Stream)
 8. Text abschnittsweise kopieren oder mit „Nächster Patient" direkt weiter aufnehmen
 
+**Mit T2med:** vor der Aufnahme in T2med beim Patienten „Messung starten“ klicken. Der Patient erscheint links
+unter „Patient aus T2med“ und gehört zur nächsten Aufnahme. Nach der Analyse über **An T2med senden** übergeben;
+der Knopf nennt den Zielpatienten. Ohne „Messung starten“ landet die Dokumentation in T2med unter
+„Ext. Aufträge“ zur manuellen Zuordnung. Ein Auftrag gilt für genau eine Aufnahme.
+
 ---
 
 ## ⚙️ Konfiguration
@@ -110,7 +116,12 @@ environment:
   - AUDIO_TIMEOUT=1800             # Wartezeit (s) auf Whisper und Diarisation
   - LOOP_WARN_SHARE=0.15           # ab diesem Schleifenanteil warnt die Oberfläche
   - LOG_DIR=/logs                  # Ziel für optionalen Logging-Modus
+  - TZ=Europe/Berlin               # Ortszeit für T2med und Log-Dateinamen
+  - GDT_DIR=/gdt                   # GDT-Austauschordner mit T2med (leer = Anbindung aus)
+  - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3
 ```
+
+Alle `GDT_*`-Variablen und die Einrichtung in T2med: [`T2MED-EINRICHTUNG.md`](T2MED-EINRICHTUNG.md).
 
 ### Sprechertrennung (Diarisation)
 
@@ -353,6 +364,8 @@ ki-transcribe/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
 ├── prompts.py                 # LLM-Prompts (ANALYZE, ABPRO, SUMMARY, SUBJECT, CLEAN)
 ├── medical_vocab.py           # Kuratiertes Fachvokabular (MEDICAL_GLOSSARY)
+├── gdt.py                     # GDT 2.1: Messauftrag aus T2med lesen, Dokumentation zurückgeben
+├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, erster Test
 ├── Dockerfile                 # Docker-Build für server.py
 ├── docker-compose.yml         # Docker-Setup (gespraech-web + faster-whisper)
 ├── requirements-server.txt    # Server-Python-Dependencies
@@ -365,7 +378,8 @@ ki-transcribe/
 │
 ├── templates/index.html       # Web-UI HTML-Template (Jinja2)
 ├── static/                    # CSS, JS, Favicon, Logo
-└── logs/                      # Ziel für optionalen Logging-Modus (LOG_DIR)
+├── logs/                      # Ziel für optionalen Logging-Modus (LOG_DIR)
+└── gdt/                       # GDT-Austauschordner mit T2med (Standard-Mount, gitignored)
 ```
 
 ---
