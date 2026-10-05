@@ -4,6 +4,10 @@
 
 Medizinisches Transkriptions-System als Web-App / FastAPI-Server (`server.py`) — läuft als Docker-Container, bietet eine Browser-UI für Arzt-Patienten-Gesprächsanalyse sowie eine REST-API für Transkription und LLM-Analyse.
 
+**Abzweig von `../ki-transcribe` mit T2med-Anbindung per GDT.** `ki-transcribe` bleibt ohne GDT und läuft weiter produktiv; hier wird die Anbindung entwickelt. Abgezweigt bei `f6f5aa1` (Branch `refactor-server-frontend`). Das Git-Remote `ki-transcribe` zeigt auf den lokalen Ordner, Änderungen von dort mit `git fetch ki-transcribe && git merge ki-transcribe/<branch>` holen.
+
+**Docker: nicht einfach `docker compose up` hier.** `docker-compose.yml` ist noch die von `ki-transcribe`, mit denselben festen Containernamen (`gespraech-web`, `diktat-whisper`, `diktat-diarize`) und demselben Port 8010. Ein Start aus diesem Ordner kollidiert mit den laufenden Containern (oder ersetzt sie). Bevor dieser Stand als Container läuft, braucht er einen eigenen Web-Dienst (eigener Name und Port), der Whisper, Diarisation und ollama von `ki-transcribe` mitbenutzt. Bis dahin lokal testen (Abschnitt „Server entwickeln / lokal testen“).
+
 ---
 
 ## Architektur
