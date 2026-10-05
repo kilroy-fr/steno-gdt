@@ -1,24 +1,34 @@
 services:
 
   # ============================================================
-  # KI-Gesprächsanalyse Web-App
+  # KI-Gesprächsanalyse mit T2med-Anbindung (GDT)
   # ============================================================
-  gespraech-web:
+  # Nur die Web-App. Whisper, Sprechertrennung und ollama laufen schon und
+  # werden mitbenutzt — wie ki-transcribe und ki-atteste es auch tun:
+  #   diktat-whisper, diktat-diarize  -> ../ki-transcribe/docker-compose.yml
+  #   ollama                          -> eigener Container im ollama-net
+  # Deshalb kein depends_on: ein "up" hier startet, stoppt oder ersetzt
+  # keinen dieser Dienste.
+  transcribe-gdt-web:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: gespraech-web
+    container_name: transcribe-gdt-web
+    # 8010 gehoert ki-transcribe (gespraech-web)
     ports:
-      - "127.0.0.1:8010:8000"
+      - "127.0.0.1:8011:8000"
     environment:
-      - WHISPER_HOST=faster-whisper
+      # Containernamen statt der Compose-Dienstnamen (faster-whisper, diarize):
+      # die Dienstnamen sind Aliase des ki-transcribe-Projekts, die Container-
+      # namen gelten in jedem Netz, in dem der Container haengt.
+      - WHISPER_HOST=diktat-whisper
       - WHISPER_PORT=8000
       - OLLAMA_HOST=ollama
       - OLLAMA_PORT=11434
       - OLLAMA_MODEL=gemma4:12b
-      # Kontextfenster (Untergrenze). ollamas eigener Default auf einer
-      # 16-GB-Karte ist 4096 — dann wird jedes laengere Gespraech vorne
-      # abgeschnitten. Bei gemma4:12b kosten 16k nur ~260 MiB VRAM.
+      # Kontextfenster (Untergrenze). Dieselbe wie in ki-transcribe: ollama
+      # laedt das Modell bei jedem num_ctx-Wechsel neu, ein abweichender Wert
+      # hier wuerde es zwischen beiden Apps hin- und herladen.
       - OLLAMA_NUM_CTX=16384
       - WHISPER_LANGUAGE=de
       - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
@@ -26,15 +36,14 @@ services:
       # Silero-VAD im Whisper-Server. Nur zum Abschalten da, falls VAD je sehr
       # leise Sprache wegschneidet — sonst anlassen, siehe CLAUDE.md.
       - WHISPER_VAD_FILTER=true
-      - DIARIZE_HOST=diarize
+      - DIARIZE_HOST=diktat-diarize
       - DIARIZE_PORT=8000
       # 0/0 = pyannote schaetzt die Sprecherzahl selbst (Diktat bleibt 1,
       # Begleitperson/MFA duerfen 3+ sein)
       - DIARIZE_MIN_SPEAKERS=0
       - DIARIZE_MAX_SPEAKERS=0
       # Wartezeit auf Whisper und Diarisation. 30 min, damit auch eine
-      # hochgeladene Dreiviertelstunde durchlaeuft - vorher waren 300 s fest
-      # verdrahtet, und genau daran scheiterten lange Uploads.
+      # hochgeladene Dreiviertelstunde durchlaeuft.
       - AUDIO_TIMEOUT=1800
       - LOG_DIR=/logs
       # Ortszeit: geht als Untersuchungszeit nach T2med und benennt die Logs
@@ -67,135 +76,18 @@ services:
       # Fuer eine NAS-Freigabe das Volume gdt-share unten einkommentieren und
       # hier "gdt-share:/gdt" eintragen.
       - ${GDT_HOST_DIR:-./gdt}:/gdt
-    depends_on:
-      - faster-whisper
-      - diarize
     networks:
       - diktat-network
       - ollama-network
       - caddy-proxy-network
     restart: unless-stopped
 
-  # ============================================================
-  # Diarisation (Sprechertrennung, GPU) – pyannote.audio
-  # ============================================================
-  # Eigener Container, damit der mit ki-atteste geteilte Whisper-Container
-  # unangetastet bleibt. Auf der CPU war die Pipeline mit ~0,6x Echtzeit der
-  # Flaschenhals der gesamten Analyse (15 min Rechenzeit fuer 25 min Aufnahme,
-  # waehrend Whisper auf der GPU nach gut einer Minute fertig war) – siehe
-  # Kopfkommentar in diarize/app.py.
-  #
-  # Kartenwechsel (z. B. auf eine Intel Arc) sind bewusst reine Konfiguration:
-  # TORCH_INDEX_URL waehlt das Wheel, der devices-/deploy-Block die Zuteilung.
-  # DIARIZE_DEVICE=auto erkennt CUDA bzw. XPU selbst, der Quelltext bleibt gleich.
-  # Erster Build braucht ./.hf_token – siehe diarize/README.md
-  diarize:
-    build:
-      context: ./diarize
-      dockerfile: Dockerfile
-      args:
-        # NVIDIA: cu128 ist Pflicht, die RTX 5080 ist Blackwell (sm_120).
-        # Intel Arc: auf https://download.pytorch.org/whl/xpu umstellen.
-        # Ohne GPU: https://download.pytorch.org/whl/cpu
-        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
-      secrets:
-        - hf_token
-    container_name: diktat-diarize
-    expose:
-      - "8000"
-    ports:
-      - "127.0.0.1:8002:8000"
-    environment:
-      # Muss zum Default in diarize/download_model.py passen: beim Build wird
-      # nur dieser vorgeladen, zur Laufzeit ist der Container offline.
-      - PYANNOTE_MODEL=pyannote/speaker-diarization-community-1
-      - DIARIZE_DEVICE=auto
-      # Greift nur, wenn kein Grafikgeraet gefunden wird (CPU-Rueckfall).
-      - TORCH_THREADS=8
-      - TZ=Europe/Berlin
-    # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
-    volumes:
-      - ./diarize/app.py:/app/app.py:ro
-    # NVIDIA-Zuteilung. Die Karte wird mit faster-whisper und ollama geteilt;
-    # pyannote braucht nur 1–2 GB VRAM und laeuft nur waehrend einer Analyse.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    # Fuer eine Intel Arc stattdessen den deploy-Block loeschen und das
-    # WSL2-Grafikgeraet durchreichen. NICHT /dev/dri — unter Docker Desktop
-    # laeuft die GPU ueber die WSL2-Paravirtualisierung, der Knoten heisst
-    # /dev/dxg und die Treiberbibliotheken liegen in /usr/lib/wsl:
-    # devices:
-    #   - /dev/dxg:/dev/dxg
-    # volumes:
-    #   - ./diarize/app.py:/app/app.py:ro
-    #   - /usr/lib/wsl:/usr/lib/wsl:ro
-    # environment:
-    #   - LD_LIBRARY_PATH=/usr/lib/wsl/lib
-    networks:
-      - diktat-network
-    restart: unless-stopped
-
-  # ============================================================
-  # faster-whisper (Transkription, GPU) – geteilt mit ki-atteste
-  # ============================================================
-  faster-whisper:
-    image: fedirz/faster-whisper-server:latest-cuda
-    container_name: diktat-whisper
-    expose:
-      - "8000"
-    ports:
-      - "127.0.0.1:8001:8000"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    environment:
-      - WHISPER__MODEL=large-v3
-      - WHISPER__INFERENCE_DEVICE=cuda
-      - WHISPER__COMPUTE_TYPE=float16
-      - WHISPER__ALLOW_DOWNLOADS=true
-      - TZ=Europe/Berlin
-    volumes:
-      - whisper-models:/root/.cache/huggingface
-      # Gepatchter Router: setzt condition_on_previous_text=False und zwei
-      # weitere Decoder-Optionen, an die die HTTP-Schnittstelle nicht
-      # heranreicht. Ohne das laeuft Whisper in Wiederholschleifen, aus denen
-      # es bis zum Dateiende nicht mehr herauskommt (gemessen: 9612 von 10376
-      # Woertern einer 36-min-Aufnahme). Der Server laeuft aus einem
-      # Quellbaum, ein Dateimount genuegt also. Details: whisper-patch/README.md
-      - ./whisper-patch/stt.py:/root/faster-whisper-server/faster_whisper_server/routers/stt.py:ro
-    networks:
-      - diktat-network
-      - caddy-proxy-network
-    restart: unless-stopped
-    # Kein Watchtower mehr: der Mount oben legt sich ueber jede Version der
-    # Datei, ein automatisches Image-Update wuerde den Patch also unbemerkt
-    # gegen einen fremden Rest des Pakets laufen lassen. Updates von Hand,
-    # Rezept in whisper-patch/README.md.
-
 # ============================================================
-# SECRETS
-# ============================================================
-# Hugging-Face-Token, nur zur Build-Zeit (gated pyannote-Modelle).
-# Als BuildKit-Secret gemountet, landet also nicht im Image.
-secrets:
-  hf_token:
-    file: ./.hf_token
-
-# ============================================================
-# NETZWERKE
+# NETZWERKE — alle extern, angelegt von ki-transcribe bzw. ollama/Caddy
 # ============================================================
 networks:
   diktat-network:
-    driver: bridge
+    external: true
     name: diktat-network
 
   ollama-network:
@@ -209,13 +101,12 @@ networks:
 # ============================================================
 # VOLUMES
 # ============================================================
-volumes:
-  whisper-models:
-  # GDT-Austauschordner auf einer SMB-Freigabe (statt ./gdt), z. B. neben
-  # //192.168.2.70/sono-gdt. Zugangsdaten nicht einchecken - in .env ablegen.
-  # gdt-share:
-  #   driver: local
-  #   driver_opts:
-  #     type: cifs
-  #     device: //192.168.2.70/ki-transcribe-gdt
-  #     o: "username=${GDT_SMB_USER},password=${GDT_SMB_PASSWORD},uid=0,gid=0,file_mode=0660,dir_mode=0770,vers=3.0"
+# GDT-Austauschordner auf einer SMB-Freigabe (statt ./gdt), z. B. neben
+# //192.168.2.70/sono-gdt. Zugangsdaten nicht einchecken - in .env ablegen.
+# volumes:
+#   gdt-share:
+#     driver: local
+#     driver_opts:
+#       type: cifs
+#       device: //192.168.2.70/ki-transcribe-gdt
+#       o: "username=${GDT_SMB_USER},password=${GDT_SMB_PASSWORD},uid=0,gid=0,file_mode=0660,dir_mode=0770,vers=3.0"

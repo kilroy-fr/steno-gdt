@@ -63,9 +63,9 @@ GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3
 GDT_PVS_PFAD=\\192.168.2.70\ki-transcribe-gdt     # optional, für den Transkript-Anhang
 ```
 
-und neu starten, ohne den geteilten Whisper-Container mitzuziehen:
-`docker compose up -d --no-deps gespraech-web`.
-`curl localhost:8010/` muss `"enabled": true` enthalten. Sonst existiert `GDT_DIR` im Container nicht.
+und im Ordner `transcribe-gdt` neu starten: `docker compose up -d`. Das fasst nur den eigenen Container
+`transcribe-gdt-web` an, Whisper, Sprechertrennung und ollama laufen unberührt weiter.
+`curl localhost:8011/` muss `"enabled": true` enthalten. Sonst existiert `GDT_DIR` im Container nicht.
 
 ## 2. Arbeitsplatz im Browser
 
@@ -129,7 +129,7 @@ Dateinamen** auf `.002` bzw. `.003` ändern. **Nach jeder Änderung T2med an die
 2. In KI-Transcribe den Arbeitsplatz „Sprechzimmer 1“ wählen.
 3. T2med einrichten, speichern, **T2med neu starten**.
 4. Testpatienten öffnen, **Messung starten**. Nach wenigen Sekunden steht er in KI-Transcribe unter
-   „Patient aus T2med“, im Log (`docker compose logs -f gespraech-web`) steht `Messauftrag an Arbeitsplatz 001: …`.
+   „Patient aus T2med“, im Log (`docker compose logs -f transcribe-gdt-web`) steht `Messauftrag an Arbeitsplatz 001: …`.
    - Steht dort `KITRT2MD.001 ignoriert (… Felder …)`: T2med schreibt eine andere Satzart, die Zeile an
      Claude/den Betreuer geben.
    - Steht dort nichts: Liegt `KITRT2MD.001` im Austauschordner? Exportverzeichnis und Dateiname prüfen.

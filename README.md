@@ -1,6 +1,8 @@
-# KI-Transcribe Pro
+# KI-Transcribe Pro mit T2med-Anbindung (transcribe-gdt)
 
-Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter FastAPI-Server mit Browser-UI: Audio aufnehmen oder hochladen, per faster-whisper transkribieren und per ollama-LLM strukturiert dokumentieren.
+Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter FastAPI-Server mit Browser-UI: Audio aufnehmen oder hochladen, per faster-whisper transkribieren und per ollama-LLM strukturiert dokumentieren — und die Dokumentation per GDT an T2med übergeben.
+
+Abzweig von [`ki-transcribe`](../ki-transcribe). Dieser Ordner bringt nur die Web-App mit (`transcribe-gdt-web`, Port 8011). Whisper, Sprechertrennung und ollama werden mitbenutzt: `diktat-whisper` und `diktat-diarize` aus `ki-transcribe`, `ollama` aus seinem eigenen Container.
 
 ## 🎯 Features
 
@@ -15,7 +17,7 @@ Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter F
 - **Sprechertrennung (Diarisation)** via pyannote.audio: trennt Arzt, Patient und weitere Anwesende im Transkript (`SPRECHER A:` / `SPRECHER B:` …). Läuft auf der GPU in einem eigenen Container, parallel zur Transkription. Jeder Satz wird geschlossen einem Sprecher zugeordnet, damit Wechsel nicht mitten im Satz liegen
 - Sprecherzuordnung: das LLM erschließt aus dem Gesprächsverlauf, welcher Marker der Arzt ist – so werden Arzt-Überlegungen nicht als gesicherte Diagnosen und Patienten-Rückfragen nicht als Verordnungen dokumentiert. Ohne Diarisation greift weiterhin die reine Kontext-Heuristik
 - **Vollständige Dokumentation auch langer Gespräche:** das Kontextfenster des LLM wird an die Transkriptlänge angepasst (`OLLAMA_NUM_CTX`), und die Prompts verlangen jedes Anliegen einzeln – gerade bei Vorsorgeuntersuchungen mit mehreren unabhängigen Beschwerden
-- **Schutz vor Whisper-Wiederholschleifen:** gepatchter Whisper-Router (`whisper-patch/`), VAD, automatisches Kürzen verbliebener Schleifen und eine Warnung, wenn dem Transkript dadurch Gespräch fehlt
+- **Schutz vor Whisper-Wiederholschleifen:** gepatchter Whisper-Router (`whisper-patch/` in `ki-transcribe`), VAD, automatisches Kürzen verbliebener Schleifen und eine Warnung, wenn dem Transkript dadurch Gespräch fehlt
 - Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO, Standard), Zusammenfassung, Bereinigung
 - A/B/PRO-Modus zeigt zusätzlich drei separat kopierbare Karten (Anamnese / Befund / Procedere)
 - Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe, auch nachträglich per Rerun auf der Analyse-Karte
@@ -40,45 +42,38 @@ Lokales Web-System für medizinische Gesprächsdokumentation. Docker-basierter F
 ## 📋 Voraussetzungen
 
 - Docker & Docker Compose
-- NVIDIA GPU für faster-whisper (Standard-Image nutzt CUDA; ohne GPU auf `latest-cpu` umstellen)
-- Mindestens 4 GB RAM; die GPU teilen sich Whisper, ollama und die Diarisation (16 GB VRAM reichen)
-- Kostenloser **Hugging-Face-Account** für die Sprechertrennung: die pyannote-Modelle sind MIT-lizenziert, aber „gated" (siehe [`diarize/README.md`](diarize/README.md))
-- Bestehender **ollama-Container** mit Modell (z. B. `gemma4:12b`), erreichbar über das externe Netzwerk `ollama-net`
-- (Optional) Caddy oder anderer Reverse-Proxy im externen Netzwerk `caddy-proxy-network`
+- Laufendes **`ki-transcribe`** mit `diktat-whisper` und `diktat-diarize` im Netzwerk `diktat-network` (GPU, Hugging-Face-Token usw. siehe dort)
+- Laufender **ollama-Container** mit Modell (z. B. `gemma4:12b`) im Netzwerk `ollama-net`
+- Netzwerk `caddy-proxy-network` (Caddy-Reverse-Proxy)
 
 ---
 
 ## 🚀 Installation
 
-### Mit bestehendem ollama-Container
-
 ```bash
-# Netzwerke, falls noch nicht vorhanden
-docker network create diktat-network
-docker network connect diktat-network <dein-ollama-container-name>
-
-# Server starten
-docker-compose up -d
+# Nur die Web-App bauen und starten. Whisper, Sprechertrennung und ollama
+# werden dabei weder gestartet noch gestoppt (kein depends_on).
+docker compose up -d --build
 ```
 
 ### Test
 
 ```bash
-# UI erreichbar?
-curl http://localhost:8010/
+# UI erreichbar? ("enabled": true = GDT-Ordner gefunden)
+curl http://localhost:8011/
 
-# Health-Check (whisper + ollama + diarize + version)
-curl http://localhost:8010/health
+# Health-Check: whisper, ollama und diarize müssen "ok" melden
+curl http://localhost:8011/health
 ```
 
-`docker-compose.yml` bindet Port `8010` auf `localhost` — Zugriff von außen läuft über den Reverse-Proxy im `caddy-proxy-network`.
+`docker-compose.yml` bindet Port `8011` auf `localhost` (8010 gehört `ki-transcribe`). Für die Arbeitsplätze braucht es eine Route im Caddy-Reverse-Proxy (`caddy-proxy-network`), denn das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`.
 
 ---
 
 ## 🎮 Nutzung
 
-1. **Server starten**: `docker-compose up -d` (einmalig)
-2. **Web-UI öffnen**: Browser → Server-URL (z. B. `http://transcribe.domain.local`)
+1. **Server starten**: `docker compose up -d` (einmalig)
+2. **Web-UI öffnen**: Browser → Server-URL (auf dem Docker-Rechner `http://localhost:8011`)
 3. Audio-Datei hochladen oder direkt im Browser aufnehmen
 4. Modus wählen: **Vollanalyse**, **A/B/PRO** (Standard), **Zusammenfassung** oder **Bereinigen**
 5. Geschlecht wählen (Patient / Patientin / neutral)
@@ -97,11 +92,11 @@ der Knopf nennt den Zielpatienten. Ohne „Messung starten“ landet die Dokumen
 
 ### Server-Einstellungen
 
-Bearbeite `docker-compose.yml` (Service `gespraech-web`):
+Bearbeite `docker-compose.yml` (Service `transcribe-gdt-web`):
 
 ```yaml
 environment:
-  - WHISPER_HOST=faster-whisper
+  - WHISPER_HOST=diktat-whisper      # geteilter Container aus ki-transcribe
   - WHISPER_PORT=8000
   - OLLAMA_HOST=ollama
   - OLLAMA_PORT=11434
@@ -109,7 +104,7 @@ environment:
   - OLLAMA_NUM_CTX=16384           # Kontextfenster (Untergrenze, wächst bei langen Gesprächen)
   - WHISPER_LANGUAGE=de
   - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
-  - DIARIZE_HOST=diarize
+  - DIARIZE_HOST=diktat-diarize      # geteilter Container aus ki-transcribe
   - DIARIZE_PORT=8000
   - DIARIZE_MIN_SPEAKERS=0         # 0 = pyannote schätzt die Sprecherzahl selbst
   - DIARIZE_MAX_SPEAKERS=0         # 0 = ohne Obergrenze (Begleitperson, MFA)
@@ -123,40 +118,15 @@ environment:
 
 Alle `GDT_*`-Variablen und die Einrichtung in T2med: [`T2MED-EINRICHTUNG.md`](T2MED-EINRICHTUNG.md).
 
-### Sprechertrennung (Diarisation)
+### Whisper und Sprechertrennung (geteilt)
 
-Einmalig vor dem ersten Build: Hugging-Face-Token besorgen, Nutzungsbedingungen
-der drei pyannote-Repos akzeptieren und den Token ablegen — die vollständige
-Anleitung steht in [`diarize/README.md`](diarize/README.md).
+`diktat-whisper` und `diktat-diarize` sind in `../ki-transcribe/docker-compose.yml` definiert und
+werden dort gebaut, konfiguriert und neu gestartet. Sie dienen zugleich `ki-transcribe` und
+`ki-atteste`. Einrichtung (Hugging-Face-Token, GPU, Whisper-Patch) siehe README von `ki-transcribe`.
 
-```bash
-echo "hf_xxxxxxxxxxxxxxxxxxxx" > .hf_token   # gitignored
-docker compose build diarize
-docker compose up -d diarize
-curl http://127.0.0.1:8002/health
-```
-
-Der Token wird ausschließlich als BuildKit-Secret gemountet und landet nicht im
-Image; zur Laufzeit läuft der Container mit `HF_HUB_OFFLINE=1`, also ohne
-Netzzugang. Im Frontend schaltet der Toggle „Sprechertrennung" die Funktion pro
-Analyse ab. Fällt der Container aus, läuft die Analyse ohne Sprecherkennzeichnung
-weiter — die Transkription bricht **nicht** ab.
-
-Ohne Diarisation ist die Sprechertrennung nicht deaktiviert, sondern nur
-ungenauer: die Prompts arbeiten dann mit reiner Kontext-Heuristik.
-
-Das Whisper-Modell wird im `faster-whisper`-Container konfiguriert:
-
-```yaml
-faster-whisper:
-  environment:
-    - WHISPER__MODEL=large-v3          # Standard-Modell (Fallback / Auto-Sprache)
-    - WHISPER__ALLOW_DOWNLOADS=true    # Erlaubt Download zusätzlicher Modelle
-```
-
-Das Medizin-Modell wird beim ersten deutschen Aufruf automatisch von HuggingFace heruntergeladen (~3 GB) und danach im Volume `whisper-models` gecacht. Im Frontend schaltet „Gespräch nicht auf Deutsch" auf das Standard-Modell mit automatischer Spracherkennung zurück.
-
-> **Hinweis:** Der `faster-whisper`-Container (`diktat-whisper`) wird mit dem Projekt `ki-atteste` geteilt. Änderungen an Modell-Env-Vars wirken sich auf beide Projekte aus.
+Im Frontend schaltet der Toggle „Sprechertrennung" die Funktion pro Analyse ab. Fällt der
+Diarisations-Container aus, läuft die Analyse ohne Sprecherkennzeichnung weiter. Die Transkription
+bricht **nicht** ab.
 
 ### Kontextfenster des LLM (`OLLAMA_NUM_CTX`)
 
@@ -173,7 +143,7 @@ kosten 16k Kontext nur ~260 MiB VRAM; bei Modellen ohne Gleitfenster-Aufmerksamk
 
 ```bash
 docker logs ollama 2>&1 | grep "truncating input prompt"
-docker logs gespraech-web 2>&1 | grep "Prompt-Tokens"
+docker logs transcribe-gdt-web 2>&1 | grep "Prompt-Tokens"
 ```
 
 ### Erlaubte Ollama-Modelle (Frontend-Dropdown)
@@ -196,10 +166,10 @@ ollama list
 Die Prompts für alle Modi liegen zentral in `prompts.py` (`ANALYZE_PROMPT`, `ABPRO_PROMPT`, `SUMMARY_PROMPT`, `SUBJECT_PROMPT`, `CLEAN_PROMPT`). Die Vollständigkeitsregeln (`COMPLETENESS_RULES`) stehen in Vollanalyse und A/B/PRO bewusst **nach** dem Transkript – bei langen Gesprächen wirken Anweisungen am Ende stärker. Nach Änderungen:
 
 ```bash
-docker-compose restart gespraech-web
+docker compose restart transcribe-gdt-web
 ```
 
-(`server.py`, `prompts.py`, `medical_vocab.py`, `templates/` und `static/` sind read-only in den Container gemounted — es ist kein Rebuild nötig, außer bei Änderungen an `requirements-server.txt` oder dem `Dockerfile`.)
+(`server.py`, `prompts.py`, `medical_vocab.py`, `gdt.py`, `templates/` und `static/` sind read-only in den Container gemounted — es ist kein Rebuild nötig, außer bei Änderungen an `requirements-server.txt` oder dem `Dockerfile`.)
 
 ### Fachvokabular erweitern
 
@@ -214,9 +184,9 @@ docker-compose restart gespraech-web
 ### Problem: „Verbindung zum Server fehlgeschlagen"
 
 ```bash
-docker ps | grep gespraech-web
-curl http://localhost:8010/
-docker logs gespraech-web
+docker ps | grep transcribe-gdt-web
+curl http://localhost:8011/health
+docker logs transcribe-gdt-web
 ```
 
 ### Problem: „faster-whisper nicht erreichbar"
@@ -276,14 +246,11 @@ Die Analyse läuft dann bewusst ohne Sprecherkennzeichnung weiter. Ursache prüf
 
 ```bash
 curl http://127.0.0.1:8002/health      # {"status": "ok"} erwartet
-docker compose logs --tail 50 diarize
+docker logs --tail 50 diktat-diarize
 ```
 
-- `Pipeline nicht geladen` / `nicht im Cache`: Image wurde ohne gültigen
-  `.hf_token` gebaut oder die Nutzungsbedingungen sind nicht für **alle drei**
-  pyannote-Repos akzeptiert → `docker compose build --no-cache diarize`
-- Der Health-Punkt „Sprecher" im Header bleibt rot, solange der Container startet
-  (das Laden der Pipeline dauert einige Sekunden)
+Behoben wird es in `ki-transcribe` (siehe dort, „Sprechertrennung nicht verfügbar“).
+Der Health-Punkt „Sprecher" im Header bleibt rot, solange der Container startet.
 
 ### Problem: „Sprecher werden falsch zugeordnet"
 
@@ -298,58 +265,23 @@ perfekt; Fehler sitzen vor allem an Sprecherwechseln und bei kurzen Einwürfen.
    Personenzahl wirklich feststeht — eine harte Vorgabe von 2 ordnet Aussagen
    von Begleitpersonen falsch zu
 
-### Problem: „container … is not connected to the network ki-transcribe_diktat-network"
+### Problem: „network diktat-network declared as external, but could not be found"
 
-Tritt beim Recreate auf, wenn neben `diktat-network` noch ein leeres, projekt-präfigiertes Netzwerk aus früheren Compose-Versionen existiert. Beide tragen dasselbe Compose-Label, Compose greift auf das falsche zu:
-
-```bash
-# Prüfen, dass das Alt-Netzwerk leer ist (Containers: 0)
-docker network inspect ki-transcribe_diktat-network --format 'Containers: {{len .Containers}}'
-
-# Dann entfernen
-docker network rm ki-transcribe_diktat-network
-docker compose up -d
-```
+`ki-transcribe` legt das Netzwerk an. Dort einmal `docker compose up -d` laufen lassen (oder
+`docker network create diktat-network`), danach hier erneut starten. Dasselbe gilt für
+`ollama-net` (ollama) und `caddy-proxy-network` (Caddy).
 
 ### Problem: „Text-Säuberung / Analyse zu aggressiv/schwach"
 
 Bearbeite die passende Konstante in `prompts.py` (z. B. `CLEAN_PROMPT`, `ANALYZE_PROMPT`) und starte den Container neu:
 
 ```bash
-docker-compose restart gespraech-web
+docker compose restart transcribe-gdt-web
 ```
 
 ---
 
 ## 🔧 Erweiterte Features
-
-### GPU-Beschleunigung
-
-`faster-whisper` läuft standardmäßig mit `fedirz/faster-whisper-server:latest-cuda` und reserviert eine NVIDIA-GPU:
-
-```yaml
-faster-whisper:
-  image: fedirz/faster-whisper-server:latest-cuda
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: 1
-            capabilities: [gpu]
-```
-
-Ohne GPU: Image auf `fedirz/faster-whisper-server:latest-cpu` ändern und den `deploy`-Block entfernen.
-
-Der Router des Whisper-Servers wird durch `whisper-patch/stt.py` ersetzt
-(Bind-Mount, `condition_on_previous_text=False` gegen Wiederholschleifen). Der
-Container hat deshalb kein Watchtower-Label mehr; Image-Updates von Hand nach
-[`whisper-patch/README.md`](whisper-patch/README.md).
-
-Die Diarisation läuft ebenfalls auf der GPU (`diarize`, PyTorch-Variante per
-Build-Argument `TORCH_INDEX_URL`, Rechenwerk per `DIARIZE_DEVICE`); ohne
-nutzbare Karte fällt sie auf die CPU zurück. Details in
-[`diarize/README.md`](diarize/README.md).
 
 ### Logging-Modus
 
@@ -360,21 +292,18 @@ nutzbare Karte fällt sie auf die CPU zurück. Details in
 ## 📁 Dateistruktur
 
 ```
-ki-transcribe/
+transcribe-gdt/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
 ├── prompts.py                 # LLM-Prompts (ANALYZE, ABPRO, SUMMARY, SUBJECT, CLEAN)
 ├── medical_vocab.py           # Kuratiertes Fachvokabular (MEDICAL_GLOSSARY)
 ├── gdt.py                     # GDT 2.1: Messauftrag aus T2med lesen, Dokumentation zurückgeben
 ├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, erster Test
 ├── Dockerfile                 # Docker-Build für server.py
-├── docker-compose.yml         # Docker-Setup (gespraech-web + faster-whisper)
+├── docker-compose.yml         # nur transcribe-gdt-web; Whisper/Diarisation/ollama extern
 ├── requirements-server.txt    # Server-Python-Dependencies
 ├── VERSION                    # Aktuelle Versionsnummer
 ├── README.md                  # Diese Datei
 ├── CLAUDE.md                  # Technische Referenz für KI-gestützte Entwicklung
-│
-├── diarize/                   # Diarisations-Container (pyannote, GPU)
-├── whisper-patch/             # Gepatchter Whisper-Router gegen Wiederholschleifen
 │
 ├── templates/index.html       # Web-UI HTML-Template (Jinja2)
 ├── static/                    # CSS, JS, Favicon, Logo
@@ -386,27 +315,26 @@ ki-transcribe/
 
 ## 🤝 Nützliche Kommandos
 
+Alle Befehle betreffen nur `transcribe-gdt-web`. Whisper, Sprechertrennung und ollama bleiben unberührt.
+
 ```bash
 # Container-Status
-docker-compose ps
+docker compose ps
 
 # Logs anschauen
-docker-compose logs -f
+docker compose logs -f
 
 # Container neu starten (z. B. nach Prompt-Änderung)
-docker-compose restart gespraech-web
+docker compose restart transcribe-gdt-web
 
 # Neu bauen (nach Dependency- oder Dockerfile-Änderung)
-docker-compose up -d --build
+docker compose up -d --build
 
-# Nur die Web-App neu bauen, ohne den geteilten Whisper-Container zu stoppen
-docker compose up -d --build --no-deps gespraech-web
-
-# Alles stoppen
-docker-compose down
+# Stoppen
+docker compose down
 
 # Ins Container-Terminal
-docker exec -it gespraech-web bash
+docker exec -it transcribe-gdt-web bash
 ```
 
 ---

@@ -6,60 +6,52 @@ Medizinisches Transkriptions-System als Web-App / FastAPI-Server (`server.py`) �
 
 **Abzweig von `../ki-transcribe` mit T2med-Anbindung per GDT.** `ki-transcribe` bleibt ohne GDT und läuft weiter produktiv; hier wird die Anbindung entwickelt. Abgezweigt bei `f6f5aa1` (Branch `refactor-server-frontend`). Das Git-Remote `ki-transcribe` zeigt auf den lokalen Ordner, Änderungen von dort mit `git fetch ki-transcribe && git merge ki-transcribe/<branch>` holen.
 
-**Docker: nicht einfach `docker compose up` hier.** `docker-compose.yml` ist noch die von `ki-transcribe`, mit denselben festen Containernamen (`gespraech-web`, `diktat-whisper`, `diktat-diarize`) und demselben Port 8010. Ein Start aus diesem Ordner kollidiert mit den laufenden Containern (oder ersetzt sie). Bevor dieser Stand als Container läuft, braucht er einen eigenen Web-Dienst (eigener Name und Port), der Whisper, Diarisation und ollama von `ki-transcribe` mitbenutzt. Bis dahin lokal testen (Abschnitt „Server entwickeln / lokal testen“).
+**Eigener Web-Container, die Dienste dahinter sind geteilt.** `docker-compose.yml` definiert nur `transcribe-gdt-web` (Port 8011). Whisper (`diktat-whisper`) und Sprechertrennung (`diktat-diarize`) kommen aus `../ki-transcribe/docker-compose.yml`, ollama aus seinem eigenen Container — dasselbe Muster wie `ki-atteste`. `whisper-patch/` und `diarize/` gibt es deshalb hier nicht mehr; wo dieses Dokument sie erwähnt, sind die Dateien in `../ki-transcribe` gemeint, und Änderungen daran gehören dorthin. Kein `depends_on`: `docker compose up/down/build` in diesem Ordner fasst nur den eigenen Container an.
 
 ---
 
 ## Architektur
 
 ```
-Browser ──► Caddy (Reverse Proxy) ──► gespraech-web (FastAPI, Port 8000)
-                                           ├── faster-whisper (Transkription, GPU)
-                                           ├── diarize (Sprechertrennung, GPU)
-                                           ├── ollama (LLM, externer Container)
+Browser ──► Caddy (Reverse Proxy) ──► transcribe-gdt-web (FastAPI, Port 8000, Host 127.0.0.1:8011)
+                                           ├── diktat-whisper  (Transkription, GPU)    ┐ aus ../ki-transcribe,
+                                           ├── diktat-diarize  (Sprechertrennung, GPU) ┘ geteilt
+                                           ├── ollama (LLM, externer Container, geteilt)
                                            └── GDT-Austauschordner ◄──► T2med (Praxisverwaltung)
 ```
 
-**Netzwerke (Docker):**
-- `diktat-network` — intern: gespraech-web ↔ faster-whisper ↔ diarize
-- `ollama-net` — extern, vordefiniert: gespraech-web ↔ ollama
-- `caddy-proxy-network` — extern, vordefiniert: Caddy ↔ gespraech-web (auch faster-whisper, da der Whisper-Container mit `ki-atteste` geteilt wird)
+**Netzwerke (Docker, alle extern):**
+- `diktat-network` — angelegt von `ki-transcribe`: transcribe-gdt-web ↔ diktat-whisper ↔ diktat-diarize (auch gespraech-web und ki-atteste-web hängen darin)
+- `ollama-net` — transcribe-gdt-web ↔ ollama
+- `caddy-proxy-network` — Caddy ↔ transcribe-gdt-web (eine Caddy-Route gibt es noch nicht, siehe Wichtige Hinweise)
+
+Angesprochen werden die Dienste über ihre **Containernamen** (`diktat-whisper`, `diktat-diarize`), nicht über die Compose-Dienstnamen `faster-whisper`/`diarize` — die sind Aliase des ki-transcribe-Projekts.
 
 ---
 
 ## Dateistruktur
 
 ```
-ki-transcribe/
+transcribe-gdt/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
 ├── prompts.py                 # LLM-Prompts: ANALYZE_PROMPT, ABPRO_PROMPT, SUMMARY_PROMPT, SUBJECT_PROMPT, CLEAN_PROMPT
 ├── medical_vocab.py           # Kuratiertes Fachvokabular (Diagnosen, Wirkstoffe, Impfstoffe, Untersuchungen)
 ├── gdt.py                     # GDT 2.1 für T2med: Auftrag 6302 lesen (OrderBook), Ergebnis 6310 bauen/ablegen
 ├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, Testplan
 ├── Dockerfile                 # Docker-Image für server.py
-├── docker-compose.yml         # Docker-Setup (gespraech-web + faster-whisper)
+├── docker-compose.yml         # nur transcribe-gdt-web; Whisper/Diarisation/ollama extern
 ├── requirements-server.txt    # Server-Python-Dependencies
 ├── requirements-dev.txt       # + pytest
 ├── tests/                     # pytest: reine Funktionen + Endpoints gegen Dienst-Attrappen
 │
 ├── templates/index.html       # Jinja2-Template für Web-UI
 ├── static/                    # CSS, JS, SVG, logo.jpg für Web-UI
-│
-├── whisper-patch/             # Gepatchter Router fuer den geteilten Whisper-Container
-│   ├── stt.py                 # condition_on_previous_text=False + 2 weitere Optionen
-│   ├── stt.py.upstream        # unveraenderte Vorlage, nur fuer den Diff
-│   └── README.md              # Warum, und wie nach einem Image-Update aufgefrischt wird
-│
-├── diarize/                   # Eigener Container: Sprechertrennung (GPU)
-│   ├── app.py                 # FastAPI-Service um die pyannote-Pipeline
-│   ├── download_model.py      # Laedt die Modelle zur Build-Zeit in den Cache
-│   ├── Dockerfile             # torch-Variante per ARG, pyannote, Modelle eingebacken
-│   ├── requirements.txt       # pyannote.audio, FastAPI
-│   ├── requirements-torch.txt # torch/torchaudio, Wheel-Index per Build-ARG
-│   └── README.md              # HF-Token-Setup, API
+├── gdt/                       # GDT-Austauschordner (Standard-Mount, gitignored, Patientendaten)
 │
 └── README.md                  # Hauptdokumentation
 ```
+
+`whisper-patch/` und `diarize/` liegen in `../ki-transcribe` (geteilte Container).
 
 ---
 
@@ -188,7 +180,7 @@ Das Modell ist auf Hugging Face gated (CC-BY-4.0, nur Registrierung; ein Repo st
 
 | Variable | Default | Beschreibung |
 |----------|---------|--------------|
-| `WHISPER_HOST` | `faster-whisper` | Hostname des Whisper-Containers |
+| `WHISPER_HOST` | `faster-whisper` (Compose: `diktat-whisper`) | Hostname des Whisper-Containers |
 | `WHISPER_PORT` | `8000` | Port |
 | `OLLAMA_HOST` | `ollama` | Hostname des ollama-Containers |
 | `OLLAMA_PORT` | `11434` | Port |
@@ -198,7 +190,7 @@ Das Modell ist auf Hugging Face gated (CC-BY-4.0, nur Registrierung; ein Repo st
 | `WHISPER_MEDICAL_MODEL` | `jimmymeister/whisper-large-v3-turbo-german-ct2` | Whisper-Modell für deutsche Aufnahmen (finale Analyse via `/analyze`) |
 | `WHISPER_FAST_MODEL` | `small` | Kleines/schnelles Whisper-Modell für die Live-Vorschau via `/transcribe-only` |
 | `WHISPER_VAD_FILTER` | `true` | Silero-VAD im Whisper-Server — schneidet Stille vor der Transkription heraus (Halluzinationsschutz) |
-| `DIARIZE_HOST` | `diarize` | Hostname des Diarisations-Containers |
+| `DIARIZE_HOST` | `diarize` (Compose: `diktat-diarize`) | Hostname des Diarisations-Containers |
 | `DIARIZE_PORT` | `8000` | Port |
 | `DIARIZE_MIN_SPEAKERS` | `0` | Untergrenze für pyannote (`0` = keine Vorgabe) |
 | `DIARIZE_MAX_SPEAKERS` | `0` | Obergrenze (`0` = keine Vorgabe) |
@@ -215,25 +207,7 @@ Das Modell ist auf Hugging Face gated (CC-BY-4.0, nur Registrierung; ein Repo st
 | `GDT_ZEILENBREITE` | `60` | Umbruch der Freitextzeilen (6220/6227) |
 | `GDT_PVS_PFAD` | leer | Windows-Pfad, unter dem T2med den Austauschordner sieht; nur für den Transkript-Anhang |
 
-**Diarisations-Container-Variablen** (in `docker-compose.yml` unter `diarize`):
-
-| Variable | Default | Beschreibung |
-|----------|---------|--------------|
-| `PYANNOTE_MODEL` | `pyannote/speaker-diarization-community-1` | Pipeline; muss beim Build vorgeladen worden sein |
-| `DIARIZE_DEVICE` | `auto` | Rechenwerk: `auto` (CUDA → Intel XPU → CPU), oder fest `cuda` / `xpu` / `cpu` |
-| `TORCH_THREADS` | `8` | CPU-Threads — greift nur im CPU-Rückfall, auf der GPU bedeutungslos |
-
-**Diarisations-Build-Argument** (in `docker-compose.yml` unter `diarize.build.args`) — bestimmt, welche PyTorch-Variante ins Image kommt. Nur zur Build-Zeit wirksam, eine Änderung braucht `docker compose build diarize`:
-
-| Argument | Default (Dockerfile) | Gesetzt auf | Beschreibung |
-|----------|----------------------|-------------|--------------|
-| `TORCH_INDEX_URL` | `…/whl/cpu` | `…/whl/cu128` | Wheel-Index: `cpu`, `cu128` (NVIDIA, Blackwell-tauglich), `xpu` (Intel Arc) |
-
-**Whisper-Container-Variable** (in `docker-compose.yml` unter `faster-whisper`):
-
-| Variable | Default | Beschreibung |
-|----------|---------|--------------|
-| `WHISPER__ALLOW_DOWNLOADS` | `false` | Muss `true` sein, damit On-Demand-Modelle geladen werden |
+Die Variablen der geteilten Container (Whisper: `WHISPER__*`; Diarisation: `PYANNOTE_MODEL`, `DIARIZE_DEVICE`, `TORCH_THREADS`, Build-Argument `TORCH_INDEX_URL`) stehen in `../ki-transcribe/docker-compose.yml` und dessen CLAUDE.md. `WHISPER__ALLOW_DOWNLOADS=true` dort ist Voraussetzung dafür, dass `WHISPER_MEDICAL_MODEL` und `WHISPER_FAST_MODEL` geladen werden.
 
 ---
 
@@ -247,10 +221,11 @@ pip install -r requirements-server.txt
 uvicorn server:app --reload --port 8000
 ```
 
-Mit Docker:
+Mit Docker (fasst nur den eigenen Container an; `diktat-whisper`, `diktat-diarize` und `ollama` müssen laufen):
 ```bash
-docker-compose up -d
-docker-compose logs -f gespraech-web
+docker compose up -d --build
+docker compose logs -f transcribe-gdt-web
+curl localhost:8011/health      # whisper/ollama/diarize müssen "ok" melden
 ```
 
 **Tests** (`tests/`, kein Docker nötig):
@@ -266,13 +241,8 @@ Das Frontend hat keine Tests. Zum Durchspielen den Server lokal gegen die echten
 
 ## Wichtige Hinweise
 
-- **Ollama ist external:** Der ollama-Container wird nicht in dieser `docker-compose.yml` definiert — er muss bereits laufen und mit `ollama-net` verbunden sein.
-- **GPU erforderlich für faster-whisper:** Der Container nutzt das Image `fedirz/faster-whisper-server:latest-cuda` mit `deploy.resources.reservations.devices` (nvidia). Ohne GPU muss das Image auf `latest-cpu` geändert und der `devices`-Block entfernt werden.
-- **faster-whisper ist geteilt:** Container-Name `diktat-whisper` wird auch vom Projekt `ki-atteste` genutzt — Änderungen an Modell/Env-Vars wirken sich auf beide aus. Das gilt auch für den Router-Patch aus `whisper-patch/` (beabsichtigt, siehe oben).
-- **Whisper-Container neu starten, ohne die Web-App mitzuziehen:** `docker compose up -d --no-deps faster-whisper`. Nötig nach jeder Änderung an `whisper-patch/stt.py` — die Datei ist gemountet, aber uvicorn lädt sie nur beim Start.
-- **Die GPU teilen sich jetzt drei Dienste:** `faster-whisper`, `ollama` und `diarize`. pyannote braucht dabei am wenigsten (VRAM-Spitze 281 MiB) und belegt sie nur während einer Analyse. Auf der 16-GB-Karte ist das unkritisch; eng wird es erst, wenn ollama ein deutlich größeres Modell dauerhaft resident hält.
-- **`diarize` neu starten, ohne Whisper mitzuziehen:** `docker compose up -d --no-deps diarize`. Ohne `--no-deps` gilt derselbe Fallstrick wie unten bei `gespraech-web`.
-- **HF-Token für den Diarisations-Build:** `docker compose build diarize` braucht `./.hf_token` (gitignored). Fehlt die Datei oder sind die Nutzungsbedingungen der pyannote-Repos nicht akzeptiert, bricht der Build mit einer erklärenden Meldung ab. `docker compose up` ohne Build funktioniert auch ohne die Datei.
-- **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `gdt.py`, `templates/`, `static/`, `diarize/app.py` und `whisper-patch/stt.py` read-only in den jeweiligen Container — Änderungen wirken ohne Rebuild, nur ein `docker-compose restart gespraech-web` ist nötig. Rebuild braucht es nur bei `requirements-server.txt` oder `Dockerfile`.
-- **Compose-Netzwerk-Altlast:** Bei „container … is not connected to the network ki-transcribe_diktat-network" während eines Recreates existiert neben `diktat-network` noch ein leeres, projekt-präfigiertes Netzwerk aus der Zeit vor dem `name:`-Eintrag. Beide tragen dasselbe Label `com.docker.compose.network=diktat-network`, Compose greift auf das falsche zu. Fix: `docker network rm ki-transcribe_diktat-network` (Container-Anzahl vorher per `docker network inspect` auf 0 prüfen).
-- **Geteilten Whisper nicht mitziehen:** `docker compose up -d --build gespraech-web` stoppt via `depends_on` auch `diktat-whisper` (und `diktat-diarize`) und legt damit kurzzeitig `ki-atteste` lahm. Mit `--no-deps` bleiben beide unangetastet.
+- **Alle Dienste hinter der Web-App sind geteilt und extern:** `diktat-whisper` und `diktat-diarize` (aus `../ki-transcribe`), `ollama` (eigener Container). Sie müssen laufen, und `diktat-network`, `ollama-net` und `caddy-proxy-network` müssen existieren — sonst bricht `docker compose up` hier mit „network … not found“ ab. Neustarts, Updates und Änderungen an Whisper-Patch oder Diarisation passieren in `../ki-transcribe` und wirken auf gespraech-web, ki-atteste und diesen Container zugleich.
+- **Geteilte Last:** Analysen aus gespraech-web und transcribe-gdt-web laufen auf derselben GPU, demselben Whisper und demselben ollama. Gleichzeitige Analysen warten aufeinander. `OLLAMA_NUM_CTX` und `OLLAMA_MODEL` bewusst gleich lassen wie in ki-transcribe: ein abweichendes `num_ctx` lässt ollama das Modell bei jedem Wechsel zwischen den Apps neu laden.
+- **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `gdt.py`, `templates/` und `static/` read-only in den Container — Änderungen wirken ohne Rebuild, nur `docker compose restart transcribe-gdt-web` ist nötig. Rebuild (`docker compose up -d --build`) braucht es nur bei `requirements-server.txt` oder `Dockerfile`.
+- **Erreichbarkeit:** nur `127.0.0.1:8011` auf dem Docker-Rechner. Für die Arbeitsplätze braucht es eine Caddy-Route in `../caddy-proxy/Caddyfile` (wie `transcribe.hausarzt-rothenburg.de` → `gespraech-web:8000`, hier → `transcribe-gdt-web:8000`) und einen DNS-Eintrag. Das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`.
+- **`depends_on` nicht wieder einführen:** in ki-transcribe stoppt `docker compose up -d --build gespraech-web` über `depends_on` den geteilten Whisper mit. Hier gibt es keine Abhängigkeiten, ein `up`/`down` fasst nur `transcribe-gdt-web` an.
