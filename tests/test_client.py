@@ -279,10 +279,20 @@ def test_expired_order_records_without_patient(app):
 
 
 def test_mode_choice_applies_to_one_recording(app):
-    app.mode.set("psycho")
+    app.mode.set("direkt")
     app.start_recording(None)
     app.stop_recording()
-    assert app.spool.entries()[0].mode == "psycho" and app.mode.get() == "auto"
+    assert app.spool.entries()[0].mode == "direkt" and app.mode.get() == ""
+    assert app.wake.is_set()                             # Upload sofort, nicht erst im naechsten Takt
+
+
+def test_default_mode_follows_t2med_device(app):
+    assert app.shown_mode == "sprechstunde"
+    app.on_order(None)
+    app.on_order({**ORDER_A, "device": "psy"})           # Auftrag vom Psychotherapie-Geraet
+    assert app.recording and app.shown_mode == "psycho"
+    app.stop_recording()
+    assert app.spool.entries()[0].mode == "psycho"
 
 
 def test_zones_follow_the_template():
@@ -301,22 +311,18 @@ def test_render_every_state():
 
 
 def test_upper_ring_cycles_mode(app):
+    app.on_release(click(app, 120, 25))                  # Sprechstunde -> Direkt
+    assert app.mode.get() == "direkt" and not app.recording
     app.on_release(click(app, 120, 25))
-    assert app.mode.get() == "sprechstunde" and not app.recording
-    app.on_release(click(app, 120, 25))
-    app.on_release(click(app, 120, 25))
-    assert app.mode.get() == "auto"
-    app.on_release(click(app, 230, 230))                 # neben dem Knopf (Ecke): nichts
-    assert app.mode.get() == "auto" and not app.recording
-
-
-def test_mode_cycle_skips_auto_that_looks_like_psycho(app):
-    app.on_order(None)
-    app.pending = {**ORDER_A, "device": "psy"}            # Auftrag vom Psychotherapie-Geraet
-    assert app.shown_mode == "psycho"
-    app.cycle_mode()
-    assert app.mode.get() == "sprechstunde"
-    app.cycle_mode()
     assert app.mode.get() == "psycho"
-    app.cycle_mode()                                      # "auto" saehe genauso aus
+    app.on_release(click(app, 120, 25))
+    assert app.mode.get() == "sprechstunde"
+    app.on_release(click(app, 230, 230))                 # neben dem Knopf (Ecke): nichts
+    assert app.mode.get() == "sprechstunde" and not app.recording
+
+
+def test_mode_cycle_starts_from_what_is_shown(app):
+    app.on_order(None)
+    app.pending = {**ORDER_A, "device": "psy"}            # zeigt ohne Wahl Psychotherapie
+    app.cycle_mode()
     assert app.mode.get() == "sprechstunde"

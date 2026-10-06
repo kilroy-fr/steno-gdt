@@ -38,7 +38,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 
 
 def _flag(value: str) -> bool:
@@ -1168,7 +1168,7 @@ async def get_subject(transcript: str = Form(...), model: str = Form(default=Non
 _MODE_LABELS = {
     "analyze": "Analyse", "abpro": "A/B/PRO-Dokumentation",
     "summary": "Zusammenfassung", "clean": "bereinigtes Transkript",
-    "psycho": "Psychotherapie-Sitzung",
+    "psycho": "Psychotherapie-Sitzung", "direkt": "Transkript ohne Zusammenfassung",
 }
 
 
@@ -1253,7 +1253,7 @@ def _deliver_gdt(ap: str, order: gdt.Order | None, text: str, transcript: str, m
     comments.append(f"Arbeitsplatz {ap}" + (f" ({workstation})" if workstation else ""))
 
     attachment_file, attachments = None, []
-    if GDT.pvs_path and transcript and not psycho:
+    if GDT.pvs_path and transcript and not psycho and mode != "direkt":   # direkt: Text = Transkript
         attachment_file, attachment = _write_transcript_attachment(ap, started, text, transcript)
         attachments.append(attachment)
 
@@ -1332,9 +1332,13 @@ async def gdt_send(request: Request):
 # Bewusst nur im Speicher: die Aufnahme bleibt auf dem Arbeitsplatz liegen,
 # bis der Auftrag hier "gesendet" meldet. Kennt der Server die Auftrags-ID
 # nach einem Neustart nicht mehr, laedt der Knopf einfach noch einmal hoch.
+#
+# "direkt" ist das Transkript selbst, ohne Sprachmodell: fuer Diktate und
+# alles, was schnell in der Kartei stehen soll. Mit Whisper allein steht es
+# Sekunden nach dem Stopp in T2med statt nach ein bis drei Minuten.
 STENO_STATES_DONE = ("gesendet", "fehler")
 _STENO_ID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
-_STENO_REQUEST_MODES = ("auto", "sprechstunde", "psycho")
+_STENO_REQUEST_MODES = ("auto", "sprechstunde", "psycho", "direkt")
 _STENO_SEND_INTERVAL = 5.0
 
 
@@ -1347,7 +1351,7 @@ class StenoJob:
     id: str
     ap: str
     order: gdt.Order | None
-    request_mode: str          # auto | sprechstunde | psycho (Wahl am Knopf)
+    request_mode: str          # sprechstunde | psycho | direkt (Wahl am Knopf); auto bis Knopf 0.11
     started: datetime
     duration: float            # Sekunden laut Knopf
     audio_path: str
@@ -1358,6 +1362,7 @@ class StenoJob:
     detail: str = ""
     mode: str = ""
     mode_note: str = ""        # z. B. "automatisch als Psychotherapie erkannt"
+    model: str = ""            # wer den Text geschrieben hat: ollama-Modell, bei direkt Whisper
     transcript: str = ""
     text: str = ""
     warning: str = ""
@@ -1380,10 +1385,14 @@ class StenoJob:
 
 steno_jobs: dict[str, StenoJob] = {}
 _steno_tasks: set = set()
-# Ein Auftrag nach dem anderen auf die GPU: Whisper, Diarisation und ollama
-# sind mit gespraech-web und ki-atteste geteilt, und drei gleichzeitig
-# beendete Sprechstunden sollen einander nicht in den Timeout treiben.
-_steno_gpu = asyncio.Semaphore(1)
+# Je Stufe ein Auftrag nach dem anderen: Whisper, Diarisation und ollama sind
+# mit gespraech-web und ki-atteste geteilt, und drei gleichzeitig beendete
+# Sprechstunden sollen einander nicht in den Timeout treiben. Zwei Stufen statt
+# einer, damit ein Direkt-Transkript nicht hinter einer laufenden
+# Zusammenfassung wartet — und die naechste Transkription schon laeuft,
+# waehrend das Modell noch schreibt.
+_steno_audio = asyncio.Semaphore(1)
+_steno_llm = asyncio.Semaphore(1)
 
 
 def _steno_prune(now: float):
@@ -1417,15 +1426,40 @@ async def _steno_mode(job: StenoJob, text: str, seconds: float) -> tuple[str, st
     return STENO_MODUS, ""
 
 
-async def _steno_process(job: StenoJob):
+def _speaker_count(labeled: str | None) -> int:
+    return len(set(re.findall(r"^SPRECHER (\S+):", labeled or "", re.MULTILINE)))
+
+
+def _steno_loggable(job: StenoJob) -> bool:
+    """Psychotherapie landet nie im Log — auch nicht als Direkt-Transkript oder
+    mit "Sprechstunde" am Knopf, wenn der Auftrag vom Psychotherapie-Geraet kam."""
+    return logging_enabled and job.mode != "psycho" and not (job.order and job.order.device == "psy")
+
+
+async def _steno_transcribe(job: StenoJob) -> tuple[Transcription, str | None]:
     job.state, job.detail = "transkribiert", ""
     result, labeled = await _transcribe_and_diarize(job.audio_path, job.filename, "de")
     if _is_hallucination(result.text) or len(result.text.strip()) < 10:
         raise StenoError("Kein Gespräch in der Aufnahme erkannt.")
     job.transcript = labeled or result.text
     job.warning = _loop_warning(result.loop_share) or ""
+    return result, labeled
+
+
+def _steno_direct(job: StenoJob, result: Transcription, labeled: str | None):
+    """Das Transkript ist die Dokumentation. Sprecher nur, wenn es mehr als
+    einer ist — ein Diktat mit "SPRECHER A:" davor liest niemand gern."""
+    job.mode, job.model = "direkt", WHISPER_MEDICAL_MODEL.rsplit("/", 1)[-1]
+    job.text = labeled if _speaker_count(labeled) > 1 else result.text.strip()
+    if _steno_loggable(job):
+        _save_log(job.transcript, "", job.mode, job.model, "neutral",
+                  labeled is not None, result.loop_share)
+
+
+async def _steno_write(job: StenoJob, result: Transcription, labeled: str | None):
     seconds = result.units[-1]["end"] if result.units else job.duration
     job.mode, job.mode_note = await _steno_mode(job, result.text, max(seconds, job.duration))
+    job.model = OLLAMA_MODEL
 
     job.state = "schreibt"
     sex = job.order.sex if job.order else ""
@@ -1438,7 +1472,7 @@ async def _steno_process(job: StenoJob):
     if not job.text:
         raise StenoError("Das Sprachmodell hat keine Dokumentation geliefert.")
     job.warning = " ".join(w for w in (job.warning, *warnings) if w)
-    if logging_enabled and job.mode != "psycho":
+    if _steno_loggable(job):
         _save_log(job.transcript, job.text, job.mode, OLLAMA_MODEL, gender,
                   labeled is not None, result.loop_share)
 
@@ -1451,7 +1485,7 @@ async def _steno_send(job: StenoJob):
     while True:
         try:
             target, record = _deliver_gdt(job.ap, job.order, job.text, job.transcript, job.mode,
-                                          OLLAMA_MODEL, job.started, job.warning, notes)
+                                          job.model, job.started, job.warning, notes)
             break
         except FileExistsError:
             if time.monotonic() > deadline:
@@ -1467,8 +1501,13 @@ async def _steno_send(job: StenoJob):
 
 async def _steno_run(job: StenoJob):
     try:
-        async with _steno_gpu:
-            await _steno_process(job)
+        async with _steno_audio:
+            result, labeled = await _steno_transcribe(job)
+        if job.request_mode == "direkt":
+            _steno_direct(job, result, labeled)
+        else:
+            async with _steno_llm:
+                await _steno_write(job, result, labeled)
         await _steno_send(job)
     except StenoError as e:
         job.state, job.detail = "fehler", str(e)

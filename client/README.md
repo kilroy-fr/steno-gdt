@@ -8,7 +8,7 @@ Der Knopf hat drei Flächen und zwei Lampen:
 | Fläche | Klick |
 |---|---|
 | Mitte ▶ / ■ | Aufnahme starten / beenden und losschicken |
-| obere Ringhälfte, beschriftet | Art des Gesprächs weiterschalten: grün **Auto** → rot **S-Stunde** → blau **P-Therapie**. Die Farbe des ganzen Knopfs zeigt die Art. |
+| obere Ringhälfte, beschriftet | Art des Gesprächs weiterschalten: blau **P-Therapie** → rot **S-Stunde** → grün **Direkt**. Die Farbe des ganzen Knopfs zeigt die Art. |
 | untere Ringhälfte (Zahnrad) | Menü, dasselbe wie Rechtsklick |
 | Lampe oben rechts | grün = Server erreichbar, dunkel = nicht erreichbar |
 | Lampe oben links (orange) | eine Aufnahme ist fehlgeschlagen |
@@ -24,15 +24,21 @@ Daneben steht, für wen aufgenommen wird:
 | 1 Fehler · Rechtsklick | Menü → „Verlauf öffnen“ zeigt den Grund, dann „erneut senden“ oder „verwerfen“ |
 | Server nicht erreichbar | Aufnehmen geht trotzdem. Hochgeladen wird, sobald der Server wieder da ist. |
 
-Kommt der Auftrag vom T2med-Gerät „Steno Psychotherapie“, wird der Knopf von selbst blau („P-Therapie“).
-
 **Normalfall:** In T2med beim Patienten **„Messung starten“**. Der Knopf startet die Aufnahme nach 2–6 s von
-selbst. Am Ende **■** klicken. Nach 1–3 Minuten steht die Dokumentation in T2med.
+selbst. Am Ende **■** klicken. Nach 1–3 Minuten steht die Dokumentation in T2med, bei „Direkt“ nach wenigen Sekunden.
 
 - Mit gedrückter Maustaste (Knopf oder Text) lässt sich das Fenster verschieben, die Position wird gemerkt.
-- Die Art des Gesprächs gilt für die laufende bzw. nächste Aufnahme und springt danach auf „Auto“ zurück.
+- Die Art des Gesprächs gilt für die laufende bzw. nächste Aufnahme. Danach steht der Knopf wieder auf
+  S-Stunde, bei einem Auftrag vom T2med-Gerät „Steno Psychotherapie“ auf P-Therapie.
 - **Menü** (Zahnrad oder Rechtsklick): Art des Gesprächs, Verlauf öffnen, Fehlgeschlagene erneut senden
   oder verwerfen, laufende Aufnahme verwerfen, Einstellungen, Beenden.
+
+| Art | In T2med steht |
+|---|---|
+| P-Therapie | Zusammenfassung der Sitzung, nach 1–3 Minuten |
+| S-Stunde | A/B/PRO-Dokumentation, nach 1–3 Minuten |
+| Direkt | das Transkript selbst, ohne Zusammenfassung, wenige Sekunden nach ■. Für Diktate. Bei mehreren Stimmen mit „SPRECHER A/B“. |
+
 - Aufnahmen unter 5 s gelten als Fehlklick und werden verworfen. Der Auftrag bleibt dann für die nächste.
 - Eine Aufnahme endet von selbst nach 20 min Stille oder spätestens nach 120 min.
 - Kommt während einer Aufnahme ein Auftrag für einen anderen Patienten, fragt der Knopf, bevor er wechselt.

@@ -43,7 +43,7 @@ from PIL import ImageTk
 
 import knopf
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 
 APP_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Steno"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Steno"
@@ -118,7 +118,7 @@ class Entry:
     id: str
     ap: str
     order: dict | None
-    mode: str                 # auto | sprechstunde | psycho
+    mode: str                 # sprechstunde | psycho | direkt
     started: str              # lokale Zeit, ISO ohne Zone
     duration: float = 0.0
     state: str = "aufnahme"
@@ -368,7 +368,10 @@ def watch_orders(api: Api, ap: str, interval: float, events: queue.Queue, stop: 
         stop.wait(interval)
 
 
-def upload_loop(api: Api, spool: Spool, events: queue.Queue, stop: threading.Event):
+def upload_loop(api: Api, spool: Spool, events: queue.Queue, stop: threading.Event,
+                wake: threading.Event):
+    """Ausgang abarbeiten; wake weckt sofort (nach ■), statt bis zu
+    POLL_UPLOAD_SECONDS zu warten — bei "Direkt" die halbe Wartezeit."""
     while not stop.is_set():
         for entry in spool.entries():
             try:
@@ -377,7 +380,8 @@ def upload_loop(api: Api, spool: Spool, events: queue.Queue, stop: threading.Eve
                 log.info(f"{entry.id}: Server nicht erreichbar ({type(e).__name__}), spaeter erneut")
                 break
         events.put(("spool", None))
-        stop.wait(POLL_UPLOAD_SECONDS)
+        wake.wait(POLL_UPLOAD_SECONDS)
+        wake.clear()
 
 
 def upload_step(api: Api, spool: Spool, entry: Entry, events: queue.Queue):
@@ -421,8 +425,8 @@ COLORS = {
     "warn": "#f29900", "ok": "#34a853",
 }
 # Reihenfolge = Weiterschalten am oberen Ring
-MODES = (("auto", "Automatisch erkennen"), ("sprechstunde", "Sprechstunde"),
-         ("psycho", "Psychotherapie-Sitzung"))
+MODES = (("psycho", "Psychotherapie-Sitzung"), ("sprechstunde", "Sprechstunde"),
+         ("direkt", "Direkt – nur Transkript"))
 
 
 def fit(text: str, font: tkfont.Font, width: float) -> str:
@@ -482,7 +486,9 @@ class App:
         self.in_work = 0
         self.failed = 0
         self.dialog: tk.Toplevel | None = None
-        self.mode = tk.StringVar(value="auto")
+        self.mode = tk.StringVar(value="")         # "" = nicht gewaehlt, siehe mode_for()
+        self.menu_mode = tk.StringVar()                # Anzeige im Menue, siehe on_menu()
+        self.wake = threading.Event()
 
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
         s = self.scale
@@ -507,7 +513,8 @@ class App:
         self.menu = tk.Menu(root, tearoff=0)
         mode_menu = tk.Menu(self.menu, tearoff=0)
         for value, label in MODES:
-            mode_menu.add_radiobutton(label=label, value=value, variable=self.mode, command=self.draw)
+            mode_menu.add_radiobutton(label=label, value=value, variable=self.menu_mode,
+                                      command=lambda: self.choose_mode(self.menu_mode.get()))
         self.menu.add_cascade(label="Art des Gesprächs", menu=mode_menu)
         self.menu.add_separator()
         self.menu.add_command(label="Verlauf öffnen", command=self.open_history)
@@ -533,7 +540,7 @@ class App:
         threading.Thread(target=watch_orders, daemon=True, args=(
             api, ap, cfg.number("auftrag_abfrage_sekunden"), self.events, self.stop_event)).start()
         threading.Thread(target=upload_loop, daemon=True,
-                         args=(api, spool, self.events, self.stop_event)).start()
+                         args=(api, spool, self.events, self.stop_event, self.wake)).start()
         threading.Thread(target=prerender, args=(self.bodies, self.d), daemon=True).start()
         self.tick()
 
@@ -568,28 +575,23 @@ class App:
             self.images[key] = ImageTk.PhotoImage(im, master=self.root)
         return self.images[key]
 
+    def mode_for(self, order: dict | None) -> str:
+        """Gewaehlte Art oder, ohne Wahl, die des Auftrags: vom T2med-Geraet
+        "Steno Psychotherapie" Psychotherapie, sonst Sprechstunde."""
+        return self.mode.get() or ("psycho" if order and order.get("device") == "psy" else "sprechstunde")
+
     @property
     def shown_mode(self) -> str:
-        """Was der Ring zeigt: bei "auto" mit Auftrag vom Psychotherapie-Geraet
-        schon "psycho" — so entscheidet auch der Server."""
-        return "psycho" if self.psycho_marked else self.mode.get()
+        return self.mode_for(self.entry.order if self.entry else self.pending)
 
-    @property
-    def psycho_marked(self) -> bool:
-        order = self.entry.order if self.entry else self.pending
-        return self.mode.get() == "psycho" or (
-            self.mode.get() == "auto" and bool(order) and order.get("device") == "psy")
+    def choose_mode(self, mode: str):
+        self.mode.set(mode)
+        self.draw()
 
     def cycle_mode(self):
-        """Oberer Ring: Art des Gespraechs weiterschalten. Eine Stufe, die genauso
-        aussieht wie die jetzige ("auto" bei einem Psychotherapie-Auftrag), wird
-        uebersprungen — sonst bliebe ein Klick scheinbar ohne Wirkung."""
+        """Oberer Ring: Art des Gespraechs weiterschalten, ab der angezeigten."""
         order = [value for value, _ in MODES]
-        before = self.shown_mode
-        for _ in order:
-            self.mode.set(order[(order.index(self.mode.get()) + 1) % len(order)])
-            if self.shown_mode != before:
-                break
+        self.choose_mode(order[(order.index(self.shown_mode) + 1) % len(order)])
 
     def lines(self) -> tuple[str, str, str]:
         if self.recording:
@@ -725,7 +727,7 @@ class App:
             order = None
         if order and self.pending and self.pending["id"] == order["id"]:
             self.pending = None
-        entry = Entry(id=str(uuid.uuid4()), ap=self.ap, order=order, mode=self.mode.get(),
+        entry = Entry(id=str(uuid.uuid4()), ap=self.ap, order=order, mode=self.mode_for(order),
                       started=local_iso(datetime.now()))
         recorder = Recorder(self.cfg)
         try:
@@ -750,8 +752,8 @@ class App:
         except Exception:
             log.exception("Aufnahme nicht sauber beendet")
             entry.duration = recorder.elapsed
-        entry.mode = self.mode.get()
-        self.mode.set("auto")                     # die Wahl gilt fuer eine Aufnahme
+        entry.mode = self.mode_for(entry.order)
+        self.mode.set("")                         # die Wahl gilt fuer eine Aufnahme
         if entry.duration < self.cfg.number("mindest_sekunden"):
             log.info(f"Aufnahme {entry.id} nach {entry.duration:.1f} s verworfen (Fehlklick)")
             self.spool.delete(entry)
@@ -760,6 +762,7 @@ class App:
             return
         entry.state = "bereit"
         self.spool.save(entry)
+        self.wake.set()
         self.in_work += 1
         log.info(f"Aufnahme {entry.id} beendet: {entry.duration / 60:.1f} min, Modus {entry.mode}")
 
@@ -774,7 +777,7 @@ class App:
             recorder.stop()
         finally:
             self.spool.delete(entry)
-        self.mode.set("auto")
+        self.mode.set("")
         log.info(f"Aufnahme {entry.id} verworfen")
 
     # ---------------------------------------------------------- Maus
@@ -827,6 +830,7 @@ class App:
         if sys.platform == "win32":
             # Sonst schliesst sich das Menue nicht, wenn man daneben klickt.
             ctypes.windll.user32.SetForegroundWindow(ctypes.windll.user32.GetParent(self.root.winfo_id()))
+        self.menu_mode.set(self.shown_mode)
         state = "normal" if self.recording else "disabled"
         self.menu.entryconfigure("Laufende Aufnahme verwerfen", state=state)
         failed = "normal" if self.failed else "disabled"

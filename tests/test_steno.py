@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 import gdt
 import server
+from conftest import LABELED
 from test_gdt import fields_of, t2med_order
 
 
@@ -204,6 +205,52 @@ def test_psycho_prompt_uses_therapy_speaker_context():
     assert "Therapeut/in" in prompt and "Anamnesefragen" not in prompt
     assert '"Die Patientin"' in prompt and "Medikamente" not in prompt
     assert server._num_predict("psycho", "x") > server._num_predict("abpro", "x")
+
+
+# ---------------------------------------------------------------- Direkt
+
+def test_direct_sends_transcript_without_llm(steno, fake, tmp_path):
+    job = wait(steno, upload(steno, mode="direkt", order=json.dumps(order_dict())).json()["id"])
+    assert (job["state"], job["mode"], job["file"], job["patid"]) == \
+        ("gesendet", "direkt", "T2MDSTNO.001", "4711")
+    assert not fake.prompts()
+    f = fields_of(tmp_path / "T2MDSTNO.001")
+    assert f["6220"] == LABELED.split("\n")                       # zwei Sprecher: beschriftet
+    comments = " ".join(f["6227"])
+    assert "Transkript ohne Zusammenfassung" in comments and "whisper" in comments
+
+
+def test_direct_single_speaker_without_labels(steno, fake, tmp_path):
+    fake.segments = [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}]
+    wait(steno, upload(steno, mode="direkt").json()["id"])
+    text = " ".join(fields_of(tmp_path / "T2MDSTNO.001")["6220"])
+    assert text == fake.text and "SPRECHER" not in text
+
+
+def test_direct_has_no_attachment_and_psy_order_is_not_logged(steno, tmp_path, monkeypatch):
+    monkeypatch.setattr(server.GDT, "pvs_path", "\\\\nas\\steno\\")
+    monkeypatch.setattr(server, "logging_enabled", True)
+    job = wait(steno, upload(steno, mode="direkt", order=json.dumps(order_dict("psy"))).json()["id"])
+    assert job["file"] == "T2MDSTNP.001"                          # zurueck an das Geraet des Auftrags
+    assert "6302" not in fields_of(tmp_path / "T2MDSTNP.001")
+    assert not (tmp_path / "anhaenge").exists() and not (tmp_path / "logs").exists()
+
+
+def test_direct_is_logged_like_consultations(steno, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "logging_enabled", True)
+    wait(steno, upload(steno, mode="direkt").json()["id"])
+    [log] = (tmp_path / "logs").glob("*_direkt.json")
+    assert json.loads(log.read_text(encoding="utf-8"))["analysis"] == ""
+
+
+def test_direct_does_not_wait_for_running_summary(steno, monkeypatch):
+    blocked = server.asyncio.Semaphore(0)                          # das Sprachmodell ist besetzt
+    monkeypatch.setattr(server, "_steno_llm", blocked)
+    consultation = upload(steno, mode="sprechstunde", ap="002").json()["id"]
+    assert wait(steno, upload(steno, mode="direkt").json()["id"])["state"] == "gesendet"
+    assert steno.get(f"/steno/jobs/{consultation}").json()["state"] == "transkribiert"
+    steno.portal.call(blocked.release)
+    assert wait(steno, consultation)["state"] in server.STENO_STATES_DONE
 
 
 # ---------------------------------------------------------------- GDT: zweites Geraet

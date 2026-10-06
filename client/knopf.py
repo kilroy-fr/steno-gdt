@@ -24,11 +24,11 @@ SS = 4                       # Ueberabtastung gegen Treppenkanten
 
 # hell, Haupt, dunkel, tief, Zeichen
 PALETTES = {
-    "auto":         ("#63cf8f", "#229a58", "#136137", "#08381e", "#ecfff3"),
-    "sprechstunde": ("#ec6b5b", "#c4332a", "#7f1a14", "#4a0c08", "#fff0ee"),
     "psycho":       ("#5b93ec", "#2a63c4", "#143a7a", "#0b2350", "#eaf2ff"),
+    "sprechstunde": ("#ec6b5b", "#c4332a", "#7f1a14", "#4a0c08", "#fff0ee"),
+    "direkt":       ("#63cf8f", "#229a58", "#136137", "#08381e", "#ecfff3"),
 }
-LABELS = {"auto": "Auto", "sprechstunde": "S-Stunde", "psycho": "P-Therapie"}
+LABELS = {"psycho": "P-Therapie", "sprechstunde": "S-Stunde", "direkt": "Direkt"}
 LAMP, WARN_LAMP = (187, 53), (53, 53)
 LAMP_ON, LAMP_OFF, LAMP_WARN = "#3ddc6a", "#2b3530", "#f29900"
 LABEL_R = 89                 # Grundlinie der Beschriftung, mittig im Ring 78..112
