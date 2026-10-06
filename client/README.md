@@ -3,23 +3,36 @@
 Ein runder Knopf, der immer vor allen Fenstern liegt, auch vor T2med. Er nimmt auf und lädt die Aufnahme
 hoch. Alles Weitere, also Transkription, Sprechertrennung, Dokumentation und GDT-Übergabe, macht der Server.
 
-| Knopf | Bedeutung |
+Der Knopf hat drei Flächen und zwei Lampen:
+
+| Fläche | Klick |
 |---|---|
-| 🔵 ▶ `Steno` · bereit | wartet. Ein Klick startet eine Aufnahme ohne Patient. |
-| 🔵 ▶ `Müller, Hans` | Auftrag aus T2med liegt vor, Klick startet für diesen Patienten |
-| 🔴 ■ `Müller, Hans` · ● 12:34 | Aufnahme läuft. Ein Klick beendet sie und schickt sie los. |
-| Ψ am Knopf | Psychotherapie-Sitzung |
+| Mitte ▶ / ■ | Aufnahme starten / beenden und losschicken |
+| obere Ringhälfte, beschriftet | Art des Gesprächs weiterschalten: grün **Auto** → rot **S-Stunde** → blau **P-Therapie**. Die Farbe des ganzen Knopfs zeigt die Art. |
+| untere Ringhälfte (Zahnrad) | Menü, dasselbe wie Rechtsklick |
+| Lampe oben rechts | grün = Server erreichbar, dunkel = nicht erreichbar |
+| Lampe oben links (orange) | eine Aufnahme ist fehlgeschlagen |
+
+Daneben steht, für wen aufgenommen wird:
+
+| Text | Bedeutung |
+|---|---|
+| `Steno` · bereit | wartet. Ein Klick auf ▶ startet eine Aufnahme ohne Patient. |
+| `▶ Müller, Hans` | Auftrag aus T2med liegt vor, Klick auf ▶ startet für diesen Patienten |
+| `Müller, Hans` · ● 12:34 (rot) | Aufnahme läuft. Ein Klick auf ■ beendet sie und schickt sie los. |
 | ✓ an T2med: Müller, Hans | Dokumentation liegt in T2med |
-| 🟠 Punkt · 1 Fehler | Rechtsklick → „Verlauf öffnen“ zeigt den Grund, dann „erneut senden“ oder „verwerfen“ |
-| ⚪ ▶ Server nicht erreichbar | Aufnehmen geht trotzdem. Hochgeladen wird, sobald der Server wieder da ist. |
+| 1 Fehler · Rechtsklick | Menü → „Verlauf öffnen“ zeigt den Grund, dann „erneut senden“ oder „verwerfen“ |
+| Server nicht erreichbar | Aufnehmen geht trotzdem. Hochgeladen wird, sobald der Server wieder da ist. |
+
+Kommt der Auftrag vom T2med-Gerät „Steno Psychotherapie“, wird der Knopf von selbst blau („P-Therapie“).
 
 **Normalfall:** In T2med beim Patienten **„Messung starten“**. Der Knopf startet die Aufnahme nach 2–6 s von
 selbst. Am Ende **■** klicken. Nach 1–3 Minuten steht die Dokumentation in T2med.
 
-- Nur der runde Knopf schaltet. Am Text lässt sich das Fenster verschieben, die Position wird gemerkt.
-- **Rechtsklick:** Art des Gesprächs (Automatisch / Sprechstunde / Psychotherapie, gilt für die laufende
-  bzw. nächste Aufnahme), Verlauf öffnen, Fehlgeschlagene erneut senden oder verwerfen, laufende Aufnahme
-  verwerfen, Einstellungen, Beenden.
+- Mit gedrückter Maustaste (Knopf oder Text) lässt sich das Fenster verschieben, die Position wird gemerkt.
+- Die Art des Gesprächs gilt für die laufende bzw. nächste Aufnahme und springt danach auf „Auto“ zurück.
+- **Menü** (Zahnrad oder Rechtsklick): Art des Gesprächs, Verlauf öffnen, Fehlgeschlagene erneut senden
+  oder verwerfen, laufende Aufnahme verwerfen, Einstellungen, Beenden.
 - Aufnahmen unter 5 s gelten als Fehlklick und werden verworfen. Der Auftrag bleibt dann für die nächste.
 - Eine Aufnahme endet von selbst nach 20 min Stille oder spätestens nach 120 min.
 - Kommt während einer Aufnahme ein Auftrag für einen anderen Patienten, fragt der Knopf, bevor er wechselt.
@@ -74,6 +87,7 @@ stille_schwelle_db = -50   ; darunter gilt der Pegel als Stille
 max_minuten = 120
 mindest_sekunden = 5       ; kürzere Aufnahmen gelten als Fehlklick
 auftrag_abfrage_sekunden = 2
+knopf_pixel = 132          ; Durchmesser des Knopfs bei 100 % Skalierung (mind. 96)
 ```
 
 Protokoll: `%LOCALAPPDATA%\Steno\steno.log`. Es enthält Patientennummern, keine Namen.

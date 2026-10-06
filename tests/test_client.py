@@ -214,11 +214,18 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr(steno, "Recorder", FakeRecorder)
     monkeypatch.setattr(steno, "upload_loop", lambda *a: None)
     monkeypatch.setattr(steno, "watch_orders", lambda *a: None)
+    monkeypatch.setattr(steno, "prerender", lambda *a: None)
     monkeypatch.setattr(steno.App, "tick", lambda self: None)
     a = steno.App(root, steno.Config(tmp_path / "steno.ini"), FakeApi(), steno.Spool(tmp_path / "spool"),
                   "001", "SZ 1")
     yield a
     root.destroy()
+
+
+def click(app, u, v):
+    """Mausereignis an Punkt (u, v) der Vorlage (viewBox 240)."""
+    x, y = u * app.d / 240, v * app.d / 240
+    return type("E", (), {"x": x, "y": y, "x_root": x, "y_root": y})()
 
 
 ORDER_A = {"id": "001-1", "patid": "4711", "last_name": "Müller", "first_name": "Hans", "device": ""}
@@ -228,7 +235,7 @@ ORDER_B = {"id": "001-2", "patid": "815", "last_name": "Schmidt", "first_name": 
 def test_order_found_at_startup_does_not_record(app):
     app.on_order(ORDER_A)
     assert not app.recording and app.pending == ORDER_A
-    app.on_release(type("E", (), {"x": 1})())            # Klick auf den Knopf
+    app.on_release(click(app, 120, 120))                 # Klick auf die Mitte
     assert app.recording and app.entry.order == ORDER_A and app.api.claimed == ["001-1"]
 
 
@@ -276,3 +283,40 @@ def test_mode_choice_applies_to_one_recording(app):
     app.start_recording(None)
     app.stop_recording()
     assert app.spool.entries()[0].mode == "psycho" and app.mode.get() == "auto"
+
+
+def test_zones_follow_the_template():
+    assert steno.knopf.zone(120, 120, 240) == "core"
+    assert steno.knopf.zone(120, 25, 240) == "mode"               # obere Ringhaelfte
+    assert steno.knopf.zone(120, 215, 240) == "menu"              # Zahnrad
+    assert steno.knopf.zone(5, 5, 240) is None                    # Ecke
+    assert steno.knopf.zone(60, 60, 120) == "core"                # skaliert
+
+
+def test_render_every_state():
+    for mode in steno.knopf.PALETTES:
+        im = steno.knopf.render(100, mode, playing=True, online=False, warn=True)
+        assert im.size == (100, 100) and im.mode == "RGB"
+        assert steno.knopf.highlight(im, "mode", pressed=True, warn=True).size == (100, 100)
+
+
+def test_upper_ring_cycles_mode(app):
+    app.on_release(click(app, 120, 25))
+    assert app.mode.get() == "sprechstunde" and not app.recording
+    app.on_release(click(app, 120, 25))
+    app.on_release(click(app, 120, 25))
+    assert app.mode.get() == "auto"
+    app.on_release(click(app, 230, 230))                 # neben dem Knopf (Ecke): nichts
+    assert app.mode.get() == "auto" and not app.recording
+
+
+def test_mode_cycle_skips_auto_that_looks_like_psycho(app):
+    app.on_order(None)
+    app.pending = {**ORDER_A, "device": "psy"}            # Auftrag vom Psychotherapie-Geraet
+    assert app.shown_mode == "psycho"
+    app.cycle_mode()
+    assert app.mode.get() == "sprechstunde"
+    app.cycle_mode()
+    assert app.mode.get() == "psycho"
+    app.cycle_mode()                                      # "auto" saehe genauso aus
+    assert app.mode.get() == "sprechstunde"

@@ -2,7 +2,7 @@
 
 Ablauf (Einrichtung und Bedienung: client/README.md):
 - In T2med "Messung starten" -> T2med schreibt den Auftrag in den GDT-Ordner ->
-  der Server meldet ihn hier -> die Aufnahme startet von selbst (Knopf rot, ■).
+  der Server meldet ihn hier -> die Aufnahme startet von selbst (■ in der Mitte).
   Ohne Auftrag startet ein Klick auf ▶ die Aufnahme "ohne Patient".
 - Ein Klick auf ■ beendet sie. Die Aufnahme geht an den Server, der transkribiert,
   zusammenfasst und die Dokumentation als GDT-Datei an T2med uebergibt.
@@ -39,8 +39,11 @@ from tkinter import simpledialog
 import requests
 import sounddevice as sd
 import soundfile as sf
+from PIL import ImageTk
 
-VERSION = "0.10.0"
+import knopf
+
+VERSION = "0.11.0"
 
 APP_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Steno"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Steno"
@@ -57,6 +60,7 @@ DEFAULTS = {
     "max_minuten": "120",         # spaetestens dann ist Schluss
     "mindest_sekunden": "5",      # kuerzere Aufnahmen gelten als Fehlklick
     "auftrag_abfrage_sekunden": "2",
+    "knopf_pixel": "132",         # Durchmesser des Knopfs bei 100 % Skalierung
 }
 SAMPLE_RATE = 16000              # Whisper und pyannote rechnen mit 16 kHz mono
 POLL_UPLOAD_SECONDS = 3
@@ -413,9 +417,10 @@ def upload_step(api: Api, spool: Spool, entry: Entry, events: queue.Queue):
 # OBERFLAECHE
 # ============================================================
 COLORS = {
-    "idle": "#2f6fd6", "rec": "#d93025", "offline": "#8a8f98", "bg": "#1f2329",
-    "text": "#ffffff", "muted": "#b9c0ca", "warn": "#f29900", "ok": "#34a853",
+    "bg": "#1f2329", "text": "#ffffff", "muted": "#b9c0ca", "rec": "#ff6b5e",
+    "warn": "#f29900", "ok": "#34a853",
 }
+# Reihenfolge = Weiterschalten am oberen Ring
 MODES = (("auto", "Automatisch erkennen"), ("sprechstunde", "Sprechstunde"),
          ("psycho", "Psychotherapie-Sitzung"))
 
@@ -441,6 +446,17 @@ def windows_tweaks(root: tk.Tk):
             hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
     except Exception as e:
         log.warning(f"Fensterstil nicht gesetzt: {e}")
+
+
+def prerender(bodies: dict, size: int):
+    """Die haeufigen Knopfbilder vorab — sonst haengt der erste Klick auf ▶ bei
+    150 % Skalierung eine Viertelsekunde. Bekommt nur das Woerterbuch, nicht App:
+    Tk-Objekte duerfen nicht in diesem Thread freigegeben werden."""
+    for mode, _ in MODES:
+        for playing in (False, True):
+            state = (mode, playing, True, False)
+            if state not in bodies:
+                bodies[state] = knopf.render(size, *state, bg=COLORS["bg"])
 
 
 class App:
@@ -470,7 +486,12 @@ class App:
 
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
         s = self.scale
-        self.w, self.h = int(200 * s), int(56 * s)
+        self.d = int(max(96.0, cfg.number("knopf_pixel")) * s)   # darunter waere die Beschriftung unlesbar
+        self.w, self.h = self.d + int(176 * s), self.d
+        self.bodies: dict = {}                    # knopf.render() je Zustand, ~0,1 s pro Stueck
+        self.images: dict = {}                    # dazu Maus darueber/gedrueckt, als Tk-Bild
+        self.hover: str | None = None
+        self.pressed = False
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.configure(bg=COLORS["bg"])
@@ -478,7 +499,7 @@ class App:
                                root.winfo_screenheight() - self.h - int(72 * s))
         root.geometry(f"{self.w}x{self.h}+{pos[0]}+{pos[1]}")
         self.canvas = tk.Canvas(root, width=self.w, height=self.h, bg=COLORS["bg"],
-                                highlightthickness=0, cursor="hand2")
+                                highlightthickness=0, cursor="fleur")
         self.canvas.pack()
         self.font1 = tkfont.Font(root, family="Segoe UI", size=10, weight="bold")
         self.font2 = tkfont.Font(root, family="Segoe UI", size=9)
@@ -501,6 +522,8 @@ class App:
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Button-3>", self.on_menu)
+        self.canvas.bind("<Motion>", self.on_motion)
+        self.canvas.bind("<Leave>", self.on_leave)
         self.drag_from = None
         self.dragged = False
 
@@ -511,6 +534,7 @@ class App:
             api, ap, cfg.number("auftrag_abfrage_sekunden"), self.events, self.stop_event)).start()
         threading.Thread(target=upload_loop, daemon=True,
                          args=(api, spool, self.events, self.stop_event)).start()
+        threading.Thread(target=prerender, args=(self.bodies, self.d), daemon=True).start()
         self.tick()
 
     # ---------------------------------------------------------- Zeichnen
@@ -521,31 +545,34 @@ class App:
     def draw(self):
         c, s = self.canvas, self.scale
         c.delete("all")
-        r = self.h / 2 - 6 * s
-        cx = cy = self.h / 2
-        color = COLORS["rec"] if self.recording else COLORS["offline" if self.offline else "idle"]
-        c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline="", tags="button")
-        if self.recording:
-            k = r * 0.42
-            c.create_rectangle(cx - k, cy - k, cx + k, cy + k, fill="white", outline="", tags="button")
-        else:
-            k = r * 0.48
-            c.create_polygon(cx - k * 0.7, cy - k, cx - k * 0.7, cy + k, cx + k, cy,
-                             fill="white", outline="", tags="button")
-        if self.psycho_marked:
-            c.create_text(cx + r - 2 * s, cy - r + 4 * s, text="Ψ", fill="white",
-                          font=("Segoe UI", 9, "bold"))
-        if self.failed:
-            c.create_oval(cx + r - 9 * s, cy + r - 9 * s, cx + r + 1 * s, cy + r + 1 * s,
-                          fill=COLORS["warn"], outline=COLORS["bg"], width=2)
-
+        c.create_image(0, 0, image=self.button_image(), anchor="nw")
         line1, line2, color2 = self.lines()
-        x = self.h + 2 * s
-        room = self.w - x - 4 * s
-        c.create_text(x, self.h * 0.34, text=fit(line1, self.font1, room), anchor="w",
+        x = self.d + 8 * s
+        room = self.w - x - 6 * s
+        c.create_text(x, self.h * 0.40, text=fit(line1, self.font1, room), anchor="w",
                       fill=COLORS["text"], font=self.font1)
-        c.create_text(x, self.h * 0.70, text=fit(line2, self.font2, room), anchor="w",
+        c.create_text(x, self.h * 0.62, text=fit(line2, self.font2, room), anchor="w",
                       fill=color2, font=self.font2)
+
+    def button_image(self) -> ImageTk.PhotoImage:
+        state = (self.shown_mode, self.recording, not self.offline, bool(self.failed))
+        key = (*state, self.hover, self.pressed)
+        if key not in self.images:
+            if len(self.images) > 64:
+                self.images.clear()
+            if state not in self.bodies:
+                self.bodies[state] = knopf.render(self.d, *state, bg=COLORS["bg"])
+            im = self.bodies[state]
+            if self.hover:
+                im = knopf.highlight(im, self.hover, self.pressed, warn=state[3])
+            self.images[key] = ImageTk.PhotoImage(im, master=self.root)
+        return self.images[key]
+
+    @property
+    def shown_mode(self) -> str:
+        """Was der Ring zeigt: bei "auto" mit Auftrag vom Psychotherapie-Geraet
+        schon "psycho" — so entscheidet auch der Server."""
+        return "psycho" if self.psycho_marked else self.mode.get()
 
     @property
     def psycho_marked(self) -> bool:
@@ -553,12 +580,23 @@ class App:
         return self.mode.get() == "psycho" or (
             self.mode.get() == "auto" and bool(order) and order.get("device") == "psy")
 
+    def cycle_mode(self):
+        """Oberer Ring: Art des Gespraechs weiterschalten. Eine Stufe, die genauso
+        aussieht wie die jetzige ("auto" bei einem Psychotherapie-Auftrag), wird
+        uebersprungen — sonst bliebe ein Klick scheinbar ohne Wirkung."""
+        order = [value for value, _ in MODES]
+        before = self.shown_mode
+        for _ in order:
+            self.mode.set(order[(order.index(self.mode.get()) + 1) % len(order)])
+            if self.shown_mode != before:
+                break
+
     def lines(self) -> tuple[str, str, str]:
         if self.recording:
             minutes, seconds = divmod(int(self.recorder.elapsed), 60)
             name = self.entry.patient if self.entry.order else "Ohne Patient"
             extra = f" · nächster: {order_name(self.pending)}" if self.pending else ""
-            return name, f"● {minutes}:{seconds:02d}{extra}", COLORS["muted"]
+            return name, f"● {minutes}:{seconds:02d}{extra}", COLORS["rec"]
         if self.flash and time.monotonic() < self.flash_until:
             return (order_name(self.pending) if self.pending else "Steno"), self.flash, COLORS["ok"]
         name = f"▶ {order_name(self.pending)}" if self.pending else "Steno"
@@ -744,26 +782,46 @@ class App:
         self.drag_from = (e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y())
         self.press_at = (e.x_root, e.y_root)
         self.dragged = False
+        self.pressed = knopf.zone(e.x, e.y, self.d) is not None
+        self.draw()
 
     def on_drag(self, e):
         if abs(e.x_root - self.press_at[0]) + abs(e.y_root - self.press_at[1]) > 4:
             self.dragged = True
+            self.pressed = False
         if self.dragged:
             self.root.geometry(f"+{e.x_root - self.drag_from[0]}+{e.y_root - self.drag_from[1]}")
 
     def on_release(self, e):
+        self.pressed = False
         if self.dragged:
             self.cfg.set("x", self.root.winfo_x(), "fenster")
             self.cfg.set("y", self.root.winfo_y(), "fenster")
             self.cfg.save()
             return
-        if e.x > self.h:                          # nur der runde Knopf schaltet
-            return
-        if self.recording:
-            self.stop_recording()
-        else:
-            self.start_recording(self.pending)
+        zone = knopf.zone(e.x, e.y, self.d)       # am Text wird nur verschoben
+        if zone == "core":
+            if self.recording:
+                self.stop_recording()
+            else:
+                self.start_recording(self.pending)
+        elif zone == "mode":
+            self.cycle_mode()
+        elif zone == "menu":
+            self.on_menu(e)
         self.draw()
+
+    def on_motion(self, e):
+        zone = knopf.zone(e.x, e.y, self.d)
+        self.canvas.configure(cursor="hand2" if zone else "fleur")
+        if zone != self.hover:
+            self.hover = zone
+            self.draw()
+
+    def on_leave(self, e):
+        if self.hover:
+            self.hover = None
+            self.draw()
 
     def on_menu(self, e):
         if sys.platform == "win32":
