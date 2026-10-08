@@ -257,3 +257,12 @@ def test_index(client, monkeypatch):
     r = client.get("/")
     assert r.status_code == 200 and server.VERSION in r.text
     assert "loopWarnShare: 0.2," in r.text
+
+
+def test_index_title(client, monkeypatch):
+    """gespraech-web laeuft aus demselben Code, nur unter eigenem Namen."""
+    monkeypatch.setattr(server, "APP_TITLE", "KI-Gesprächsanalyse")
+    monkeypatch.setattr(server, "APP_SUBTITLE", "Transkription und Analyse")
+    r = client.get("/")
+    assert "<title>KI-Gesprächsanalyse</title>" in r.text
+    assert "<h1>KI-Gesprächsanalyse</h1>" in r.text and "Transkription und Analyse" in r.text

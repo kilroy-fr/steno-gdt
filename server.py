@@ -38,7 +38,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.12.1"
+VERSION = "0.12.2"
 
 
 def _flag(value: str) -> bool:
@@ -99,6 +99,10 @@ LOOP_WARN_SHARE = float(os.getenv("LOOP_WARN_SHARE", "0.15"))
 # "nur eine Beschwerde"-Dokumentationen: die anderen standen am Anfang.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
 LOG_DIR = os.getenv("LOG_DIR", "/logs")
+# Kopfzeile der Web-UI. Derselbe Code laeuft auch als gespraech-web
+# (../ki-transcribe, ohne GDT) — dort unter seinem alten Namen.
+APP_TITLE = os.getenv("APP_TITLE", "Steno")
+APP_SUBTITLE = os.getenv("APP_SUBTITLE", "Gespräche mitschreiben und an T2med übergeben")
 # Anbindung an T2med per GDT (gdt.py). Aus, solange GDT_DIR nicht auf einen
 # vorhandenen Ordner zeigt — dann blendet das Frontend alles dazu aus.
 GDT = gdt.Settings.from_env()
@@ -987,6 +991,7 @@ async def index(request: Request):
         request=request,
         name="index.html",
         context={"version": VERSION, "default_model": OLLAMA_MODEL,
+                 "title": APP_TITLE, "subtitle": APP_SUBTITLE,
                  "loop_warn_share": LOOP_WARN_SHARE,
                  "gdt": {"enabled": GDT.enabled, "workstations": GDT.workstations}},
     )

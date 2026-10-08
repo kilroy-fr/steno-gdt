@@ -2,7 +2,7 @@
 
 Schreibt Arzt-Patienten-Gespräche und Psychotherapie-Sitzungen mit, fasst sie zusammen und übergibt die Dokumentation per GDT an T2med. Lokal: faster-whisper für die Transkription, pyannote für die Sprechertrennung, ollama für die Zusammenfassung.
 
-Abzweig von [`ki-transcribe`](../ki-transcribe). Dieser Ordner bringt den Server mit (`transcribe-gdt-web`, Port 8011) und den Steno-Knopf für die Arbeitsplätze ([`client/`](client/README.md)). Whisper, Sprechertrennung und ollama werden mitbenutzt: `diktat-whisper` und `diktat-diarize` aus `ki-transcribe`, `ollama` aus seinem eigenen Container.
+Abzweig von [`ki-transcribe`](../ki-transcribe) — und inzwischen auch dessen Codebasis: `gespraech-web` (KI-Gesprächsanalyse) wird aus diesem Ordner gebaut, nur ohne T2med-Anbindung. Dieser Ordner bringt den Server mit (`transcribe-gdt-web`, Port 8011) und den Steno-Knopf für die Arbeitsplätze ([`client/`](client/README.md)). Whisper, Sprechertrennung und ollama werden mitbenutzt: `diktat-whisper` und `diktat-diarize` aus `ki-transcribe`, `ollama` aus seinem eigenen Container.
 
 ## 🔴 Steno-Knopf
 
