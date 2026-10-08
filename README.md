@@ -77,7 +77,7 @@ curl http://localhost:8011/
 curl http://localhost:8011/health
 ```
 
-`docker-compose.yml` bindet Port `8011` auf `localhost` (8010 gehört `ki-transcribe`). Für die Arbeitsplätze braucht es eine Route im Caddy-Reverse-Proxy (`caddy-proxy-network`), denn das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`.
+`docker-compose.yml` bindet Port `8011` auf `localhost` (8010 gehört gespraech-web aus `ki-transcribe`). Für die Arbeitsplätze braucht es eine Route im Caddy-Reverse-Proxy (`caddy-proxy-network`), denn das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`.
 
 ---
 
@@ -311,9 +311,12 @@ transcribe-gdt/
 ├── gdt.py                     # GDT 2.1: Messauftrag aus T2med lesen, Dokumentation zurückgeben
 ├── client/                    # Steno-Knopf für die Arbeitsplätze (Windows-exe, siehe client/README.md)
 ├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, erster Test
-├── Dockerfile                 # Docker-Build für server.py
+├── Dockerfile                 # Docker-Build für server.py (auch für gespraech-web)
+├── .dockerignore              # hält gdt/, logs/ und client/ aus dem Build-Kontext
 ├── docker-compose.yml         # nur transcribe-gdt-web; Whisper/Diarisation/ollama extern
 ├── requirements-server.txt    # Server-Python-Dependencies
+├── requirements-dev.txt       # + pytest
+├── tests/                     # pytest (kein Docker nötig)
 ├── VERSION                    # Aktuelle Versionsnummer
 ├── README.md                  # Diese Datei
 ├── CLAUDE.md                  # Technische Referenz für KI-gestützte Entwicklung
@@ -349,13 +352,46 @@ docker compose down
 
 # Ins Container-Terminal
 docker exec -it transcribe-gdt-web bash
+
+# KI-Gesprächsanalyse (gespraech-web) auf diesen Stand bringen
+cd ../ki-transcribe && docker compose up -d --build gespraech-web
 ```
+
+Der Code liegt auf GitHub im privaten Repo [`kilroy-fr/steno-gdt`](https://github.com/kilroy-fr/steno-gdt).
 
 ---
 
 ## 📝 Changelog
 
-### Version 0.6.9 (aktuell)
+### Version 0.12 (aktuell)
+- Modus **Direkt** (grün am Knopf): das Transkript selbst geht nach T2med, ohne Sprachmodell, wenige Sekunden nach dem Stopp
+- Knopf: Fenster so groß wie der Knopf, Ecken durchsichtig; Patient, Laufzeit und Zustand im Hinweisfenster; gespeicherter Platz nur auf einem angeschlossenen Monitor
+- `GDT_DEBUG_DIR`: Kopie jeder Übergabe an T2med zum Einrichten
+- Austauschordner als `S:\_steno` auf der sono-gdt-Freigabe, Caddy-Route `steno.hausarzt-rothenburg.de`
+- **Eine Codebasis:** gespraech-web (KI-Gesprächsanalyse) wird aus diesem Ordner gebaut, ohne GDT und mit eigenem Titel (`APP_TITLE`, `APP_SUBTITLE`)
+
+### Version 0.11
+- Knopf im runden Layout: Ring oben wählt die Art des Gesprächs (Psychotherapie / Sprechstunde / Direkt), Ring unten öffnet das Menü, Lampe für die Servererreichbarkeit
+
+### Version 0.10
+- **Steno-Knopf** (`client/`): Aufnahme startet mit „Messung starten“ in T2med, ■ beendet sie, der Server schickt die Dokumentation automatisch; Nachschau unter `/verlauf`
+- Modus **Psychotherapie** (`PSYCHO_PROMPT`), eigenes T2med-Gerät möglich; nie im Log, nie mit Transkript-Anhang
+
+### Version 0.9.10 – 0.9.12
+- **T2med-Anbindung per GDT** (`gdt.py`): Messauftrag lesen, Dokumentation als 6310 zurückgeben, „An T2med senden“ in der Browser-UI
+- Eigener Web-Container; Whisper, Sprechertrennung und ollama werden mit ki-transcribe geteilt
+
+### Version 0.9
+- Whisper-Wiederholschleifen an der Ursache abgestellt (`condition_on_previous_text=False` per Router-Patch), verbliebene Schleifen gekürzt, Warnung bei Lücken im Transkript
+- Kontextfenster des Sprachmodells (`OLLAMA_NUM_CTX`): lange Gespräche wurden vorher vorne abgeschnitten
+- Sprecherwechsel satzweise, Mikrofon ohne Browser-Sprachverarbeitung
+- Sprechertrennung mit pyannote community-1 (pyannote.audio 4)
+- `server.py` entflochten, Tests für Funktionen und Endpoints, ein Analyse-Ablauf im Frontend
+
+### Version 0.8
+- **Sprechertrennung** mit pyannote im eigenen Container, auf der GPU
+
+### Version 0.6.9
 - **Medizinisches Fachvokabular** (`medical_vocab.py`): kuratiertes Glossar aus Diagnosen, Wirkstoffen, Impfstoffen und Untersuchungen, eingebettet in `ANALYZE_PROMPT`, `ABPRO_PROMPT` und `CLEAN_PROMPT`
 - **Sprecherzuordnung** in `ANALYZE_PROMPT` und `ABPRO_PROMPT`: expliziter Hinweis auf den Dialog ohne Sprecherkennzeichnung, damit Verdachtsdiagnosen des Arztes nicht als gesicherte Diagnosen und Patienten-Rückfragen nicht als Verordnungen dokumentiert werden
 - `prompts.py` und `medical_vocab.py` sind jetzt ebenfalls live in den Container gemounted — Prompt-Änderungen brauchen nur noch einen `restart` statt eines Rebuilds

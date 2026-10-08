@@ -10,7 +10,7 @@ Aufgenommen wird nur auf Anforderung (Auftrag aus T2med oder Klick), nie dauerha
 
 Container und Ordner heißen weiter `transcribe-gdt(-web)`; umbenannt ist das Programm (Titel, GDT-Kennungen `STENO`/`STNO`).
 
-**Eine Codebasis für zwei Web-Apps.** Abgezweigt von `../ki-transcribe` bei `f6f5aa1`; seitdem wird nur noch hier entwickelt. `gespraech-web` (KI-Gesprächsanalyse, `transcribe.…`, Port 8010) ist in `../ki-transcribe/docker-compose.yml` definiert, baut aber aus **diesem** Ordner — ohne `GDT_DIR` (Anbindung aus, Steno-Endpunkte antworten 404) und mit eigenem `APP_TITLE`/`APP_SUBTITLE`. Dort gibt es keine Live-Mounts: eine Änderung hier erreicht gespraech-web erst mit `docker compose up -d --build gespraech-web` in `../ki-transcribe` — gebaut wird der Arbeitsstand dieses Ordners, auch Uncommittetes. Was in gespraech-web anders sein soll, gehört deshalb in Umgebungsvariablen, nicht in eine Kopie des Codes. Die `.dockerignore` hält `gdt/`, `logs/` und die Knopf-Build-Umgebung aus dem Build-Kontext. Das Git-Remote `ki-transcribe` zeigt auf den lokalen Ordner; dort liegen nur noch Whisper-Patch, Diarisation und die Compose-Datei.
+**Eine Codebasis für zwei Web-Apps.** Abgezweigt von `../ki-transcribe` bei `f6f5aa1`; seitdem wird nur noch hier entwickelt. `gespraech-web` (KI-Gesprächsanalyse, `transcribe.…`, Port 8010) ist in `../ki-transcribe/docker-compose.yml` definiert, baut aber aus **diesem** Ordner — ohne `GDT_DIR` (Anbindung aus, Steno-Endpunkte antworten 404) und mit eigenem `APP_TITLE`/`APP_SUBTITLE`. Dort gibt es keine Live-Mounts: eine Änderung hier erreicht gespraech-web erst mit `docker compose up -d --build gespraech-web` in `../ki-transcribe` — gebaut wird der Arbeitsstand dieses Ordners, auch Uncommittetes. Was in gespraech-web anders sein soll, gehört deshalb in Umgebungsvariablen, nicht in eine Kopie des Codes. Die `.dockerignore` hält `gdt/`, `logs/` und die Knopf-Build-Umgebung aus dem Build-Kontext. **Git:** `origin` = privates GitHub-Repo `kilroy-fr/steno-gdt` (Branch `master`). Das Remote `ki-transcribe` zeigt auf den lokalen Ordner und ist nur noch Historie — dort liegen nur Whisper-Patch, Diarisation und die Compose-Datei, App-Code kommt von dort nicht mehr.
 
 **Eigener Web-Container, die Dienste dahinter sind geteilt.** `docker-compose.yml` definiert nur `transcribe-gdt-web` (Port 8011). Whisper (`diktat-whisper`) und Sprechertrennung (`diktat-diarize`) kommen aus `../ki-transcribe/docker-compose.yml`, ollama aus seinem eigenen Container — dasselbe Muster wie `ki-atteste`. `whisper-patch/` und `diarize/` gibt es deshalb hier nicht mehr; wo dieses Dokument sie erwähnt, sind die Dateien in `../ki-transcribe` gemeint, und Änderungen daran gehören dorthin. Kein `depends_on`: `docker compose up/down/build` in diesem Ordner fasst nur den eigenen Container an.
 
@@ -47,7 +47,8 @@ transcribe-gdt/
 ├── medical_vocab.py           # Kuratiertes Fachvokabular (Diagnosen, Wirkstoffe, Impfstoffe, Untersuchungen)
 ├── gdt.py                     # GDT 2.1 für T2med: Auftrag 6302 lesen (OrderBook), Ergebnis 6310 bauen/ablegen
 ├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, Testplan
-├── Dockerfile                 # Docker-Image für server.py
+├── Dockerfile                 # Docker-Image für server.py (auch für gespraech-web)
+├── .dockerignore              # Build-Kontext nur aus dem, was das Dockerfile kopiert (kein gdt/, logs/, client/)
 ├── docker-compose.yml         # nur transcribe-gdt-web; Whisper/Diarisation/ollama extern
 ├── requirements-server.txt    # Server-Python-Dependencies
 ├── requirements-dev.txt       # + pytest
@@ -287,7 +288,7 @@ Die Browser-UI hat keine Tests, am Knopf nur die Regeln, nicht Aussehen und Fens
 
 **Knopf bauen** (Windows, Python 3.13): `powershell -ExecutionPolicy Bypass -File client\build.ps1` → `client\dist\Steno.exe` (PyInstaller `--onefile --noconsole`, ~28 MB; `.venv`, `build`, `dist` sind gitignored). Die Hooks für `sounddevice`/`soundfile` bringt `pyinstaller-hooks-contrib` mit.
 
-**Versionen:** `VERSION` in `server.py`, `client/steno.py` und die Datei `VERSION` gemeinsam anheben.
+**Versionen:** die lokalen Git-Hooks heben die Patch-Nummer automatisch an — `pre-commit` bei jedem Commit (`VERSION` und `server.py`; eine von Hand geänderte `VERSION` gilt unverändert), `pre-push` nach jedem Push noch einmal als eigener Commit „chore: version bump“, der erst mit dem nächsten Push hochgeht. `client/steno.py` fassen die Hooks **nicht** an: für eine neue Knopf-Version `VERSION` dort von Hand mitziehen (Minor-Sprünge wie 0.12 → 0.13 in allen drei). Die laufenden Container zeigen die Version ihres letzten Neustarts bzw. Builds, `/health` liefert sie.
 
 ---
 
