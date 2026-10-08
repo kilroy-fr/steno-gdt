@@ -259,6 +259,23 @@ def test_gdt_send_with_transcript_attachment(client, gdt_dir, monkeypatch):
     assert [p.name for p in (gdt_dir / "anhaenge").iterdir()] == [attachment.name]
 
 
+def test_gdt_debug_copy(client, gdt_dir, monkeypatch, tmp_path):
+    debug = tmp_path / "gdt-debug"
+    monkeypatch.setattr(server, "GDT_DEBUG_DIR", str(debug))
+    assert send(client, mode="abpro").status_code == 200
+    (txt,) = debug.glob("*_001_abpro.txt")
+    content = txt.read_text("utf-8-sig")
+    assert "**Kopfschmerz**" in content                      # Antwort des Sprachmodells
+    assert "0176220Anamnese" in content.replace("\r", "")    # Feld 6220 wie gesendet
+    assert txt.with_suffix(".gdt").read_bytes() == (gdt_dir / "T2MDSTNO.001").read_bytes()
+
+    # Nicht abgeholt -> keine zweite Kopie; Psychotherapie nie
+    assert send(client).status_code == 409
+    (gdt_dir / "T2MDSTNO.001").unlink()
+    assert send(client, mode="psycho").status_code == 200
+    assert len(list(debug.iterdir())) == 2
+
+
 def test_parse_started_falls_back_to_now():
     assert server._parse_started("2026-10-03T10:15:30") == datetime(2026, 10, 3, 10, 15, 30)
     assert abs((server._parse_started("Quatsch") - datetime.now()).total_seconds()) < 5

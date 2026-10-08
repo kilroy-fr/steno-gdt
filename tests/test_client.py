@@ -5,6 +5,7 @@ Laeuft nur, wo die Client-Abhaengigkeiten installiert sind
 Zusammenspiel-Test startet den echten Server mit den Dienst-Attrappen in einem
 Thread und laedt per requests hoch, so wie der Knopf es tut.
 """
+import gc
 import queue
 import socket
 import sys
@@ -93,6 +94,13 @@ def test_config_defaults_and_numbers(tmp_path):
     assert cfg.server == "https://steno.example"
     assert cfg.number("stille_minuten") == 2.5 and cfg.number("max_minuten") == 120
     assert cfg.window() is None and cfg.get("mikrofon") == ""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="fragt Windows nach den Monitoren")
+def test_saved_position_off_screen_is_detected():
+    """Gespeicherter Platz auf einem abgezogenen Monitor: Knopf unsichtbar."""
+    assert steno.on_screen(10, 10)                 # (0, 0) gehoert immer zum Hauptbildschirm
+    assert not steno.on_screen(100_000, 100_000)
 
 
 # ---------------------------------------------------------------- mit Server
@@ -220,6 +228,10 @@ def app(tmp_path, monkeypatch):
                   "001", "SZ 1")
     yield a
     root.destroy()
+    # Tk-Reste jetzt freigeben: sonst raeumt sie der GC irgendwann in einem
+    # fremden Thread (TestClient eines spaeteren Tests) auf, und Tcl stuerzt ab.
+    del a
+    gc.collect()
 
 
 def click(app, u, v):

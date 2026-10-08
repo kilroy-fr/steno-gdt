@@ -420,6 +420,10 @@ def upload_step(api: Api, spool: Spool, entry: Entry, events: queue.Queue):
 # ============================================================
 # OBERFLAECHE
 # ============================================================
+# Um den Knopf herum durchsichtig, auch fuer Klicks (-transparentcolor). Kommt im
+# Knopfbild nicht vor; die Kantenpixel mischen sich mit ihm zu einem dunklen Rand.
+TRANSPARENT = "#010203"
+HIDDEN = "+-32000+-32000"
 COLORS = {
     "bg": "#1f2329", "text": "#ffffff", "muted": "#b9c0ca", "rec": "#ff6b5e",
     "warn": "#f29900", "ok": "#34a853",
@@ -429,16 +433,7 @@ MODES = (("psycho", "Psychotherapie-Sitzung"), ("sprechstunde", "Sprechstunde"),
          ("direkt", "Direkt – nur Transkript"))
 
 
-def fit(text: str, font: tkfont.Font, width: float) -> str:
-    """Text auf die Breite kuerzen ("Müller-Lüdenscheid, Ha…") statt umzubrechen."""
-    if font.measure(text) <= width:
-        return text
-    while text and font.measure(text + "…") > width:
-        text = text[:-1]
-    return text.rstrip(" ,·") + "…"
-
-
-def windows_tweaks(root: tk.Tk):
+def windows_tweaks(root: tk.Misc):
     """Keine Taskleiste, und ein Klick nimmt T2med nicht den Fokus weg."""
     if sys.platform != "win32":
         return
@@ -452,6 +447,19 @@ def windows_tweaks(root: tk.Tk):
         log.warning(f"Fensterstil nicht gesetzt: {e}")
 
 
+def on_screen(x: int, y: int) -> bool:
+    """Liegt der Punkt auf einem angeschlossenen Bildschirm? Nach einem
+    abgezogenen Monitor zeigte der gespeicherte Platz sonst ins Leere — der
+    Knopf liefe, unsichtbar und ohne Taskleisteneintrag."""
+    if sys.platform != "win32":
+        return True
+    from ctypes import wintypes
+    monitor_from_point = ctypes.windll.user32.MonitorFromPoint
+    monitor_from_point.argtypes = [wintypes.POINT, wintypes.DWORD]
+    monitor_from_point.restype = wintypes.HMONITOR
+    return bool(monitor_from_point(wintypes.POINT(x, y), 0))     # MONITOR_DEFAULTTONULL
+
+
 def prerender(bodies: dict, size: int):
     """Die haeufigen Knopfbilder vorab — sonst haengt der erste Klick auf ▶ bei
     150 % Skalierung eine Viertelsekunde. Bekommt nur das Woerterbuch, nicht App:
@@ -460,7 +468,7 @@ def prerender(bodies: dict, size: int):
         for playing in (False, True):
             state = (mode, playing, True, False)
             if state not in bodies:
-                bodies[state] = knopf.render(size, *state, bg=COLORS["bg"])
+                bodies[state] = knopf.render(size, *state, bg=TRANSPARENT)
 
 
 class App:
@@ -493,22 +501,30 @@ class App:
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
         s = self.scale
         self.d = int(max(96.0, cfg.number("knopf_pixel")) * s)   # darunter waere die Beschriftung unlesbar
-        self.w, self.h = self.d + int(176 * s), self.d
+        self.w = self.h = self.d
         self.bodies: dict = {}                    # knopf.render() je Zustand, ~0,1 s pro Stueck
         self.images: dict = {}                    # dazu Maus darueber/gedrueckt, als Tk-Bild
         self.hover: str | None = None
         self.pressed = False
         root.overrideredirect(True)
         root.attributes("-topmost", True)
-        root.configure(bg=COLORS["bg"])
-        pos = cfg.window() or (root.winfo_screenwidth() - self.w - int(24 * s),
-                               root.winfo_screenheight() - self.h - int(72 * s))
+        root.configure(bg=TRANSPARENT)
+        if sys.platform == "win32":
+            root.attributes("-transparentcolor", TRANSPARENT)
+        pos = cfg.window()
+        if pos and not on_screen(pos[0] + self.w // 2, pos[1] + self.h // 2):
+            log.info(f"Gespeicherter Platz {pos} liegt auf keinem Bildschirm")
+            pos = None
+        pos = pos or (root.winfo_screenwidth() - self.w - int(24 * s),
+                      root.winfo_screenheight() - self.h - int(72 * s))
         root.geometry(f"{self.w}x{self.h}+{pos[0]}+{pos[1]}")
-        self.canvas = tk.Canvas(root, width=self.w, height=self.h, bg=COLORS["bg"],
+        self.canvas = tk.Canvas(root, width=self.w, height=self.h, bg=TRANSPARENT,
                                 highlightthickness=0, cursor="fleur")
         self.canvas.pack()
         self.font1 = tkfont.Font(root, family="Segoe UI", size=10, weight="bold")
         self.font2 = tkfont.Font(root, family="Segoe UI", size=9)
+        self.tip, self.tip_lines = self.make_tip()
+        self.tip_shown: tuple | None = None
 
         self.menu = tk.Menu(root, tearoff=0)
         mode_menu = tk.Menu(self.menu, tearoff=0)
@@ -536,6 +552,7 @@ class App:
 
         root.update_idletasks()
         windows_tweaks(root)
+        windows_tweaks(self.tip)
 
         threading.Thread(target=watch_orders, daemon=True, args=(
             api, ap, cfg.number("auftrag_abfrage_sekunden"), self.events, self.stop_event)).start()
@@ -550,16 +567,52 @@ class App:
         return self.entry is not None
 
     def draw(self):
-        c, s = self.canvas, self.scale
+        c = self.canvas
         c.delete("all")
         c.create_image(0, 0, image=self.button_image(), anchor="nw")
-        line1, line2, color2 = self.lines()
-        x = self.d + 8 * s
-        room = self.w - x - 6 * s
-        c.create_text(x, self.h * 0.40, text=fit(line1, self.font1, room), anchor="w",
-                      fill=COLORS["text"], font=self.font1)
-        c.create_text(x, self.h * 0.62, text=fit(line2, self.font2, room), anchor="w",
-                      fill=color2, font=self.font2)
+        self.update_tip()
+
+    def make_tip(self) -> tuple[tk.Toplevel, tuple[tk.Label, tk.Label]]:
+        """Fuer wen aufgenommen wird, Laufzeit, Zustand: neben dem Knopf, solange
+        die Maus darauf steht oder eine Meldung ("✓ an T2med") frisch ist.
+        Verborgen wird es ausserhalb des Bildschirms, nicht per withdraw():
+        Wieder-Einblenden wuerde T2med den Fokus nehmen."""
+        tip = tk.Toplevel(self.root)
+        tip.geometry(HIDDEN)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        s = self.scale
+        tip.configure(bg=COLORS["bg"], padx=int(10 * s), pady=int(6 * s))
+        lines = (tk.Label(tip, bg=COLORS["bg"], fg=COLORS["text"], font=self.font1, anchor="w"),
+                 tk.Label(tip, bg=COLORS["bg"], font=self.font2, anchor="w"))
+        for label in lines:
+            label.pack(fill="x")
+        return tip, lines
+
+    def update_tip(self):
+        tip = self.tip
+        fresh = self.flash and time.monotonic() < self.flash_until
+        show = (self.hover or fresh) and not self.dialog
+        if not show:
+            if self.tip_shown:
+                tip.geometry(HIDDEN)
+                self.tip_shown = None
+            return
+        line1, line2, color2 = shown = self.lines()
+        if self.tip_shown != shown:
+            self.tip_lines[0].configure(text=line1)
+            self.tip_lines[1].configure(text=line2, fg=color2)
+        # Links neben den Knopf, ausser dort ist kein Platz
+        tip.update_idletasks()
+        gap = int(8 * self.scale)
+        x = self.root.winfo_x() - tip.winfo_reqwidth() - gap
+        if x < 0:
+            x = self.root.winfo_x() + self.w + gap
+        y = self.root.winfo_y() + (self.h - tip.winfo_reqheight()) // 2
+        tip.geometry(f"+{x}+{y}")
+        if not self.tip_shown:
+            tip.lift()
+        self.tip_shown = shown
 
     def button_image(self) -> ImageTk.PhotoImage:
         state = (self.shown_mode, self.recording, not self.offline, bool(self.failed))
@@ -568,7 +621,7 @@ class App:
             if len(self.images) > 64:
                 self.images.clear()
             if state not in self.bodies:
-                self.bodies[state] = knopf.render(self.d, *state, bg=COLORS["bg"])
+                self.bodies[state] = knopf.render(self.d, *state, bg=TRANSPARENT)
             im = self.bodies[state]
             if self.hover:
                 im = knopf.highlight(im, self.hover, self.pressed, warn=state[3])
@@ -642,6 +695,8 @@ class App:
         if not self.dialog:
             self.root.attributes("-topmost", True)
             self.root.lift()
+            if self.tip_shown:
+                self.tip.lift()
         self.draw()
         self.root.after(500, self.tick)
 
@@ -794,6 +849,7 @@ class App:
             self.pressed = False
         if self.dragged:
             self.root.geometry(f"+{e.x_root - self.drag_from[0]}+{e.y_root - self.drag_from[1]}")
+            self.update_tip()                     # wandert mit
 
     def on_release(self, e):
         self.pressed = False
@@ -802,7 +858,7 @@ class App:
             self.cfg.set("y", self.root.winfo_y(), "fenster")
             self.cfg.save()
             return
-        zone = knopf.zone(e.x, e.y, self.d)       # am Text wird nur verschoben
+        zone = knopf.zone(e.x, e.y, self.d)
         if zone == "core":
             if self.recording:
                 self.stop_recording()
@@ -836,7 +892,16 @@ class App:
         failed = "normal" if self.failed else "disabled"
         self.menu.entryconfigure("Fehlgeschlagene erneut senden", state=failed)
         self.menu.entryconfigure("Fehlgeschlagene verwerfen", state=failed)
-        self.menu.tk_popup(e.x_root, e.y_root)
+        # Ueber den Knopf, rechtsbuendig, nicht an den Mauszeiger: dort laege es
+        # auf dem Knopf, und tick() holt den Knopf auch waehrend des Menues nach
+        # vorn. Das Untermenue "Art des Gespraechs" klappt oben auf, also auch frei.
+        self.menu.update_idletasks()
+        gap = int(8 * self.scale)                 # Tk schaetzt die Hoehe ein paar Pixel zu knapp
+        x = max(0, self.root.winfo_x() + self.w - self.menu.winfo_reqwidth())
+        y = self.root.winfo_y() - self.menu.winfo_reqheight() - gap
+        if y < 0:
+            y = self.root.winfo_y() + self.h + gap
+        self.menu.tk_popup(x, y)
 
     # ---------------------------------------------------------- Menue
     def open_history(self):

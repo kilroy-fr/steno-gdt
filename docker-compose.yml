@@ -52,7 +52,7 @@ services:
       # Austauschordner im Container; der Mount unten legt fest, was dahinter liegt.
       - GDT_DIR=/gdt
       # Arbeitsplatznummer = Endung der Austauschdateien (STNOT2MD.001 / T2MDSTNO.001)
-      - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3
+      - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3;004=Home
       - GDT_ID_PVS=T2MED
       - GDT_ID_GERAET=STENO
       - GDT_ZEICHENSATZ=2
@@ -60,8 +60,12 @@ services:
       # Minuten, die ein "Messung starten" auf seine Aufnahme wartet
       - GDT_AUFTRAG_GUELTIG=60
       # Wie T2med den Austauschordner sieht - nur fuer den Transkript-Anhang,
-      # leer = kein Anhang. Beispiel: T:\ (Netzlaufwerk, wie S:\ bei sono-gdt)
+      # leer = kein Anhang. Beispiel: S:\_steno (Netzlaufwerk S: von sono-gdt)
       - GDT_PVS_PFAD=
+      # Debug: je Uebergabe die Antwort des Sprachmodells und die GDT-Datei als
+      # Kopie nach ./logs/gdt-debug (T2med loescht das Original nach dem Lesen).
+      # Patientendaten! Nach dem Einrichten leer setzen und den Ordner leeren.
+      - GDT_DEBUG_DIR=/logs/gdt-debug
       # Zweites T2med-Geraet "Steno Psychotherapie" (T2MED-EINRICHTUNG.md).
       # Erst einkommentieren, wenn es an ALLEN Arbeitsplaetzen in T2med
       # eingerichtet ist — sonst holt niemand die Ergebnisdatei ab.
@@ -88,9 +92,9 @@ services:
       - ./static:/app/static:ro
       - ./logs:/logs
       # GDT-Austauschordner, den auch T2med erreichen muss. Standard: ./gdt
-      # auf diesem Rechner (per Windows-Freigabe fuer die Arbeitsplaetze).
-      # Fuer eine NAS-Freigabe das Volume gdt-share unten einkommentieren und
-      # hier "gdt-share:/gdt" eintragen.
+      # auf diesem Rechner (nur zum Testen). Im Betrieb S:\_steno auf der
+      # sono-gdt-Freigabe: Volume gdt-share unten einkommentieren und hier
+      # "gdt-share:/gdt" eintragen.
       - ${GDT_HOST_DIR:-./gdt}:/gdt
     networks:
       - diktat-network
@@ -117,12 +121,15 @@ networks:
 # ============================================================
 # VOLUMES
 # ============================================================
-# GDT-Austauschordner auf einer SMB-Freigabe (statt ./gdt), z. B. neben
-# //192.168.2.70/sono-gdt. Zugangsdaten nicht einchecken - in .env ablegen.
+# GDT-Austauschordner auf der Freigabe von sono-gdt (statt ./gdt): Unterordner
+# _steno, an den Arbeitsplaetzen S:\_steno. Der Ordner muss existieren. Der
+# Unterstrich ist noetig, sonst haelt sono-gdt ihn fuer einen Patientenordner.
+# Gemountet wird nur _steno, nicht die Ultraschallbilder.
+# Zugangsdaten nicht einchecken - in .env ablegen.
 # volumes:
 #   gdt-share:
 #     driver: local
 #     driver_opts:
 #       type: cifs
-#       device: //192.168.2.70/steno-gdt
+#       device: //192.168.2.70/sono-gdt/_steno
 #       o: "username=${GDT_SMB_USER},password=${GDT_SMB_PASSWORD},uid=0,gid=0,file_mode=0660,dir_mode=0770,vers=3.0"

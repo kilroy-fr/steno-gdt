@@ -13,10 +13,10 @@ sind mit *(sono-gdt)* markiert. Die T2med-Anleitungen von sonoGDT, auf die sich 
 ## Ablauf
 
 ```
-T2med "Messung starten" (Sprechzimmer 1) ──▶ T:\STNOT2MD.001   (6302, Steno holt ab + löscht)
+T2med "Messung starten" (Sprechzimmer 1) ──▶ S:\_steno\STNOT2MD.001   (6302, Steno holt ab + löscht)
 Steno-Knopf startet die Aufnahme von selbst (rot, ■, Patientenname)
 Klick auf ■ ──▶ Aufnahme geht an den Server: Transkription, Sprechertrennung, Dokumentation
-            ──▶ T:\T2MDSTNO.001   (6310, T2med liest + löscht, etwa 10 s später)
+            ──▶ S:\_steno\T2MDSTNO.001   (6310, T2med liest + löscht, etwa 10 s später)
 ```
 
 - **Ohne „Messung starten“** startet ein Klick auf ▶ die Aufnahme „ohne Patient“. Die Dokumentation
@@ -47,32 +47,51 @@ Name und Geburtsdatum gehen **nicht** an das Sprachmodell. Das Geschlecht aus de
 
 ## 1. Austauschordner
 
-Wie bei sono-gdt eine eigene Freigabe auf dem NAS, als Netzlaufwerk verbunden *(sono-gdt)*:
+Steno nutzt die Freigabe von sono-gdt mit. Sie ist in jedem Sprechzimmer schon als Netzlaufwerk
+`S:` = `\\192.168.2.70\sono-gdt` verbunden *(sono-gdt)*. Dort bekommt Steno einen eigenen Unterordner
+**`S:\_steno`**. Ein zusätzliches Laufwerk muss also nicht verbunden werden.
 
-1. Auf dem NAS die Freigabe `\\192.168.2.70\steno-gdt` anlegen. **Nicht** `sono-gdt\_gdt` mitbenutzen: Ein
-   eigener Ordner hält die beiden Dienste auseinander.
-2. An **jedem** Arbeitsplatz die Freigabe als Netzlaufwerk `T:` verbinden (Lesen, Schreiben, Löschen).
-   Ein Laufwerksbuchstabe statt UNC-Pfad wie `S:` bei sono-gdt: das ist dort erprobt und hält die Pfade in
-   6305 kurz.
+- **Eigener Ordner statt `S:\_gdt`:** Die beiden Dienste bleiben getrennt, und der Container sieht nur
+  `_steno`, also weder die Ultraschallbilder noch die Aufträge von sono-gdt.
+- **Der Unterstrich ist nötig.** sono-gdt hält jeden anderen Ordner in der Freigabe für einen Patientenordner.
+  Ordner, deren Name mit `_`, `.` oder `$` beginnt, überspringt es (wie `_gdt` und `_archiv`).
+
+1. In `\\192.168.2.70\sono-gdt` den Ordner `_steno` anlegen (z. B. im Explorer als `S:\_steno`).
+2. Prüfen, ob `S:` an **jedem** Arbeitsplatz verbunden ist, auch an „Home“. Rechte: Lesen, Schreiben, Löschen
+   (für sono-gdt ohnehin nötig).
 3. Auf dem Docker-Rechner in `docker-compose.yml` das Volume `gdt-share` einkommentieren
-   (`device: //192.168.2.70/steno-gdt`), Zugangsdaten `GDT_SMB_USER` und `GDT_SMB_PASSWORD` in `.env`
-   eintragen und den Mount auf `gdt-share:/gdt` umstellen.
-4. Optional für den Transkript-Anhang: `GDT_PVS_PFAD=T:\`.
+   (`device: //192.168.2.70/sono-gdt/_steno`), die Zugangsdaten `GDT_SMB_USER` und `GDT_SMB_PASSWORD` in `.env`
+   eintragen (dieselben wie für sono-gdt sind möglich) und den Mount auf `gdt-share:/gdt` umstellen.
+4. Optional für den Transkript-Anhang: `GDT_PVS_PFAD=S:\_steno`.
 5. `docker compose up -d` im Projektordner. Das fasst nur `transcribe-gdt-web` an. Whisper, Sprechertrennung
    und ollama laufen weiter. Prüfen: `curl localhost:8011/steno` muss `"gdt": true` zeigen.
 
 ## 2. Gerät „Steno“ in T2med anlegen
 
-An jedem Arbeitsplatz unter **Hauptmenü → Geräte verwalten → Eigene → Gerät konfigurieren**. Einmal in
-Sprechzimmer 1 einrichten, in den anderen über *Weitere → Übernehmen* kopieren, mit dem Bleistift bearbeiten
-und **nur die beiden Dateinamen** auf `.002` bzw. `.003` ändern *(sono-gdt)*. **Nach jeder Änderung T2med an
-diesem Arbeitsplatz neu starten.**
+Feld für Feld durch **Hauptmenü → Geräte verwalten → Eigene → Gerät konfigurieren** (auch erreichbar über
+**Ext. Aufträge → Geräteverwaltung** unten rechts). Die Werte in `Code` müssen zu `docker-compose.yml` passen,
+die Variable steht jeweils dabei.
+
+Die Gerätekonfiguration gilt **je Arbeitsplatz** (Reiter *Eigene* = dieser Arbeitsplatz, *Weitere* = die
+anderen). Einmal einrichten, an den anderen Arbeitsplätzen über *Weitere → Übernehmen* kopieren, mit dem
+Bleistift bearbeiten und **nur die beiden Dateinamen** auf die eigene Endung ändern *(sono-gdt)*. **Nach jeder
+Änderung T2med an diesem Arbeitsplatz neu starten.**
 
 | Raum | T2med-Arbeitsplatz | Dateiname Import | Dateiname Export | Steno-Knopf `arbeitsplatz` |
 |---|---|---|---|---|
 | Sprechzimmer 1 | Sprechzimmer 1 | `T2MDSTNO.001` | `STNOT2MD.001` | `001` |
 | Sprechzimmer 2 | Sprechzimmer 2 | `T2MDSTNO.002` | `STNOT2MD.002` | `002` |
 | Sprechzimmer 3 | Sprechzimmer 3 | `T2MDSTNO.003` | `STNOT2MD.003` | `003` |
+| Home | Home | `T2MDSTNO.004` | `STNOT2MD.004` | `004` |
+
+Auf dem Server passend dazu (`docker-compose.yml`):
+
+```
+GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3;004=Home
+```
+
+Ein weiterer Arbeitsplatz braucht dort einen Eintrag mit neuer Nummer und `docker compose up -d`. Eine Endung,
+die der Server nicht kennt, lehnt er mit „Unbekannter Arbeitsplatz“ ab.
 
 ### Gerät und Messung
 
@@ -95,8 +114,8 @@ diesem Arbeitsplatz neu starten.**
 
 | Feld | Eintrag | Erklärung |
 |---|---|---|
-| Importverzeichnis | `T:\` | hier legt Steno die Dokumentation ab |
-| Exportverzeichnis | `T:\` *(sono-gdt: gleich wie Import)* | hier legt T2med den Auftrag ab |
+| Importverzeichnis | `S:\_steno` | hier legt Steno die Dokumentation ab. **Nicht** `S:\_gdt` (das ist sono-gdt) |
+| Exportverzeichnis | `S:\_steno` *(sono-gdt: gleich wie Import)* | hier legt T2med den Auftrag ab |
 | Programm | `C:\Windows\System32\cmd.exe` *(sono-gdt)* | Platzhalter. Der Steno-Knopf läuft ohnehin und reagiert auf die Auftragsdatei. |
 | Parameter | `/c exit` *(sono-gdt)* | beendet sich sofort |
 | **Betriebsmodus** | **„Aufruf für jede einzelne Messung“** *(sono-gdt)* | T2med holt die Datei damit etwa 10 s nach dem Ablegen ab, ohne Neustart. |
@@ -106,9 +125,9 @@ diesem Arbeitsplatz neu starten.**
 | Zeitpunktbezug Messergebnis | „Zeitpunkt der Erhebung“ *(sono-gdt)* | 6200/6201 = Beginn der Aufnahme |
 | Kürzel für Austauschdateien | `STNO` | |
 | **Im- und Exportdateien festlegen** | **an** *(sono-gdt)* | |
-| Dateiname Import | `T2MDSTNO.001` (2: `.002`, 3: `.003`) | = `GDT_DATEINAME=T2MDSTNO.{ap}` |
-| Dateiname Export | `STNOT2MD.001` (2: `.002`, 3: `.003`) | = `GDT_AUFTRAG_DATEINAME=STNOT2MD.{ap}` |
-| Verzeichnis ist Netzwerkpfad | aus *(sono-gdt)* | Das Verzeichnis ist das Netzlaufwerk `T:`, kein UNC-Pfad. |
+| Dateiname Import | `T2MDSTNO.001` (2: `.002`, 3: `.003`, Home: `.004`) | = `GDT_DATEINAME=T2MDSTNO.{ap}` |
+| Dateiname Export | `STNOT2MD.001` (2: `.002`, 3: `.003`, Home: `.004`) | = `GDT_AUFTRAG_DATEINAME=STNOT2MD.{ap}` |
+| Verzeichnis ist Netzwerkpfad | aus *(sono-gdt)* | Das Verzeichnis liegt auf dem Netzlaufwerk `S:`, kein UNC-Pfad. |
 
 ### Anzeige von Befunden
 
@@ -152,27 +171,64 @@ Einrichtung: das Gerät „Steno“ über *Übernehmen* kopieren und nur diese F
 | Anzeigename | `Steno Psychotherapie` |
 | GDT-ID Gerät | `STENO_PT` (= `GDT_PSY_ID_GERAET`) |
 | Kürzel für Austauschdateien / Gerätegruppe | `STNP` |
-| Dateiname Import | `T2MDSTNP.001` (2: `.002`, 3: `.003`) |
-| Dateiname Export | `STNPT2MD.001` (2: `.002`, 3: `.003`) |
+| Dateiname Import | `T2MDSTNP.001` (2: `.002`, 3: `.003`, Home: `.004`) |
+| Dateiname Export | `STNPT2MD.001` (2: `.002`, 3: `.003`, Home: `.004`) |
 
 Danach in `docker-compose.yml` die drei Zeilen `GDT_PSY_*` einkommentieren und `docker compose up -d`.
-**Erst, wenn das Gerät an allen drei Arbeitsplätzen eingerichtet ist.** Eine Sitzung ohne Auftrag geht an
+**Erst, wenn das Gerät an allen Arbeitsplätzen eingerichtet ist** (auch Home). Eine Sitzung ohne Auftrag geht an
 `T2MDSTNP`, und an einem Arbeitsplatz ohne dieses Gerät holt T2med die Datei nie ab.
 
 Das Ergebnis geht immer an das Gerät zurück, von dem der Auftrag kam, auch wenn die Art am Knopf umgestellt
 wurde. Dort wartet T2med darauf.
 
+## Debug: Was ging an T2med?
+
+T2med löscht `T2MDSTNO.00x` nach dem Einlesen. Damit sich trotzdem nachsehen lässt, was ankam, legt der Server
+bei gesetztem `GDT_DEBUG_DIR` je Übergabe eine Kopie ab. Auf dem Docker-Rechner liegt sie unter
+`transcribe-gdt\logs\gdt-debug\`:
+
+- `20261007_101733_004_abpro.txt` zum Lesen, in drei Teilen:
+  1. die Antwort des Sprachmodells ungekürzt (das A/B/PRO, wie es aus dem Modell kam, mit Markdown),
+  2. der Klartext für die Karteikarte, vor dem Umbruch auf 60 Zeichen,
+  3. die GDT-Datei, wie T2med sie liest. Jede Zeile ist ein Feld, `…6220…` sind die Befundzeilen, `…6227…`
+     der Kommentar.
+- `20261007_101733_004_abpro.gdt`: dieselbe Datei Byte für Byte (CP437).
+
+Steht etwas in T2med anders als in Teil 3, liegt es an der Geräteeinstellung in T2med („Anzahl der Zeilen“,
+Zeichensatz). Steht es schon in Teil 1 falsch, liegt es am Sprachmodell.
+
+Psychotherapie-Sitzungen werden nie kopiert, wie beim Logging. Die Dateien enthalten Patientennamen und
+Dokumentation. Nach dem Einrichten deshalb `GDT_DEBUG_DIR=` leer setzen, `docker compose up -d` ausführen und
+den Ordner leeren.
+
+## Test zu Hause (Arbeitsplatz 004, Sprechstunde)
+
+Voraussetzungen am Rechner zu Hause:
+
+- Der T2med-Client läuft als Arbeitsplatz „Home“. Das Gerät „Steno“ ist wie oben eingerichtet, Dateinamen `.004`.
+- `S:` ist mit `\\192.168.2.70\sono-gdt` verbunden (über das VPN), und `S:\_steno` ist erreichbar.
+- `https://steno.hausarzt-rothenburg.de/steno` öffnet sich im Browser. Die Route nimmt nur private Adressen
+  an, von zu Hause aus also nur über das VPN.
+- Der Steno-Knopf hat `arbeitsplatz = 004` in `%APPDATA%\Steno\steno.ini`.
+
+Ablauf:
+
+1. Testpatienten öffnen, **Messung starten**. Der Knopf zeigt nach 2–6 s den Namen und nimmt auf.
+2. Den Ring auf **S-Stunde** (rot) lassen. Ohne Wahl ist das ohnehin die Vorgabe.
+3. Ein bis zwei Minuten Sprechstunde spielen, dann **■**. Nach 1–3 Minuten meldet der Knopf „✓ an T2med“.
+4. In T2med prüfen wie in Schritt 6 unten und die Debug-Kopie `logs\gdt-debug\…_004_abpro.txt` daneben legen.
+
 ## Erster Test (in Sprechzimmer 1)
 
-1. Austauschordner einrichten (`T:` verbunden), Container neu starten, `curl localhost:8011/steno` prüfen.
+1. Austauschordner einrichten (`S:\_steno`), Container neu starten, `curl localhost:8011/steno` prüfen.
 2. Steno-Knopf installieren (`client/README.md`), Arbeitsplatz `001`.
 3. T2med einrichten, speichern, **T2med neu starten**.
 4. Testpatienten öffnen, **Messung starten**. Nach 2–6 s wird der Knopf rot und zeigt den Namen. Im Log
    (`docker compose logs -f transcribe-gdt-web`) steht `Messauftrag an Arbeitsplatz 001: …`.
    - Steht dort `STNOT2MD.001 ignoriert (… Felder …)`: T2med schreibt eine andere Satzart. Die Zeile an
      Claude/den Betreuer geben.
-   - Steht dort nichts: Liegt `STNOT2MD.001` auf `T:`? Exportverzeichnis und Dateiname prüfen.
-5. Eine Minute sprechen, **■** klicken. Nach 1–3 Minuten erscheint `T2MDSTNO.001` auf `T:` und verschwindet etwa
+   - Steht dort nichts: Liegt `STNOT2MD.001` in `S:\_steno`? Exportverzeichnis und Dateiname prüfen.
+5. Eine Minute sprechen, **■** klicken. Nach 1–3 Minuten erscheint `T2MDSTNO.001` in `S:\_steno` und verschwindet etwa
    10 s später, **ohne Neustart von T2med**. Der Knopf meldet „✓ an T2med“.
 6. In T2med prüfen:
    - richtiger Patient, Datum/Uhrzeit = Aufnahmebeginn?

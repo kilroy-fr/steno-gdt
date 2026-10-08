@@ -13,7 +13,9 @@ Der Knopf hat drei Flächen und zwei Lampen:
 | Lampe oben rechts | grün = Server erreichbar, dunkel = nicht erreichbar |
 | Lampe oben links (orange) | eine Aufnahme ist fehlgeschlagen |
 
-Daneben steht, für wen aufgenommen wird:
+Mehr ist nicht zu sehen: Um den Knopf herum ist das Fenster durchsichtig, ein Klick dort trifft T2med.
+Steht die Maus auf dem Knopf, erscheint daneben, für wen aufgenommen wird; Meldungen wie
+„✓ an T2med“ oder ein Mikrofon-Fehler erscheinen dort auch von selbst für einige Sekunden:
 
 | Text | Bedeutung |
 |---|---|
@@ -27,7 +29,7 @@ Daneben steht, für wen aufgenommen wird:
 **Normalfall:** In T2med beim Patienten **„Messung starten“**. Der Knopf startet die Aufnahme nach 2–6 s von
 selbst. Am Ende **■** klicken. Nach 1–3 Minuten steht die Dokumentation in T2med, bei „Direkt“ nach wenigen Sekunden.
 
-- Mit gedrückter Maustaste (Knopf oder Text) lässt sich das Fenster verschieben, die Position wird gemerkt.
+- Mit gedrückter Maustaste (irgendwo auf dem Knopf) lässt sich das Fenster verschieben, die Position wird gemerkt.
 - Die Art des Gesprächs gilt für die laufende bzw. nächste Aufnahme. Danach steht der Knopf wieder auf
   S-Stunde, bei einem Auftrag vom T2med-Gerät „Steno Psychotherapie“ auf P-Therapie.
 - **Menü** (Zahnrad oder Rechtsklick): Art des Gesprächs, Verlauf öffnen, Fehlgeschlagene erneut senden
@@ -42,8 +44,8 @@ selbst. Am Ende **■** klicken. Nach 1–3 Minuten steht die Dokumentation in T
 - Aufnahmen unter 5 s gelten als Fehlklick und werden verworfen. Der Auftrag bleibt dann für die nächste.
 - Eine Aufnahme endet von selbst nach 20 min Stille oder spätestens nach 120 min.
 - Kommt während einer Aufnahme ein Auftrag für einen anderen Patienten, fragt der Knopf, bevor er wechselt.
-- Lag beim Start des Knopfs schon ein Auftrag vor, startet er nicht von selbst. Der Name steht dann am Knopf,
-  ein Klick nimmt für diesen Patienten auf.
+- Lag beim Start des Knopfs schon ein Auftrag vor, startet er nicht von selbst. Der Name steht dann im Hinweis
+  neben dem Knopf, ein Klick nimmt für diesen Patienten auf.
 
 Die Aufnahme liegt bis zur Bestätigung „an T2med gesendet“ in `%LOCALAPPDATA%\Steno\aufnahmen` und wird
 danach gelöscht. Absturz oder Neustart verlieren nichts: Beim nächsten Start wird nachgeholt.
@@ -70,11 +72,12 @@ Ergebnis: `client\dist\Steno.exe` (eine Datei, etwa 30 MB, ohne Python auf den A
 4. Mikrofon: die EPOS Expand 40 per **USB** (nicht Bluetooth) und in Windows als Standard-Aufnahmegerät.
    Oder in den Einstellungen `mikrofon = EPOS` setzen.
 
-| Sprechzimmer | `--arbeitsplatz` | T2med-Dateien |
+| Raum | `--arbeitsplatz` | T2med-Dateien |
 |---|---|---|
 | 1 | `001` | `T2MDSTNO.001` / `STNOT2MD.001` |
 | 2 | `002` | `T2MDSTNO.002` / `STNOT2MD.002` |
 | 3 | `003` | `T2MDSTNO.003` / `STNOT2MD.003` |
+| Home | `004` | `T2MDSTNO.004` / `STNOT2MD.004` |
 
 Die Arbeitsplatznummer muss zur Endung der Dateinamen passen, die T2med an diesem Rechner benutzt
 (`T2MED-EINRICHTUNG.md`).
@@ -100,6 +103,6 @@ Protokoll: `%LOCALAPPDATA%\Steno\steno.log`. Es enthält Patientennummern, keine
 
 ## Voraussetzungen auf dem Server
 
-- Der Knopf spricht den Server über HTTPS an. Dafür braucht es eine Caddy-Route auf `transcribe-gdt-web:8000`
-  (siehe CLAUDE.md, „Erreichbarkeit“) und einen DNS-Eintrag.
+- Der Knopf spricht den Server über HTTPS an: `https://steno.hausarzt-rothenburg.de` ist eine Caddy-Route auf
+  `transcribe-gdt-web:8000` (siehe CLAUDE.md, „Erreichbarkeit“) und braucht einen DNS-Eintrag auf `192.168.5.20`.
 - Die T2med-Anbindung muss eingerichtet sein (`GDT_DIR`), sonst verweigert der Knopf den Start.

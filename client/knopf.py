@@ -1,15 +1,19 @@
 """Der runde Steno-Knopf als Bild (Vorlage: client/button.js, aus Claude Desktop).
 
 Drei Flaechen und zwei Lampen, Koordinaten wie in der Vorlage (viewBox 240×240):
-- Mitte: ▶ / ■
+- Mitte: ▶ / ■, geprägt wie die Beschriftung
 - obere Ringhaelfte: Art des Gespraechs — Farbe des ganzen Knopfs und geprägte
   Beschriftung entlang der Rundung, ein Klick schaltet weiter
-- untere Ringhaelfte (Zahnrad): Menue
+- untere Ringhaelfte (Zahnrad, geprägt wie ▶ / ■): Menue
 - Lampe oben rechts: gruen = Server erreichbar; oben links orange = Fehler
 
 Tk zeichnet unter Windows ohne Kantenglaettung und kennt weder Verlaeufe noch
 Text auf einer Kurve. Gerechnet wird deshalb mit numpy/Pillow in vierfacher
 Aufloesung und dann verkleinert; App haelt die fertigen Bilder je Zustand vor.
+
+Ohne Schlagschatten: das Fenster ist rund, weil App die Hintergrundfarbe per
+Farbschluessel durchsichtig schaltet — ein Schatten waere dort ein dunkler,
+harter Ring um den Knopf.
 """
 import math
 import threading
@@ -49,13 +53,14 @@ def zone(x: float, y: float, size: float) -> str | None:
 
 def render(size: int, mode: str, playing: bool, online: bool, warn: bool = False,
            bg: str = "#1f2329") -> Image.Image:
-    """Knopf als RGB-Bild size×size auf Hintergrund bg."""
+    """Knopf als RGB-Bild size×size auf Hintergrund bg; ausserhalb des Sockels
+    (Radius 115 von 120) steht bg unveraendert."""
     with _lock:
         return _render(size, mode, playing, online, warn, bg)
 
 
 def _render(size, mode, playing, online, warn, bg):
-    light, main, dark, deep, ink = (_rgb(c) for c in PALETTES[mode])
+    light, main, dark, deep, _ = (_rgb(c) for c in PALETTES[mode])
     n = size * SS
     k = n / VIEW
     v, u = (np.mgrid[0:n, 0:n].astype(np.float32) + 0.5) / k
@@ -64,7 +69,6 @@ def _render(size, mode, playing, online, warn, bg):
     img[:] = _rgb(bg)
     grain = _grain(size)
 
-    _over(img, _soft_disc(n, k, (C, C + 4), 115, 4), 0, 0.35)          # Schatten
     _over(img, d <= 115, deep)                                          # Sockel
     ring = (d >= 78) & (d <= 112)
     upper, lower = ring & (v <= C), ring & (v > C)
@@ -76,7 +80,7 @@ def _render(size, mode, playing, online, warn, bg):
     p = np.mod(u * math.cos(a) - v * math.sin(a), 7)
     _over(img, lower & (np.minimum(p, 7 - p) <= 1), 255, 0.12)         # Schraffur
     _over(img, ring, 0, grain)
-    sep = (np.abs(v - C) <= 1.5) & (((u >= 2) & (u <= 44)) | ((u >= 196) & (u <= 238)))
+    sep = (np.abs(v - C) <= 1.5) & (((u >= 2) & (u <= 44)) | ((u >= 196) & (u <= 238))) & (d <= 115)
     _over(img, sep, deep)                                               # Trennstriche
     _over(img, d <= 78, deep)                                           # Fuge
     core = d <= 72
@@ -85,11 +89,8 @@ def _render(size, mode, playing, online, warn, bg):
     _over(img, core, 0, grain)
     _over(img, np.abs(d - 71) <= 0.75, 255, 0.18)
 
-    gd = np.hypot(u - 120, v - 215)                                     # Zahnrad
-    arc = np.mod(np.arctan2(v - 215, u - 120), 2 * np.pi) * 7.5
-    teeth = (np.abs(gd - 7.5) <= 2) & (np.mod(arc, 5.89) < 3)
-    _over(img, teeth | (np.abs(gd - 5) <= 1.5), ink, 0.85)
-    _over(img, _stop(u, v) if playing else _play(u, v), ink)
+    _gear(img, u, v, light, main, deep)
+    _symbol(img, u, v, playing, dark, deep)
 
     _lamp(img, u, v, k, LAMP, LAMP_ON if online else LAMP_OFF, online, deep)
     if warn:
@@ -170,17 +171,56 @@ def _segment(u, v, p, q):
 
 
 def _play(u, v):
-    """Dreieck mit 6 breiter, runder Kontur (stroke-linejoin round)."""
+    """Abstand zum Dreieck mit 6 breiter, runder Kontur (stroke-linejoin round);
+    innen negativ."""
     pts = ((106, 93), (148, 120), (106, 147))
     inside = (u >= 106) & (np.abs(v - 120) <= (148 - u) * 27 / 42)
     edge = np.minimum.reduce([_segment(u, v, pts[i], pts[i - 1]) for i in range(3)])
-    return inside | (edge <= 3)
+    return np.where(inside, -edge, edge) - 3
 
 
 def _stop(u, v):
-    qx = np.maximum(np.abs(u - 120) - 17, 0)
-    qy = np.maximum(np.abs(v - 120) - 17, 0)
-    return np.hypot(qx, qy) <= 6
+    """Abstand zum Quadrat mit Rundung 6; innen negativ."""
+    qx, qy = np.abs(u - 120) - 17, np.abs(v - 120) - 17
+    return np.hypot(np.maximum(qx, 0), np.maximum(qy, 0)) + np.minimum(np.maximum(qx, qy), 0) - 6
+
+
+def _symbol(img, u, v, playing, dark, deep):
+    """▶ / ■ in die Mitte gepraegt wie die Beschriftung im Ring: in den Farben
+    des Knopfs, dunkle Kontur, Lichtkante darunter."""
+    shape = _stop if playing else _play
+    sd = shape(u, v)
+    _over(img, shape(u, v - 1.6) <= 0, 255, 0.38)                      # Lichtkante
+    _over(img, sd <= 1.5, deep)                                         # Kontur
+    _over(img, sd <= 0, _ramp((v - 93) / 54, ((0, deep), (0.45, dark), (1, dark))))
+
+
+def _gear_mask(u, v):
+    gd = np.hypot(u - 120, v - 215)
+    arc = np.mod(np.arctan2(v - 215, u - 120), 2 * np.pi) * 7.5
+    teeth = (np.abs(gd - 7.5) <= 2) & (np.mod(arc, 5.89) < 3)
+    return teeth | (np.abs(gd - 5) <= 1.5)
+
+
+def _gear(img, u, v, light, main, deep):
+    """Zahnrad, gepraegt wie ▶ / ■ — heller als der Ring darunter, sonst
+    verschwaende es im Dunkel der unteren Haelfte. Die Kontur ist die um 0,9
+    in alle Richtungen verschobene Form: fuer die Zaehne gibt es keinen
+    handlichen Abstand wie beim Dreieck."""
+    near = (np.abs(u - 120) <= 14) & (np.abs(v - 215) <= 14)        # nur dort rechnen
+    uu, vv = u[near], v[near]
+    shift = [(0.9 * math.cos(a), 0.9 * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 8, endpoint=False)]
+    for mask, color, alpha in (
+            (_gear_mask(uu, vv - 1.4), 255, 0.38),                      # Lichtkante
+            (np.logical_or.reduce([_gear_mask(uu + x, vv + y) for x, y in shift]), deep, 1.0),  # Kontur
+            (_gear_mask(uu, vv), _ramp((vv - 205) / 20, ((0, light), (1, main))), 1.0)):
+        full = np.zeros(near.shape, bool)
+        full[near] = mask
+        if isinstance(color, np.ndarray) and color.ndim == 2:
+            ramp = np.zeros((*near.shape, 3), np.float32)
+            ramp[near] = color
+            color = ramp
+        _over(img, full, color, alpha)
 
 
 def _lamp(img, u, v, k, at, color, glow, housing):

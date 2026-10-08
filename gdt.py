@@ -68,7 +68,7 @@ class Settings:
     test_ident: str = "ALLG00"              # 8402, muss zur Geraetekonfiguration in T2med passen
     order_valid_minutes: int = 60
     line_width: int = 60                    # Freitextzeilen (6220/6227); GDT 2.1: max. 60
-    # Wie T2med (Windows) den GDT-Ordner sieht, z. B. \\192.168.2.70\steno-gdt.
+    # Wie T2med (Windows) den GDT-Ordner sieht, z. B. S:\_steno.
     # Nur fuer den Transkript-Anhang (6305) noetig; leer = kein Anhang.
     pvs_path: str = ""
 

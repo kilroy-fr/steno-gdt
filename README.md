@@ -124,7 +124,8 @@ environment:
   - LOG_DIR=/logs                  # Ziel für optionalen Logging-Modus
   - TZ=Europe/Berlin               # Ortszeit für T2med und Log-Dateinamen
   - GDT_DIR=/gdt                   # GDT-Austauschordner mit T2med (leer = Anbindung aus)
-  - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3
+  - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3;004=Home
+  - GDT_DEBUG_DIR=/logs/gdt-debug  # Kopie jeder Übergabe an T2med (nur zum Einrichten, leer = aus)
 ```
 
 Alle `GDT_*`-Variablen und die Einrichtung in T2med: [`T2MED-EINRICHTUNG.md`](T2MED-EINRICHTUNG.md).

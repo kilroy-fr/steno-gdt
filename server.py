@@ -38,7 +38,7 @@ from medical_vocab import MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 
 
 def _flag(value: str) -> bool:
@@ -103,6 +103,10 @@ LOG_DIR = os.getenv("LOG_DIR", "/logs")
 # vorhandenen Ordner zeigt — dann blendet das Frontend alles dazu aus.
 GDT = gdt.Settings.from_env()
 gdt_orders = gdt.OrderBook()
+# Zum Einrichten: je Uebergabe eine Kopie dessen, was an T2med ging — die
+# Antwort des Sprachmodells und die GDT-Datei, die T2med nach dem Einlesen
+# loescht. Leer = aus. Enthaelt Patientendaten, nach dem Test wieder leeren.
+GDT_DEBUG_DIR = os.getenv("GDT_DEBUG_DIR", "")
 # Steno-Knopf (client/steno.py): Dokumentationsart fuer Sprechstunden, ab
 # welcher Laenge ohne Vorgabe gefragt wird, ob es eine Psychotherapie-Sitzung
 # war, wie lange auf die Abholung durch T2med gewartet wird und wie lange
@@ -1259,8 +1263,9 @@ def _deliver_gdt(ap: str, order: gdt.Order | None, text: str, transcript: str, m
 
     record = gdt.build_result(GDT, order, text, started, comments, attachments, VERSION, id_device)
     target = GDT.path(pattern, ap)
+    data = record.encode()
     try:
-        gdt.write_exclusive(record.encode(), target)
+        gdt.write_exclusive(data, target)
     except OSError:
         if attachment_file:
             attachment_file.unlink(missing_ok=True)
@@ -1268,7 +1273,45 @@ def _deliver_gdt(ap: str, order: gdt.Order | None, text: str, transcript: str, m
     logger.info(f"An T2med übergeben: {target.name}, "
                 f"{order.label if order else 'ohne Auftrag (Pat.-Nr. 0)'}, "
                 f"{len(text)} Zeichen" + (f", Anhang {attachment_file.name}" if attachment_file else ""))
+    if GDT_DEBUG_DIR and not psycho and not (order and order.device == "psy"):
+        _write_gdt_debug(ap, order, text, mode, model, started, target, data)
     return target, record
+
+
+def _write_gdt_debug(ap: str, order: gdt.Order | None, text: str, mode: str, model: str,
+                     started: datetime, target: Path, data: bytes):
+    """GDT_DEBUG_DIR: <Zeit>_<ap>_<Modus>.txt zum Lesen (Antwort des Sprachmodells,
+    Klartext, GDT-Datei dekodiert) und .gdt mit den Bytes, die T2med bekam.
+
+    Psychotherapie nie — wie beim Logging. Ein Fehler hier haelt die schon
+    abgelegte Uebergabe nicht auf.
+    """
+    try:
+        folder = Path(GDT_DEBUG_DIR)
+        folder.mkdir(parents=True, exist_ok=True)
+        now = datetime.now()
+        stem = f"{now:%Y%m%d_%H%M%S}_{ap}_{mode or 'text'}"
+        workstation = GDT.workstations.get(ap, "")
+        content = (
+            f"Steno {VERSION} – Übergabe an T2med\n"
+            f"Datei:        {target.name}\n"
+            f"Arbeitsplatz: {ap}" + (f" ({workstation})" if workstation else "") + "\n"
+            f"Patient:      {order.label if order else 'ohne Auftrag (Pat.-Nr. 0)'}\n"
+            f"Art:          {_MODE_LABELS.get(mode, mode or '–')} ({mode or '–'}), {model}\n"
+            f"Aufnahme:     {started:%d.%m.%Y %H:%M:%S}\n"
+            f"Abgelegt:     {now:%d.%m.%Y %H:%M:%S}\n"
+            f"\n=== 1. Antwort des Sprachmodells (ungekürzt) ===\n\n{text.strip()}\n"
+            f"\n=== 2. Klartext für die Karteikarte (vor dem Umbruch auf "
+            f"{GDT.line_width} Zeichen) ===\n\n{gdt.plain_text(text)}\n"
+            f"\n=== 3. GDT-Datei, wie T2med sie liest (eine Zeile = ein Feld) ===\n\n"
+            f"{data.decode(gdt.ENCODINGS[GDT.charset], errors='replace').replace(chr(13), '')}"
+        )
+        (folder / f"{stem}.txt").write_text(content.replace("\n", "\r\n"),
+                                            encoding="utf-8-sig", newline="")
+        (folder / f"{stem}.gdt").write_bytes(data)
+        logger.info(f"Debug-Kopie: {stem}.txt")
+    except OSError as e:
+        logger.warning(f"Debug-Kopie nicht geschrieben: {_exc_text(e)}")
 
 
 @app.get("/gdt/order")
