@@ -40,7 +40,7 @@ from medical_vocab import ALL_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.30.0"
+VERSION = "0.30.1"
 
 
 def _flag(value: str) -> bool:
@@ -428,7 +428,7 @@ def correct_terms(text: str) -> tuple[str, int]:
         if len(word) < _TERM_MIN_LEN or not word[0].isupper() or word.lower() in _TERM_KNOWN:
             return word
         term = _correct_term(word)
-        if term is None or term == word:
+        if term is None:
             return word
         count += 1
         return term
@@ -698,14 +698,7 @@ async def transcribe_audio(
 ) -> Transcription:
     data = {"response_format": "text", **_whisper_model_fields(lang_mode, model_override)}
     response = await _post_whisper(audio_path, filename, data)
-    raw = response.text.strip()
-    text = collapse_repeated_text(raw)
-    share = _loop_share(len(re.findall(r"\S+", raw)), len(re.findall(r"\S+", text)))
-    if share:
-        logger.warning(f"Wiederholschleife entfernt: {share:.0%} des Transkripts")
-    if lang_mode == "de":
-        text = _fix_terms(text)
-    return Transcription(text, share)
+    return _clean_transcription(response.text.strip(), lang_mode)
 
 
 async def transcribe_with_units(
@@ -747,19 +740,33 @@ async def transcribe_with_units(
             {"start": float(sg["start"]), "end": float(sg["end"]), "text": sg["text"]}
             for sg in segments
         ]
+    return _clean_transcription(text, lang_mode, units)
 
-    # Wiederholschleifen raus, BEVOR die Sprecherzuordnung laeuft: die Woerter
-    # einer Schleife tragen ueber die Stille verteilte Zeitstempel und wuerden
-    # sonst reihum beiden Sprechern zugeschlagen — das zerhackt auch die echten
-    # Turns drumherum.
-    before = len(units)
-    units = collapse_repeated_units(units)
-    text = collapse_repeated_text(text)
-    share = _loop_share(before, len(units))
+
+def _clean_transcription(raw: str, lang_mode: str, units: list | None = None) -> Transcription:
+    """Gemeinsamer Nachlauf beider Whisper-Wege: Schleifen raus, Anteil messen,
+    bei deutschen Aufnahmen Fachbegriffe korrigieren.
+
+    Mit Einheiten zaehlt deren Zahl fuer den Schleifenanteil, sonst die Woerter.
+    Die Einheiten werden bereinigt, BEVOR die Sprecherzuordnung laeuft: die Woerter
+    einer Schleife tragen ueber die Stille verteilte Zeitstempel und wuerden sonst
+    reihum beiden Sprechern zugeschlagen — das zerhackt auch die echten Turns
+    drumherum.
+    """
+    text = collapse_repeated_text(raw)
+    if units is None:
+        units = []
+        before, after = len(re.findall(r"\S+", raw)), len(re.findall(r"\S+", text))
+        unit_name = "Woertern"
+    else:
+        before = len(units)
+        units = collapse_repeated_units(units)
+        after = len(units)
+        unit_name = "Einheiten"
+    share = _loop_share(before, after)
     if share:
         logger.warning(
-            f"Wiederholschleife entfernt: {before - len(units)} von {before} Einheiten "
-            f"({share:.0%})"
+            f"Wiederholschleife entfernt: {before - after} von {before} {unit_name} ({share:.0%})"
         )
     if lang_mode == "de":
         text = _fix_terms(text, units)
