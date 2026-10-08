@@ -40,7 +40,7 @@ from medical_vocab import ALL_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.12.8"
+VERSION = "0.30.0"
 
 
 def _flag(value: str) -> bool:

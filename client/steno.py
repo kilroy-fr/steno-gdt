@@ -43,7 +43,7 @@ from PIL import ImageTk
 
 import knopf
 
-VERSION = "0.12.0"
+VERSION = "0.30.0"
 
 APP_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Steno"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Steno"
