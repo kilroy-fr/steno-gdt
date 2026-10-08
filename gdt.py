@@ -255,6 +255,18 @@ def parse_fields(data: bytes) -> list[tuple[str, str]]:
     return [(k, v.decode(encoding, "replace").strip()) for k, v in raw]
 
 
+def field_ids(fields: list[tuple[str, str]]) -> str:
+    """Feldkennungen eines Satzes fuers Log, ohne Inhalt: "8000 3000 6205x3".
+
+    Damit sich zeigt, was T2med ueber die Patientendaten hinaus mitschickt
+    (Dauerdiagnosen, Medikation?) — der Inhalt waere Patientendaten im Log.
+    """
+    counts: dict[str, int] = {}
+    for k, _ in fields:
+        counts[k] = counts.get(k, 0) + 1
+    return " ".join(k if n == 1 else f"{k}x{n}" for k, n in counts.items())
+
+
 def order_from_fields(fields: list[tuple[str, str]], ap: str, received: float,
                       device: str = "") -> Order | None:
     """Auftrag aus einem 6301/6302-Satz; None bei anderer Satzart oder ohne Pat.-Nr./Nachname."""
@@ -350,7 +362,8 @@ class OrderBook:
             )
             return
         logger.info(f"Messauftrag an Arbeitsplatz {ap}: {order.label}"
-                    + (" (Psychotherapie)" if device == "psy" else ""))
+                    + (" (Psychotherapie)" if device == "psy" else "")
+                    + f", Felder {field_ids(fields)}")
         self._open[ap] = order
 
     def claim(self, ap: str, order_id: str) -> bool:

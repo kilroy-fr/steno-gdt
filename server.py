@@ -8,6 +8,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
+import difflib
+import functools
 import httpx
 import tempfile
 import os
@@ -33,12 +35,12 @@ from prompts import (
     SUBJECT_PROMPT,
     SUMMARY_PROMPT,
 )
-from medical_vocab import MEDICAL_GLOSSARY
+from medical_vocab import ALL_TERMS, MEDICAL_GLOSSARY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.12.7"
+VERSION = "0.12.8"
 
 
 def _flag(value: str) -> bool:
@@ -375,6 +377,65 @@ def collapse_repeated_text(text: str) -> str:
     return text.strip()
 
 
+# ============================================================
+# FACHBEGRIFFE KORRIGIEREN
+# ============================================================
+# Whisper verhoert Praeparatenamen ("Ranipril", "Visoprolol", "Allendonsaeure").
+# Das Sprachmodell gleicht sie ueber MEDICAL_GLOSSARY ab — aber nur, wenn eines
+# laeuft: im Direkt-Modus und im Transkript-Anhang blieb der Fehler stehen.
+# Uebernommen aus asklaion (vocabulary.py, MIT): ein grossgeschriebenes Wort ab
+# 7 Buchstaben, das einem Begriff aus medical_vocab sehr aehnlich ist, wird
+# ersetzt. Gemessen an 116 Logs (bis 24.09.2026): 25 Korrekturen mit den
+# urspruenglichen Begriffen, alle richtig; mit den ergaenzten Praeparaten mehr.
+# Was die Schwelle nicht abfaengt, sind Beugungen ("Arthrosen", "Impfungen") und
+# abgeschnittene Woerter — dafuer die beiden Regeln in _correct_term().
+_TERM_WORD_RE = re.compile(r"[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-]*")
+_TERM_MIN_LEN = 7           # kuerzere Woerter: zu viele echte Nachbarn
+_TERM_CUTOFF = 0.86         # difflib-Aehnlichkeit; bei 7 Buchstaben genuegt kein Tausch
+_TERM_INFLECTION = {"e", "n", "en", "s", "es", "er", "ern", "ns", "nen"}
+_TERM_KNOWN = {t.lower() for t in ALL_TERMS}
+_TERM_POOL = {
+    t.lower().replace("-", ""): t for t in ALL_TERMS if len(t) >= _TERM_MIN_LEN and " " not in t
+}
+
+
+@functools.lru_cache(maxsize=4096)
+def _correct_term(word: str) -> str | None:
+    """Bekannter Begriff, den `word` meint — oder None."""
+    key = word.lower().replace("-", "")
+    hit = difflib.get_close_matches(key, _TERM_POOL, n=1, cutoff=_TERM_CUTOFF)
+    if not hit:
+        return None
+    term = hit[0]
+    if key == term:                             # nur anders getrennt ("Novamin-Sulfon")
+        return _TERM_POOL[term]
+    # Gebeugt ("Thrombosen") bleibt stehen, ein Stotterer ("Bisoprololol") nicht
+    if key.startswith(term) and key[len(term):] in _TERM_INFLECTION:
+        return None
+    # Abgeschnitten oder ein eigenes Wort ("Kreatin" vor "Kreatinin")
+    if term.startswith(key):
+        return None
+    return _TERM_POOL[term]
+
+
+def correct_terms(text: str) -> tuple[str, int]:
+    """Verhoerte Fachbegriffe ersetzen; liefert den Text und die Zahl der Ersetzungen."""
+    count = 0
+
+    def fix(m: re.Match) -> str:
+        nonlocal count
+        word = m.group(0)
+        if len(word) < _TERM_MIN_LEN or not word[0].isupper() or word.lower() in _TERM_KNOWN:
+            return word
+        term = _correct_term(word)
+        if term is None or term == word:
+            return word
+        count += 1
+        return term
+
+    return _TERM_WORD_RE.sub(fix, text), count
+
+
 def _exc_text(exc: BaseException) -> str:
     """Klartext fuer eine geloggte Ausnahme — mit Typ.
 
@@ -642,6 +703,8 @@ async def transcribe_audio(
     share = _loop_share(len(re.findall(r"\S+", raw)), len(re.findall(r"\S+", text)))
     if share:
         logger.warning(f"Wiederholschleife entfernt: {share:.0%} des Transkripts")
+    if lang_mode == "de":
+        text = _fix_terms(text)
     return Transcription(text, share)
 
 
@@ -698,7 +761,23 @@ async def transcribe_with_units(
             f"Wiederholschleife entfernt: {before - len(units)} von {before} Einheiten "
             f"({share:.0%})"
         )
+    if lang_mode == "de":
+        text = _fix_terms(text, units)
     return Transcription(text, share, units)
+
+
+def _fix_terms(text: str, units: list = ()) -> str:
+    """correct_terms() auf Fliesstext und Einheiten; nur fuer deutsche Aufnahmen.
+
+    Geloggt wird nur die Zahl: welches Praeparat in welcher Sitzung fiel, gehoert
+    nicht ins Container-Log (auch Psychotherapie laeuft hier durch).
+    """
+    text, count = correct_terms(text)
+    for u in units:
+        u["text"], _ = correct_terms(u["text"])
+    if count:
+        logger.info(f"Fachbegriffe korrigiert: {count}")
+    return text
 
 
 # ============================================================

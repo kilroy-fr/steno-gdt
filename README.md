@@ -185,7 +185,7 @@ docker compose restart transcribe-gdt-web
 
 ### Fachvokabular erweitern
 
-`medical_vocab.py` enthält eine kuratierte Liste deutscher Hausarzt-Begriffe. `MEDICAL_GLOSSARY` wird in `ANALYZE_PROMPT`, `ABPRO_PROMPT` und `CLEAN_PROMPT` eingebettet, damit das LLM verzerrte ASR-Ausgaben gegen bekannte Fachbegriffe abgleichen kann. Neue Begriffe einfach in die passende Liste eintragen und den Container neu starten.
+`medical_vocab.py` enthält eine kuratierte Liste deutscher Hausarzt-Begriffe. `MEDICAL_GLOSSARY` wird in `ANALYZE_PROMPT`, `ABPRO_PROMPT` und `CLEAN_PROMPT` eingebettet, damit das LLM verzerrte ASR-Ausgaben gegen bekannte Fachbegriffe abgleichen kann. Außerdem ersetzt der Server schon im Transkript Wörter, die einem Begriff der Liste sehr ähnlich sind („Ranipril“ → „Ramipril“) — damit stimmen die Namen auch im Direkt-Modus ohne Sprachmodell. Neue Begriffe einfach in die passende Liste eintragen und den Container neu starten. Echte Präparate, die einem Eintrag ähneln (Prednison neben Prednisolon), gehören mit hinein, sonst werden sie „korrigiert“; Fachgebiete (Neurologe) nicht.
 
 > **Hinweis:** Das Glossar wird bewusst **nicht** als faster-whisper `hotwords`-Parameter verwendet — eine Liste dieser Größe sprengt dessen 448-Token-Decoder-Budget und lässt Whisper mit `ValueError: The maximum decoding length must be > 0` abstürzen.
 
@@ -250,7 +250,7 @@ halluziniert.
 1. Näher am Mikrofon sprechen, ruhige Umgebung wählen
 2. Bei nicht-deutschen Gesprächen den Toggle „Gespräch nicht auf Deutsch" aktivieren
 3. `WHISPER__MODEL` im `faster-whisper`-Container auf ein größeres Modell stellen (z. B. `large-v3`, bereits Standard)
-4. Häufig falsch erkannte Fachbegriffe in `medical_vocab.py` ergänzen — das LLM gleicht verzerrte Stellen dann gegen das Glossar ab
+4. Häufig falsch erkannte Fachbegriffe in `medical_vocab.py` ergänzen — der Server ersetzt ähnlich klingende Wörter dann selbst, und das LLM gleicht verzerrte Stellen gegen das Glossar ab
 
 ### Problem: „Sprechertrennung nicht verfügbar"
 

@@ -127,6 +127,18 @@ def test_orderbook_reads_only_stable_file_and_deletes_it(settings, tmp_path):
     assert book.poll(settings, "002", 1002) is None      # anderer Arbeitsplatz
 
 
+def test_orderbook_logs_field_ids_without_content(settings, tmp_path, caplog):
+    fields = ORDER_FIELDS + [("6205", "Hypertonie"), ("6205", "Diabetes")]
+    (tmp_path / "STNOT2MD.001").write_bytes(t2med_order(fields=fields))
+    book = gdt.OrderBook()
+    with caplog.at_level("INFO", logger=gdt.logger.name):
+        book.poll(settings, "001", 1000)
+        book.poll(settings, "001", 1001)
+    line = next(r.getMessage() for r in caplog.records if "Messauftrag" in r.getMessage())
+    assert "Felder 8000 8100 8315 8316 9206 3000 3101 3102 3103 3110 8402 6205x2" in line
+    assert "Hypertonie" not in line
+
+
 def test_orderbook_claim_and_expiry(settings, tmp_path):
     book = gdt.OrderBook()
     (tmp_path / "STNOT2MD.001").write_bytes(t2med_order())
