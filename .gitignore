@@ -60,10 +60,6 @@ aux
 # Claude Code lokale Settings (persönliche Pfade/Berechtigungen)
 .claude/settings.local.json
 
-# Build-Artefakte / Installer-Output
-diktat-service/Output/
-diktat-service/build/
-
 # Hugging-Face-Token fuer den Diarisations-Build (BuildKit-Secret)
 .hf_token
 
