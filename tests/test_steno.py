@@ -28,6 +28,8 @@ def steno(fake, monkeypatch, settings, tmp_path):
     monkeypatch.setattr(server, "gdt_orders", gdt.OrderBook())
     monkeypatch.setattr(server, "steno_jobs", {})
     monkeypatch.setattr(server, "_STENO_SEND_INTERVAL", 0.02)
+    # Die Attrappe spricht 12 Woerter; die Grenze fuer "zu kurz" pruefen eigene Tests
+    monkeypatch.setattr(server, "STENO_MIN_WOERTER", 5)
     with TestClient(server.app) as c:
         yield c
 
@@ -241,6 +243,33 @@ def test_direct_is_logged_like_consultations(steno, tmp_path, monkeypatch):
     wait(steno, upload(steno, mode="direkt").json()["id"])
     [log] = (tmp_path / "logs").glob("*_direkt.json")
     assert json.loads(log.read_text(encoding="utf-8"))["analysis"] == ""
+
+
+@pytest.mark.parametrize("mode", ["auto", "sprechstunde"])
+def test_short_recording_skips_llm(steno, fake, tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(server, "STENO_MIN_WOERTER", 15)
+    job = wait(steno, upload(steno, mode=mode, order=json.dumps(order_dict())).json()["id"])
+    assert (job["state"], job["mode"], job["file"]) == ("gesendet", "direkt", "T2MDSTNO.001")
+    assert not fake.prompts()
+    f = fields_of(tmp_path / "T2MDSTNO.001")
+    assert f["6220"] == LABELED.split("\n")
+    assert "Nur 12 Wörter" in " ".join(f["6227"])
+
+
+def test_short_psycho_stays_psycho(steno, fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "STENO_MIN_WOERTER", 15)
+    monkeypatch.setattr(server, "logging_enabled", True)
+    job = wait(steno, upload(steno, mode="psycho").json()["id"])
+    assert (job["mode"], job["file"]) == ("psycho", "T2MDSTNP.001")   # Geraet haengt am Modus
+    assert not fake.prompts() and not (tmp_path / "logs").exists()
+
+
+def test_short_psy_order_is_not_logged(steno, fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "STENO_MIN_WOERTER", 15)
+    monkeypatch.setattr(server, "logging_enabled", True)
+    job = wait(steno, upload(steno, order=json.dumps(order_dict("psy"))).json()["id"])
+    assert (job["mode"], job["file"]) == ("psycho", "T2MDSTNP.001")
+    assert not (tmp_path / "logs").exists()
 
 
 def test_direct_does_not_wait_for_running_summary(steno, monkeypatch):

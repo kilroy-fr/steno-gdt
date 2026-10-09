@@ -114,6 +114,7 @@ def live(fake, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "GDT", gdt.Settings(directory=str(gdt_dir), workstations={"001": "SZ 1"}))
     monkeypatch.setattr(server, "gdt_orders", gdt.OrderBook())
     monkeypatch.setattr(server, "steno_jobs", {})
+    monkeypatch.setattr(server, "STENO_MIN_WOERTER", 5)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]

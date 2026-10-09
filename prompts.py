@@ -6,10 +6,18 @@
 # Bewusst keine harte Vorgabe "genau zwei Personen": Begleitpersonen und MFA
 # kommen im Sprechzimmer regelmaessig vor.
 
-SPEAKER_CONTEXT_PLAIN = """SPRECHER: Das Transkript ist ein Dialog ohne Sprecherkennzeichnung (Arzt, {patient_label}, ggf. Begleitperson). Ordne Aussagen anhand des Kontexts zu; wenn die Zuordnung unklar bleibt, formuliere neutral ("es wurde besprochen") statt zu raten. Laut überlegte Verdachtsdiagnosen des Arztes sind keine gesicherten Diagnosen; Rückfragen zu bestehenden Medikamenten sind keine neuen Verordnungen."""
+# Was Angehoerige berichten, ist Fremdanamnese und muss in der Kartei so
+# stehen (aus asklaion: "Angehoerige oder Begleitpersonen als solche
+# kennzeichnen"). Der Inhalt entscheidet, nicht der Marker: die
+# Sprechertrennung allein soll niemanden zur Begleitperson machen.
+COMPANION_RULE = """Was eine Begleitperson (Angehörige, Pflegekraft) berichtet, kennzeichne als Fremdanamnese, z. B. "lt. Ehefrau: …" – aber nur, wenn aus dem Inhalt eindeutig hervorgeht, dass eine andere Person spricht."""
+
+SPEAKER_CONTEXT_PLAIN = """SPRECHER: Das Transkript ist ein Dialog ohne Sprecherkennzeichnung (Arzt, {patient_label}, ggf. Begleitperson). Ordne Aussagen anhand des Kontexts zu; wenn die Zuordnung unklar bleibt, formuliere neutral ("es wurde besprochen") statt zu raten. Laut überlegte Verdachtsdiagnosen des Arztes sind keine gesicherten Diagnosen; Rückfragen zu bestehenden Medikamenten sind keine neuen Verordnungen.
+""" + COMPANION_RULE
 
 SPEAKER_CONTEXT_DIARIZED = """SPRECHER: Die Sprecher wurden automatisch getrennt – jede Zeile beginnt mit einem anonymen Marker (SPRECHER A, SPRECHER B, ...). Welcher Marker der Arzt und welcher {patient_label} ist, steht NICHT fest: erschließe es aus dem Gesprächsverlauf – wer Anamnesefragen stellt, untersucht und Empfehlungen ausspricht, ist der Arzt; weitere Marker sind meist Begleitperson oder Praxispersonal.
 Die Sprechertrennung ist fehleranfällig, vor allem an Sprecherwechseln und bei kurzen Einwürfen. Wenn Marker und Inhalt sich widersprechen, hat der Inhalt Vorrang; bleibt die Zuordnung unklar, formuliere neutral ("es wurde besprochen") statt zu raten. Laut überlegte Verdachtsdiagnosen des Arztes sind keine gesicherten Diagnosen; Rückfragen zu bestehenden Medikamenten sind keine neuen Verordnungen.
+""" + COMPANION_RULE + """
 Übernimm die Marker NICHT in deine Ausgabe."""
 
 # ============================================================

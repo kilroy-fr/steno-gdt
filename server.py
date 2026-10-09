@@ -40,7 +40,7 @@ from medical_vocab import ALL_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.30.1"
+VERSION = "0.30.2"
 
 
 def _flag(value: str) -> bool:
@@ -121,6 +121,7 @@ STENO_MODUS = os.getenv("STENO_MODUS", "abpro")
 STENO_PSY_AB_MINUTEN = float(os.getenv("STENO_PSY_AB_MINUTEN", "20"))
 STENO_SENDEN_WARTEN = float(os.getenv("STENO_SENDEN_WARTEN", "60"))
 STENO_AUFBEWAHRUNG = float(os.getenv("STENO_AUFBEWAHRUNG", "12"))
+STENO_MIN_WOERTER = int(os.getenv("STENO_MIN_WOERTER", "15"))
 
 WHISPER_URL = f"http://{WHISPER_HOST}:{WHISPER_PORT}"
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
@@ -1580,14 +1581,35 @@ async def _steno_transcribe(job: StenoJob) -> tuple[Transcription, str | None]:
     return result, labeled
 
 
-def _steno_direct(job: StenoJob, result: Transcription, labeled: str | None):
+def _steno_direct(job: StenoJob, result: Transcription, labeled: str | None,
+                  mode: str = "direkt"):
     """Das Transkript ist die Dokumentation. Sprecher nur, wenn es mehr als
     einer ist — ein Diktat mit "SPRECHER A:" davor liest niemand gern."""
-    job.mode, job.model = "direkt", WHISPER_MEDICAL_MODEL.rsplit("/", 1)[-1]
+    job.mode, job.model = mode, WHISPER_MEDICAL_MODEL.rsplit("/", 1)[-1]
     job.text = labeled if _speaker_count(labeled) > 1 else result.text.strip()
     if _steno_loggable(job):
         _save_log(job.transcript, "", job.mode, job.model, "neutral",
                   labeled is not None, result.loop_share)
+
+
+def _steno_short(job: StenoJob, result: Transcription, labeled: str | None) -> bool:
+    """Zu wenig fuer eine Zusammenfassung? Dann das Transkript selbst, wie bei Direkt.
+
+    Auf ein paar Woerter antwortet das Sprachmodell mit "Da kein Transkript
+    enthalten war, kann keine Dokumentation erstellt werden …" (2 von 115
+    A/B/PRO-Antworten in den Logs von gespraech-web) — und der Knopf sendet
+    automatisch, das stuende dann in der Kartei des Patienten.
+    Psychotherapie bleibt Psychotherapie: Ziel-Geraet, kein Log, keine
+    Debug-Kopie haengen am Modus.
+    """
+    words = len(result.text.split())
+    if words >= STENO_MIN_WOERTER:
+        return False
+    psy_order = job.order is not None and job.order.device == "psy"
+    psycho = job.request_mode == "psycho" or (job.request_mode != "sprechstunde" and psy_order)
+    _steno_direct(job, result, labeled, "psycho" if psycho else "direkt")
+    job.mode_note = f"Nur {words} Wörter – zu kurz für eine Zusammenfassung, Transkript übernommen."
+    return True
 
 
 async def _steno_write(job: StenoJob, result: Transcription, labeled: str | None):
@@ -1639,7 +1661,7 @@ async def _steno_run(job: StenoJob):
             result, labeled = await _steno_transcribe(job)
         if job.request_mode == "direkt":
             _steno_direct(job, result, labeled)
-        else:
+        elif not _steno_short(job, result, labeled):
             async with _steno_llm:
                 await _steno_write(job, result, labeled)
         await _steno_send(job)

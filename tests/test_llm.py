@@ -63,6 +63,13 @@ def test_build_prompt_speaker_context():
     assert '"Der Patient"' in diarized
 
 
+@pytest.mark.parametrize("diarized", [False, True])
+def test_build_prompt_companion_rule_only_for_consultations(diarized):
+    for mode in ("analyze", "abpro"):
+        assert "Fremdanamnese" in server._build_prompt(mode, "t", "neutral", diarized)
+    assert "Fremdanamnese" not in server._build_prompt("psycho", "t", "neutral", diarized)
+
+
 def test_unknown_mode_falls_back_to_clean():
     assert server._build_prompt("x", "t", "neutral", False) == server._build_prompt(
         "clean", "t", "neutral", False)
