@@ -106,6 +106,7 @@ services:
       - ./server.py:/app/server.py:ro
       - ./prompts.py:/app/prompts.py:ro
       - ./medical_vocab.py:/app/medical_vocab.py:ro
+      - ./medikamente_wortliste.json:/app/medikamente_wortliste.json:ro
       - ./gdt.py:/app/gdt.py:ro
       - ./fhir.py:/app/fhir.py:ro
       - ./templates:/app/templates:ro

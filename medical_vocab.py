@@ -22,7 +22,17 @@ Ergänzung die frei verfügbaren offiziellen Quellen:
 - STIKO-Impfempfehlungen – RKI
 
 Liste einfach um weitere Begriffe ergänzen, keine Code-Änderung an anderer Stelle nötig.
+
+Drittens `medikamente_wortliste.json`: ~970 Wirkstoffe und Handelsnamen aus der
+Hausarztpraxis. Sie dient nur `correct_terms()`, nicht dem Glossar — im Prompt kosteten sie
+einige tausend Tokens bei jeder Analyse. Gemessen an den 116 Logs von gespraech-web bis
+24.09.2026: vier Ersetzungen mehr (Klobetasol, Mutilium, Pernterbol, Repanthen), alle richtig,
+keine der bisherigen verändert.
 """
+
+import json
+import logging
+from pathlib import Path
 
 DIAGNOSEN = [
     "Gürtelrose", "Herpes zoster", "Hypertonie", "Diabetes mellitus Typ 2",
@@ -108,6 +118,22 @@ UNTERSUCHUNGEN = [
 ]
 
 ALL_TERMS = DIAGNOSEN + WIRKSTOFFE + IMPFSTOFFE + UNTERSUCHUNGEN
+
+
+def _load_praeparate() -> list[str]:
+    path = Path(__file__).with_name("medikamente_wortliste.json")
+    try:
+        return [t for t in json.loads(path.read_text(encoding="utf-8")) if t.strip()]
+    except (OSError, ValueError) as exc:
+        logging.getLogger(__name__).warning("Medikamentenliste nicht geladen (%s): %s", path, exc)
+        return []
+
+
+PRAEPARATE = _load_praeparate()
+
+# Grundlage von correct_terms(): alles, was im Transkript richtig geschrieben stehen soll.
+# Bei gleicher Schreibweise bis auf Groß/klein gewinnt die Medikamentenliste (NovoRapid).
+CORRECTION_TERMS = list({t.lower(): t for t in ALL_TERMS + PRAEPARATE}.values())
 
 # Glossar-Block zum Einbetten in LLM-Prompts.
 MEDICAL_GLOSSARY = (

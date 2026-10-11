@@ -189,7 +189,7 @@ docker compose restart transcribe-gdt-web
 
 ### Fachvokabular erweitern
 
-`medical_vocab.py` enthält eine kuratierte Liste deutscher Hausarzt-Begriffe. `MEDICAL_GLOSSARY` wird in `ANALYZE_PROMPT`, `ABPRO_PROMPT` und `CLEAN_PROMPT` eingebettet, damit das LLM verzerrte ASR-Ausgaben gegen bekannte Fachbegriffe abgleichen kann. Außerdem ersetzt der Server schon im Transkript Wörter, die einem Begriff der Liste sehr ähnlich sind („Ranipril“ → „Ramipril“) — damit stimmen die Namen auch im Direkt-Modus ohne Sprachmodell. Neue Begriffe einfach in die passende Liste eintragen und den Container neu starten. Echte Präparate, die einem Eintrag ähneln (Prednison neben Prednisolon), gehören mit hinein, sonst werden sie „korrigiert“; Fachgebiete (Neurologe) nicht.
+`medical_vocab.py` enthält eine kuratierte Liste deutscher Hausarzt-Begriffe. `MEDICAL_GLOSSARY` wird in `ANALYZE_PROMPT`, `ABPRO_PROMPT` und `CLEAN_PROMPT` eingebettet, damit das LLM verzerrte ASR-Ausgaben gegen bekannte Fachbegriffe abgleichen kann. Außerdem ersetzt der Server schon im Transkript Wörter, die einem Begriff der Liste sehr ähnlich sind („Ranipril“ → „Ramipril“) — damit stimmen die Namen auch im Direkt-Modus ohne Sprachmodell. Neue Begriffe einfach in die passende Liste eintragen und den Container neu starten. Echte Präparate, die einem Eintrag ähneln (Prednison neben Prednisolon), gehören mit hinein, sonst werden sie „korrigiert“; Fachgebiete (Neurologe) nicht. Zusätzlich zieht die Ersetzung `medikamente_wortliste.json` heran (~970 Wirkstoffe und Handelsnamen; nicht im Glossar, das hielte den Prompt unnötig lang).
 
 > **Hinweis:** Das Glossar wird bewusst **nicht** als faster-whisper `hotwords`-Parameter verwendet — eine Liste dieser Größe sprengt dessen 448-Token-Decoder-Budget und lässt Whisper mit `ValueError: The maximum decoding length must be > 0` abstürzen.
 
@@ -312,6 +312,7 @@ transcribe-gdt/
 ├── server.py                  # FastAPI-Server (Web-UI + API)
 ├── prompts.py                 # LLM-Prompts (ANALYZE, ABPRO, PSYCHO, SUMMARY, SUBJECT, CLEAN)
 ├── medical_vocab.py           # Kuratiertes Fachvokabular (MEDICAL_GLOSSARY)
+├── medikamente_wortliste.json # Wirkstoffe und Handelsnamen für die Ersetzung im Transkript
 ├── gdt.py                     # GDT 2.1: Messauftrag aus T2med lesen, Dokumentation zurückgeben
 ├── client/                    # Steno-Knopf für die Arbeitsplätze (Windows-exe, siehe client/README.md)
 ├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, erster Test

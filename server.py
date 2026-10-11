@@ -36,12 +36,12 @@ from prompts import (
     SUBJECT_PROMPT,
     SUMMARY_PROMPT,
 )
-from medical_vocab import ALL_TERMS, MEDICAL_GLOSSARY
+from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.33.0"
+VERSION = "0.33.1"
 
 
 def _flag(value: str) -> bool:
@@ -402,15 +402,17 @@ def collapse_repeated_text(text: str) -> str:
 # 7 Buchstaben, das einem Begriff aus medical_vocab sehr aehnlich ist, wird
 # ersetzt. Gemessen an 116 Logs (bis 24.09.2026): 25 Korrekturen mit den
 # urspruenglichen Begriffen, alle richtig; mit den ergaenzten Praeparaten mehr.
+# Dazu die Medikamentenliste (medikamente_wortliste.json, CORRECTION_TERMS).
 # Was die Schwelle nicht abfaengt, sind Beugungen ("Arthrosen", "Impfungen") und
 # abgeschnittene Woerter — dafuer die beiden Regeln in _correct_term().
 _TERM_WORD_RE = re.compile(r"[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-]*")
 _TERM_MIN_LEN = 7           # kuerzere Woerter: zu viele echte Nachbarn
 _TERM_CUTOFF = 0.86         # difflib-Aehnlichkeit; bei 7 Buchstaben genuegt kein Tausch
 _TERM_INFLECTION = {"e", "n", "en", "s", "es", "er", "ern", "ns", "nen"}
-_TERM_KNOWN = {t.lower() for t in ALL_TERMS}
+_TERM_KNOWN = {t.lower() for t in CORRECTION_TERMS}
 _TERM_POOL = {
-    t.lower().replace("-", ""): t for t in ALL_TERMS if len(t) >= _TERM_MIN_LEN and " " not in t
+    t.lower().replace("-", ""): t for t in CORRECTION_TERMS
+    if len(t) >= _TERM_MIN_LEN and " " not in t
 }
 
 

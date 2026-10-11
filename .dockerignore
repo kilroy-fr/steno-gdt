@@ -8,6 +8,7 @@
 !server.py
 !prompts.py
 !medical_vocab.py
+!medikamente_wortliste.json
 !gdt.py
 !fhir.py
 !templates/

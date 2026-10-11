@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements-server.txt
 COPY server.py .
 COPY prompts.py .
 COPY medical_vocab.py .
+COPY medikamente_wortliste.json .
 COPY gdt.py .
 COPY fhir.py .
 COPY templates/ templates/

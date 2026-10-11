@@ -24,6 +24,11 @@ AUDIO = {"audio": ("aufnahme.webm", b"\x1aE\xdf\xa3 fake webm", "audio/webm")}
     ("Noralgin", "Novalgin"),
     ("Endresto", "Entresto"),
     ("S-Citalopram", "Escitalopram"),
+    # aus medikamente_wortliste.json, ebenfalls aus den Logs
+    ("Klobetasol", "Clobetasol"),
+    ("Mutilium", "Motilium"),
+    ("Pernterbol", "Perenterol"),
+    ("Repanthen", "Bepanthen"),
 ])
 def test_corrects_misheard_terms(heard, meant):
     assert correct_terms(heard) == (meant, 1)
