@@ -114,6 +114,7 @@ def live(fake, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "GDT", gdt.Settings(directory=str(gdt_dir), workstations={"001": "SZ 1"}))
     monkeypatch.setattr(server, "gdt_orders", gdt.OrderBook())
     monkeypatch.setattr(server, "steno_jobs", {})
+    monkeypatch.setattr(server, "steno_streams", {})
     monkeypatch.setattr(server, "STENO_MIN_WOERTER", 5)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -155,7 +156,8 @@ def test_button_flow_against_server(live, tmp_path):
         steno.upload_step(api, spool, spool.entries()[0], events)
         time.sleep(0.05)
     assert events.get_nowait()[0] == "sent"
-    assert not list((tmp_path / "spool").iterdir())    # Aufnahme vom Arbeitsplatz geloescht
+    # Eintrag weg; die Aufnahme bleibt nur noch zum Fortsetzen
+    assert [p.name for p in (tmp_path / "spool").iterdir()] == [f"{entry.id}.zuletzt.flac"]
     f = fields_of(gdt_dir / "T2MDSTNO.001")
     assert f["3000"] == ["4711"] and f["6220"] == ["Hallo Welt"]
 
@@ -187,6 +189,14 @@ class FakeApi:
     def __init__(self):
         self.claimed: list = []
         self.claim_result = True
+        self.blocks: list = []
+        self.dropped: list = []
+
+    def block(self, entry_id, ap, seq, start, end, final, data):
+        self.blocks.append((entry_id, seq, start, end, final, data))
+
+    def drop_blocks(self, entry_id):
+        self.dropped.append(entry_id)
 
     def order(self, ap):
         return None
@@ -200,13 +210,15 @@ class FakeApi:
 
 
 class FakeRecorder:
-    def __init__(self, cfg):
+    def __init__(self, cfg, on_block=None):
+        self.on_block = on_block
         self.seconds = 60.0
         self.elapsed = 0.0
         self.silent_for = 0.0
 
     def start(self, path):
-        Path(path).write_bytes(b"")
+        if path:                                         # Diktat: keine Datei
+            write_flac(Path(path), 0.5)
 
     def stop(self):
         return self.seconds
@@ -224,9 +236,10 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr(steno, "upload_loop", lambda *a: None)
     monkeypatch.setattr(steno, "watch_orders", lambda *a: None)
     monkeypatch.setattr(steno, "prerender", lambda *a: None)
+    monkeypatch.setattr(steno, "link_listener", lambda *a: None)
     monkeypatch.setattr(steno.App, "tick", lambda self: None)
     a = steno.App(root, steno.Config(tmp_path / "steno.ini"), FakeApi(), steno.Spool(tmp_path / "spool"),
-                  "001", "SZ 1")
+                  "001", "SZ 1", blocks="alle", dictate=True)
     yield a
     root.destroy()
     # Tk-Reste jetzt freigeben: sonst raeumt sie der GC irgendwann in einem
@@ -292,10 +305,10 @@ def test_expired_order_records_without_patient(app):
 
 
 def test_mode_choice_applies_to_one_recording(app):
-    app.mode.set("direkt")
+    app.choose_mode("psycho")
     app.start_recording(None)
     app.stop_recording()
-    assert app.spool.entries()[0].mode == "direkt" and app.mode.get() == ""
+    assert app.spool.entries()[0].mode == "psycho" and app.mode.get() == ""
     assert app.wake.is_set()                             # Upload sofort, nicht erst im naechsten Takt
 
 
@@ -325,9 +338,9 @@ def test_render_every_state():
 
 def test_upper_ring_cycles_mode(app):
     app.on_release(click(app, 120, 25))                  # Sprechstunde -> Direkt
-    assert app.mode.get() == "direkt" and not app.recording
+    assert app.direct and app.shown_mode == "direkt" and not app.recording
     app.on_release(click(app, 120, 25))
-    assert app.mode.get() == "psycho"
+    assert app.mode.get() == "psycho" and not app.direct
     app.on_release(click(app, 120, 25))
     assert app.mode.get() == "sprechstunde"
     app.on_release(click(app, 230, 230))                 # neben dem Knopf (Ecke): nichts
@@ -339,3 +352,444 @@ def test_mode_cycle_starts_from_what_is_shown(app):
     app.pending = {**ORDER_A, "device": "psy"}            # zeigt ohne Wahl Psychotherapie
     app.cycle_mode()
     assert app.mode.get() == "sprechstunde"
+
+
+# ---------------------------------------------------------------- Deep Link (FHIR)
+
+LINK = ("steno://?kontextId=k-1&fhirBasisUrl=https%3A%2F%2Ft2med.praxis%3A16567%2Faps%2Ffhir%2Fapi%2Fr4"
+        "&oAuthToken=ab+c/d%3D&art=psycho")
+
+
+def test_parse_link():
+    assert steno.parse_link(LINK) == {
+        "kontextId": "k-1", "fhirBasisUrl": "https://t2med.praxis:16567/aps/fhir/api/r4",
+        "oAuthToken": "ab+c/d=", "art": "psycho"}                     # "+" bleibt
+    raw = steno.parse_link("STENO://?kontextId=k&fhirBasisUrl=https://h/aps/fhir/api/r4&oAuthToken=")
+    assert raw["fhirBasisUrl"] == "https://h/aps/fhir/api/r4" and raw["oAuthToken"] == ""
+    for bad in ("t2demo://?kontextId=k&fhirBasisUrl=x", "steno://?fhirBasisUrl=x", "steno://?kontextId=k"):
+        with pytest.raises(ValueError):
+            steno.parse_link(bad)
+
+
+def test_fhir_context_against_server(live, monkeypatch):
+    import fhir
+    api, _ = live
+    monkeypatch.setattr(server, "FHIR", fhir.Settings(api_key="k", hosts=("t2med.praxis",)))
+    order = api.fhir_context("001", steno.parse_link(LINK))
+    assert order["last_name"] == "Müller" and order["device"] == "psy" and order["fhir"]["kontext"] == "k-1"
+    monkeypatch.setattr(server, "FHIR", fhir.Settings())
+    with pytest.raises(ValueError, match="nicht eingerichtet"):
+        api.fhir_context("001", steno.parse_link(LINK))
+
+
+FHIR_ORDER = {"id": "fhir-001-1", "patid": "pat-obj-1", "last_name": "Müller", "first_name": "Hans",
+              "device": "", "fhir": {"kontext": "k-1", "base": "https://t2med.praxis/aps/fhir/api/r4",
+                                     "token": "t"}}
+
+
+def test_link_from_t2med_starts_recording_even_right_after_start(app):
+    app.handle("fhir", FHIR_ORDER)                       # erster Kontakt nach dem Start
+    assert app.recording and app.entry.order == FHIR_ORDER
+    assert app.api.claimed == []                          # nichts beim GDT-Auftragsbuch zu holen
+    app.handle("fhir", {**FHIR_ORDER, "id": "fhir-001-2"})   # derselbe Patient noch einmal: nichts
+    assert app.dialog is None
+    other = {**FHIR_ORDER, "id": "fhir-001-3", "patid": "pat-obj-2", "last_name": "Schmidt"}
+    app.handle("fhir", other)
+    assert app.entry.order == FHIR_ORDER and app.dialog is not None
+    app.on_order(None)                                    # GDT-Abfrage: der Kontext bleibt vorgemerkt
+    assert app.pending == other
+
+
+# ---------------------------------------------------------------- Abschnitte
+
+def tone(seconds: float, level: int = 8000):
+    n = int(16000 * seconds)
+    return (np.sin(np.arange(n) / 5) * level).astype("int16").reshape(-1, 1)
+
+
+def silence(seconds: float):
+    return np.zeros((int(16000 * seconds), 1), dtype="int16")
+
+
+def run_segmenter(*parts):
+    blocks = []
+    seg = steno.Segmenter(16000, lambda *b: blocks.append(b))
+    audio = np.concatenate(parts)
+    for i in range(0, len(audio), 1600):                # wie PortAudio: 100-ms-Bloecke
+        seg.feed(audio[i:i + 1600])
+    seg.finish()
+    return blocks, len(audio)
+
+
+def test_segmenter_cuts_in_pauses():
+    blocks, total = run_segmenter(silence(1), tone(5), silence(1.2), tone(3), silence(0.3))
+    assert [b[0] for b in blocks] == list(range(len(blocks))) and blocks[-1][4]
+    assert len(blocks) == 2
+    assert 6.2 < blocks[0][2] < 7.0                      # mitten in der Pause nach 6 s
+    for a, b in zip(blocks, blocks[1:]):
+        assert a[2] == b[1]                               # lueckenlos
+    assert sum(len(b[3]) for b in blocks) == total       # kein Sample verloren
+
+
+def test_segmenter_short_utterance_needs_longer_pause():
+    blocks, _ = run_segmenter(tone(1.5), silence(1.0), tone(1.5), silence(1.8), tone(1))
+    assert len(blocks) == 2 and 4.2 < blocks[0][2] < 5.0  # erst die 1,8-s-Pause schneidet
+
+
+def test_segmenter_cuts_long_speech_at_quietest_moment():
+    speech = np.concatenate([tone(18.5), tone(0.3, level=600), tone(5)])
+    blocks, _ = run_segmenter(speech)
+    assert 18.5 <= blocks[0][2] <= 19.0                  # in der leisen Stelle, nicht hart bei 20 s
+
+
+def test_segmenter_without_speech_sends_only_final_block():
+    blocks, total = run_segmenter(silence(30))
+    assert len(blocks) == 1 and blocks[0][4] and len(blocks[0][3]) == total
+
+
+def test_block_sender_encodes_flac_and_drops_after_blocks():
+    import io
+    import soundfile as sf
+    api = FakeApi()
+    sender = steno.BlockSender(api, "001")
+    sender.put("job-1", 16000, 0, 0.0, 1.0, tone(1), False)
+    sender.put("job-1", 16000, 1, 1.0, 1.0, silence(0), True)
+    sender.drop("job-1")
+    end = time.monotonic() + 5
+    while not api.dropped:
+        assert time.monotonic() < end
+        time.sleep(0.01)
+    first, last = api.blocks
+    assert sf.info(io.BytesIO(first[5])).frames == 16000
+    assert last[4] and last[5] is None                   # leerer Schlussblock
+    assert api.dropped == ["job-1"]
+
+
+def test_blocks_against_server(live, fake, tmp_path):
+    import io
+    import soundfile as sf
+    api, gdt_dir = live
+    spool = steno.Spool(tmp_path / "spool")
+    entry = make_entry(mode="direkt", state="bereit")
+    write_flac(spool.audio(entry), 5)
+    spool.save(entry)
+    data = io.BytesIO()
+    sf.write(data, silence(5), 16000, format="FLAC")
+    api.block(entry.id, "001", 0, 0.0, 5.0, False, data.getvalue())
+    api.block(entry.id, "001", 1, 5.0, 5.0, True, None)
+    steno.upload_step(api, spool, entry, queue.Queue())
+    end = time.monotonic() + 10
+    while spool.entries():
+        assert time.monotonic() < end
+        steno.upload_step(api, spool, spool.entries()[0], queue.Queue())
+        time.sleep(0.05)
+    assert fake.whisper_calls() == 1                      # nur der Abschnitt
+    assert (gdt_dir / "T2MDSTNO.001").exists()
+
+
+def test_consultation_streams_blocks_with_all(app):
+    """STENO_BLOECKE=alle: auch Gespraeche gehen in Abschnitten an den Server."""
+    app.start_recording(None)
+    assert app.recorder.on_block is not None
+    app.recorder.seconds = 1.0                           # Fehlklick: Abschnitte verwerfen
+    entry_id = app.entry.id
+    app.stop_recording()
+    end = time.monotonic() + 5
+    while entry_id not in app.api.dropped:
+        assert time.monotonic() < end
+        time.sleep(0.01)
+
+
+# ---------------------------------------------------------------- Diktat (Direkt)
+
+def test_direct_dictates_and_stays_chosen(app):
+    """Direkt: kein Eintrag im Ausgang, keine Datei, kein Fehlklick — und nach
+    dem Stopp bleibt Direkt gewaehlt."""
+    app.on_release(click(app, 120, 25))                  # Sprechstunde -> Direkt
+    app.on_release(click(app, 120, 120))                 # ▶
+    assert app.dictating and app.recorder.on_block is not None and app.entry.order is None
+    app.recorder.seconds = 2.0                           # kurzes Diktat ist kein Fehlklick
+    app.on_release(click(app, 120, 120))                 # ■
+    assert not app.recording and app.direct and app.shown_mode == "direkt"
+    assert not app.spool.entries() and not list(app.spool.folder.iterdir())
+    app.on_release(click(app, 120, 120))                 # gleich das naechste Diktat
+    assert app.dictating
+
+
+def test_direct_leaves_open_order_alone(app):
+    app.on_order(ORDER_A)                                # lag beim Start schon da
+    app.choose_mode("direkt")
+    app.on_release(click(app, 120, 120))
+    assert app.dictating and app.pending == ORDER_A and not app.api.claimed
+
+
+def test_order_while_direct_records_consultation(app):
+    """"Messung starten" in T2med ist nie ein Diktat — danach ist Direkt wieder da."""
+    app.choose_mode("direkt")
+    app.on_order(None)
+    app.on_order(ORDER_A)
+    assert app.recording and not app.dictating and app.shown_mode == "sprechstunde"
+    app.stop_recording()
+    assert app.spool.entries()[0].mode == "sprechstunde" and app.shown_mode == "direkt"
+
+
+def test_no_switch_between_dictation_and_consultation(app):
+    app.start_recording(None)                            # Gespraech: Ring ohne Direkt
+    app.cycle_mode()                                     # Sprechstunde -> (Direkt uebersprungen) -> Psychotherapie
+    assert not app.direct and app.mode.get() == "psycho"
+    app.choose_mode("direkt")
+    assert not app.direct
+    app.stop_recording()
+    app.choose_mode("direkt")
+    app.start_dictation()
+    app.cycle_mode()                                     # waehrend des Diktats: nichts
+    app.choose_mode("sprechstunde")
+    assert app.dictating and app.direct
+
+
+def test_order_during_dictation_asks(app):
+    app.on_order(None)
+    app.choose_mode("direkt")
+    app.start_dictation()
+    app.on_order(ORDER_A)
+    assert app.dictating and app.dialog is not None and app.pending == ORDER_A
+
+
+class FakeDictateApi:
+    def __init__(self, texts):
+        self.texts = list(texts)
+        self.calls: list = []
+
+    def dictate(self, ap, data, name):
+        self.calls.append(name)
+        return self.texts.pop(0)
+
+
+def wait_until(condition, timeout=5.0):
+    end = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < end
+        time.sleep(0.01)
+
+
+def test_dictation_types_in_order_and_waits_for_target():
+    api = FakeDictateApi(["Patient  klagt über\nSchwindel.", "", "Seit drei Tagen.", "Neues Diktat."])
+    typed, blocked, events = [], ["bitte in das Textfeld klicken"], queue.Queue()
+    d = steno.Dictation(api, "001", events, type_text=typed.append, blocked=lambda: blocked[0])
+    d.put("d-1", 16000, 0, 0.0, 1.0, tone(1), False)
+    wait_until(lambda: not events.empty())               # wartet auf ein fremdes Fenster
+    assert events.get()[1][0].startswith("Diktat wartet") and not typed and d.pending == 1
+    blocked[0] = ""
+    d.put("d-1", 16000, 1, 1.0, 2.0, silence(1), False)  # Stille: kein Text
+    d.put("d-1", 16000, 2, 2.0, 3.0, tone(1), False)
+    d.put("d-1", 16000, 3, 3.0, 3.0, silence(0), True)   # leerer Schlussblock: geht gar nicht raus
+    d.put("d-2", 16000, 0, 0.0, 1.0, tone(1), False)     # naechstes Diktat: ohne Leerzeichen davor
+    wait_until(lambda: d.pending == 0)
+    assert typed == ["Patient klagt über\nSchwindel.", " Seit drei Tagen.", "Neues Diktat."]
+    assert len(api.calls) == 4
+    d.close()
+
+
+def test_dictation_no_space_around_commands():
+    """Abschnitte aus Diktierbefehlen: kein Leerzeichen vor Satzzeichen und
+    "Klammer zu", keines nach einem Umbruch oder "Klammer auf"."""
+    api = FakeDictateApi(["Befund", ":", "unauffällig\n", "Diagnose (", "Migräne", ")", "."])
+    typed = []
+    d = steno.Dictation(api, "001", queue.Queue(), type_text=typed.append, blocked=lambda: "")
+    for seq in range(7):
+        d.put("d-1", 16000, seq, seq, seq + 1.0, tone(1), False)
+    wait_until(lambda: d.pending == 0)
+    assert "".join(typed) == "Befund: unauffällig\nDiagnose (Migräne)."
+    d.close()
+
+
+def test_dropped_dictation_types_nothing_more():
+    api = FakeDictateApi(["eins"])
+    typed = []
+    d = steno.Dictation(api, "001", queue.Queue(), type_text=typed.append, blocked=lambda: "")
+    d.drop("d-1")
+    d.put("d-1", 16000, 0, 0.0, 1.0, tone(1), False)
+    wait_until(lambda: d.pending == 0)
+    assert not typed and not api.calls
+    d.close()
+
+
+def test_dictation_against_server(live, fake):
+    import io
+    import soundfile as sf
+    api, _ = live
+    data = io.BytesIO()
+    sf.write(data, tone(1), 16000, format="FLAC")
+    assert api.dictate("001", data.getvalue(), "d-0.flac") == fake.text
+    with pytest.raises(ValueError):
+        api.dictate("009", data.getvalue(), "d-0.flac")   # unbekannter Arbeitsplatz
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="SendInput gibt es nur unter Windows")
+def test_input_structure_fits_sendinput():
+    """Zu klein (ohne MOUSEINPUT in der Union) lehnt SendInput jeden Aufruf ab."""
+    import ctypes
+    assert ctypes.sizeof(steno._INPUT) == (40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
+
+
+def test_key_events_keys_before_packets():
+    """Was auf einer Taste liegt, geht als Taste hinaus (ggf. mit Umschalt), der
+    Rest als VK_PACKET — dort vertauscht ein langsames Programm die Zeichen."""
+    layout = {"z": (0x5A, 0x15, 0), "K": (0x4B, 0x25, 1)}
+    assert steno.key_events("z", layout.get) == ([(0x5A, 0x15, 0), (0x5A, 0x15, 0x2)], False)
+    assert steno.key_events("K", layout.get) == (
+        [(0x10, 0x2A, 0), (0x4B, 0x25, 0), (0x4B, 0x25, 0x2), (0x10, 0x2A, 0x2)], False)
+    assert steno.key_events("€", layout.get) == ([(0, 0x20AC, 0x4), (0, 0x20AC, 0x6)], True)
+    assert steno.key_events("\n", layout.get) == ([(0x0D, 0x1C, 0), (0x0D, 0x1C, 0x2)], False)
+    events, packet = steno.key_events("😀", layout.get)            # Ersatzpaar: zwei Einheiten
+    assert packet and [scan for _, scan, _ in events] == [0xD83D, 0xD83D, 0xDE00, 0xDE00]
+
+
+def test_layout_key_skips_altgr_and_dead_keys():
+    """Deutsches Layout: @ liegt auf AltGr+Q (Strg+Alt), ^ ist eine tote Taste."""
+    scans = {"a": 0x41, "A": 0x141, "@": 0x651, "^": 0xDC}       # VkKeyScanExW: Umschalt im High-Byte
+
+    class User32:
+        def VkKeyScanExW(self, char, hkl):
+            return scans.get(char, -1)
+
+        def MapVirtualKeyExW(self, vk, kind, hkl):
+            if kind == 2:                                          # MAPVK_VK_TO_CHAR
+                return 0x8000005E if vk == 0xDC else ord("A")
+            return 0x1E                                            # MAPVK_VK_TO_VSC
+
+    key = steno._layout_key(User32(), None)
+    assert key("a") == (0x41, 0x1E, 0)
+    assert key("A") == (0x41, 0x1E, 1)
+    assert key("@") is None and key("^") is None and key("€") is None
+
+
+# ---------------------------------------------------------------- Fortsetzen
+
+def test_merge_audio(tmp_path):
+    import soundfile as sf
+    write_flac(tmp_path / "a.flac", 1.0)
+    write_flac(tmp_path / "b.flac", 0.5)
+    assert steno.merge_audio(tmp_path / "a.flac", tmp_path / "b.flac") == 1.5
+    assert sf.info(tmp_path / "b.flac").frames == 24000
+    sf.write(tmp_path / "c.flac", np.zeros(8000, dtype="int16"), 8000, format="FLAC")
+    with pytest.raises(ValueError):
+        steno.merge_audio(tmp_path / "a.flac", tmp_path / "c.flac")
+
+
+def test_keep_last_and_purge(tmp_path):
+    spool = steno.Spool(tmp_path)
+    entry = make_entry(state="hochgeladen")
+    write_flac(spool.audio(entry))
+    spool.save(entry)
+    spool.keep_last(entry)
+    assert spool.entries() == [] and spool.kept(entry.id).exists()
+    spool.purge_kept(3600)
+    assert spool.kept(entry.id).exists()
+    spool.purge_kept(0)
+    assert not spool.kept(entry.id).exists()
+
+
+def test_continue_last_recording(app):
+    app.on_order(None)
+    app.on_order(ORDER_A)                                 # Aufnahme fuer Mueller
+    app.stop_recording()
+    [first] = app.spool.entries()
+    app.update_continue_entry()
+    assert app.menu.entrycget(0, "label").startswith("Fortsetzen: Müller, Hans")
+    app.continue_recording()
+    assert app.recording and app.entry.continues == first.id and app.entry.order == ORDER_A
+    assert app.recorder.on_block is None                  # fortgesetzt: keine Abschnitte
+    app.update_continue_entry()                           # waehrend der Aufnahme kein Eintrag
+    assert not app.continue_entry
+    app.stop_recording()
+    [merged] = app.spool.entries()                        # die vorige (noch nicht hochgeladen) ist weg
+    assert merged.replaces == first.id and merged.started == first.started and merged.duration == 1.0
+    assert not app.spool.part(merged).exists()
+
+
+def test_continue_sent_recording_uses_kept_audio(app):
+    app.start_recording(ORDER_A)
+    app.stop_recording()
+    [first] = app.spool.entries()
+    app.spool.keep_last(first)                            # inzwischen gesendet
+    app.continue_recording()
+    app.stop_recording()
+    [merged] = app.spool.entries()
+    assert merged.replaces == first.id and not app.spool.kept(first.id).exists()
+
+
+def test_continue_misclick_keeps_previous(app):
+    app.start_recording(None)
+    app.stop_recording()
+    [first] = app.spool.entries()
+    app.continue_recording()
+    app.recorder.seconds = 1.0
+    app.stop_recording()
+    assert app.spool.entries() == [first] and app.pending is None
+    assert app.can_continue()                             # noch einmal versuchen geht
+
+
+def test_continue_window_expires(app):
+    app.cfg.set("fortsetzen_minuten", "0")
+    app.start_recording(None)
+    app.stop_recording()
+    app.update_continue_entry()
+    assert not app.can_continue() and not app.continue_entry
+
+
+# ---------------------------------------------------------------- Einstellungen
+
+def test_input_devices_once_each(monkeypatch):
+    devices = [{"name": "Microsoft Soundmapper - Input", "max_input_channels": 2},
+               {"name": "Mikrofonarray (Realtek(R) Audi", "max_input_channels": 2},   # MME, gekuerzt
+               {"name": "Lautsprecher (Realtek(R) Audio)", "max_input_channels": 0},
+               {"name": "Mikrofonarray (Realtek(R) Audio)", "max_input_channels": 2},
+               {"name": "Mikrofon (EPOS EXPAND 40)", "max_input_channels": 1},
+               {"name": "Mikrofon (EPOS EXPAND 40)", "max_input_channels": 1}]
+    monkeypatch.setattr(steno.sd, "query_devices", lambda: devices)
+    assert steno.input_devices() == ["Mikrofonarray (Realtek(R) Audi", "Mikrofon (EPOS EXPAND 40)"]
+
+
+REAL_TICK = steno.App.tick
+
+
+def test_settings_dialog(app, monkeypatch):
+    monkeypatch.setattr(steno, "input_devices", lambda: ["Mikrofon (EPOS EXPAND 40)"])
+    errors = []
+    monkeypatch.setattr(steno.messagebox, "showerror", lambda *a, **k: errors.append(a))
+    app.workstations = {"001": "SZ 1", "002": "SZ 2"}
+    app.cfg.set("server", "https://steno.praxis")
+    app.cfg.set("arbeitsplatz", "001")
+    app.open_settings()
+    dlg = app.settings
+    assert dlg.vars["arbeitsplatz"].get() == "001 – SZ 1"
+    assert dlg.vars["mikrofon"].get() == steno.DEFAULT_MIC
+    dlg.vars["mikrofon"].set("Mikrofon (EPOS EXPAND 40)")
+    dlg.vars["stille_minuten"].set("15,0")
+    dlg.save()
+    saved = steno.Config(app.cfg.path)
+    assert app.settings is None and not errors
+    assert saved.get("mikrofon") == "Mikrofon (EPOS EXPAND 40)" and saved.get("stille_minuten") == "15"
+    assert not app.restart_pending                        # gilt ab der naechsten Aufnahme
+
+    app.open_settings()
+    app.settings.vars["max_minuten"].set("viel")
+    app.settings.save()
+    assert errors and app.settings                        # Fenster bleibt offen
+    app.settings.vars["max_minuten"].set("120")
+    app.settings.vars["mikrofon"].set(steno.DEFAULT_MIC)
+    app.settings.vars["arbeitsplatz"].set("2")
+    app.start_recording(None)
+    app.settings.save()
+    saved = steno.Config(app.cfg.path)
+    assert saved.get("arbeitsplatz") == "002" and saved.get("mikrofon") == ""
+    assert app.restart_pending
+
+    restarts = []
+    monkeypatch.setattr(app, "quit", lambda restart=False: restarts.append(restart))
+    REAL_TICK(app)
+    assert restarts == []                                 # erst nach der Aufnahme
+    app.stop_recording()
+    REAL_TICK(app)
+    assert restarts == [True]

@@ -47,12 +47,22 @@ class FakeServices:
         self.subject = "Kopfschmerzen seit drei Tagen"
         self.down: set = set()          # Hosts, die nicht antworten
         self.requests: list = []        # (host, path, body)
+        # T2med-FHIR (fhir.py)
+        self.fhir_patient = {"resourceType": "Patient", "id": "pat-obj-1",
+                             "name": [{"family": "Müller", "given": ["Hans"]}],
+                             "birthDate": "1960-02-01", "gender": "male"}
+        self.fhir_status = 200          # Antwort auf die Transaktion
+        self.fhir_outcome = None        # OperationOutcome bei Fehlern
+        self.fhir_fail: list = []       # je Anfrage der Reihe nach: "connect", "timeout" oder None
+        self.fhir_requests: list = []   # httpx.Request
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         host, path, body = request.url.host, request.url.path, request.content
         self.requests.append((host, path, body))
         if host in self.down:
             raise httpx.ConnectError("down", request=request)
+        if path.startswith("/aps/fhir/api/r4"):
+            return self.fhir(request)
 
         if path == "/v1/audio/transcriptions":
             if self.whisper_fails or (self.verbose_fails and b"verbose_json" in body):
@@ -91,6 +101,32 @@ class FakeServices:
         if path == "/":
             return httpx.Response(200, text="ok")
         return httpx.Response(404)
+
+    def fhir(self, request: httpx.Request) -> httpx.Response:
+        self.fhir_requests.append(request)
+        fail = self.fhir_fail.pop(0) if self.fhir_fail else None
+        if fail == "connect":
+            raise httpx.ConnectError("T2med aus", request=request)
+        if fail == "timeout":
+            raise httpx.ReadTimeout("keine Antwort", request=request)
+        if request.method == "GET" and request.url.path.endswith("/Patient"):
+            if self.fhir_status != 200:
+                return httpx.Response(self.fhir_status, json=self.fhir_outcome or {})
+            return httpx.Response(200, json={"resourceType": "Bundle", "type": "searchset",
+                                             "entry": [{"resource": self.fhir_patient}]})
+        if request.method == "POST":
+            if self.fhir_status != 200:
+                return httpx.Response(self.fhir_status, json=self.fhir_outcome or {})
+            entries = json.loads(request.content)["entry"]
+            return httpx.Response(200, json={"resourceType": "Bundle", "type": "transaction-response",
+                                             "entry": [{"response": {"status": "201"}} for _ in entries]})
+        return httpx.Response(404)
+
+    def fhir_bundles(self) -> list:
+        return [json.loads(r.content) for r in self.fhir_requests if r.method == "POST"]
+
+    def whisper_calls(self) -> int:
+        return sum(p == "/v1/audio/transcriptions" for _, p, _ in self.requests)
 
     def prompts(self) -> list:
         return [json.loads(b)["prompt"] for _, p, b in self.requests if p == "/api/generate"]

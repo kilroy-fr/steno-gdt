@@ -18,9 +18,10 @@ import json
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime
 import logging
 import time
+import fhir
 import gdt
 from prompts import (
     ABPRO_PROMPT,
@@ -40,7 +41,7 @@ from medical_vocab import ALL_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.30.2"
+VERSION = "0.33.0"
 
 
 def _flag(value: str) -> bool:
@@ -113,6 +114,11 @@ gdt_orders = gdt.OrderBook()
 # Antwort des Sprachmodells und die GDT-Datei, die T2med nach dem Einlesen
 # loescht. Leer = aus. Enthaelt Patientendaten, nach dem Test wieder leeren.
 GDT_DEBUG_DIR = os.getenv("GDT_DEBUG_DIR", "")
+# Zweiter Weg nach T2med (fhir.py): Drittanbieter-Knopf in T2med -> Steno-Knopf
+# -> Server. Aus, solange FHIR_API_KEY oder FHIR_HOSTS fehlen. GDT bleibt
+# daneben bestehen: fuer "Messung starten", fuer Aufnahmen ohne Patient und als
+# Rueckfall, wenn T2med eine FHIR-Uebergabe ablehnt.
+FHIR = fhir.Settings.from_env()
 # Steno-Knopf (client/steno.py): Dokumentationsart fuer Sprechstunden, ab
 # welcher Laenge ohne Vorgabe gefragt wird, ob es eine Psychotherapie-Sitzung
 # war, wie lange auf die Abholung durch T2med gewartet wird und wie lange
@@ -122,6 +128,14 @@ STENO_PSY_AB_MINUTEN = float(os.getenv("STENO_PSY_AB_MINUTEN", "20"))
 STENO_SENDEN_WARTEN = float(os.getenv("STENO_SENDEN_WARTEN", "60"))
 STENO_AUFBEWAHRUNG = float(os.getenv("STENO_AUFBEWAHRUNG", "12"))
 STENO_MIN_WOERTER = int(os.getenv("STENO_MIN_WOERTER", "15"))
+# Transkript in Bloecken schon waehrend der Aufnahme (siehe STENO-KNOPF):
+# "direkt" = nur bei Direkt-Aufnahmen, "alle" = jede Aufnahme des Knopfs,
+# "aus" = erst nach dem Stopp in einem Stueck. Und wie lange der Server nach
+# dem Stopp auf den letzten Block wartet, bevor er doch das Ganze transkribiert.
+STENO_BLOECKE = os.getenv("STENO_BLOECKE", "direkt").strip().lower()
+if STENO_BLOECKE not in ("direkt", "alle", "aus"):
+    raise ValueError("STENO_BLOECKE muss direkt, alle oder aus sein")
+STENO_BLOCK_WARTEN = float(os.getenv("STENO_BLOCK_WARTEN", "20"))
 
 WHISPER_URL = f"http://{WHISPER_HOST}:{WHISPER_PORT}"
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
@@ -437,6 +451,96 @@ def correct_terms(text: str) -> tuple[str, int]:
     return _TERM_WORD_RE.sub(fix, text), count
 
 
+# Diktierbefehle (nur /steno/diktat): gesprochen -> Zeichen. Laengere zuerst,
+# sonst traefe "Absatz" in "neuer Absatz" und "Punkt" in "Doppelpunkt".
+_DICTATION_COMMANDS = {
+    "neuer absatz": "\n\n", "neue zeile": "\n", "absatz": "\n\n",
+    "klammer auf": "(", "klammer zu": ")",
+    "doppelpunkt": ":", "gedankenstrich": "–", "komma": ",", "punkt": ".",
+}
+_DICTATION_RE = re.compile(
+    r"(?<!\w)(" + "|".join(k.replace(" ", r"\s+") for k in _DICTATION_COMMANDS) + r")(?!\w)",
+    re.IGNORECASE)
+# "Absatz", "Punkt" und "Komma" sind auch Woerter: "im letzten Absatz", "ein wunder Punkt"
+_DICTATION_NOUN = {"absatz", "punkt", "komma"}
+_DICTATION_ARTICLE = {
+    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "eines", "einer",
+    "kein", "keinen", "keinem", "im", "am", "vom", "zum", "beim", "diesen", "diesem", "dieser",
+    "jeden", "jedem",
+}
+_NUMBER_WORDS = {
+    "null", "eins", "ein", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun",
+    "zehn", "elf", "zwölf", "zwanzig", "dreißig", "vierzig", "fünfzig", "hundert", "tausend",
+}
+_ATTACH_LEFT = {",", ".", ":", ")", "\n", "\n\n"}
+_WHISPER_PUNCT = " ,.;:!?"
+
+
+def apply_dictation_commands(text: str) -> tuple[str, int]:
+    """Gesprochene Satzzeichen und Umbrueche ersetzen ("neue Zeile", "Komma",
+    "Klammer auf" …); liefert den Text und die Zahl der Befehle.
+
+    Die Satzzeichen, die Whisper selbst um einen Befehl setzt ("ebenfalls,
+    neue Zeile. An"), fallen weg — was dort steht, bestimmt der Befehl. Als
+    Wort bleiben stehen: "Absatz/Punkt/Komma" hinter einem Artikel, auch mit
+    Adjektiv dazwischen ("im letzten Absatz"), und "Komma" zwischen Zahlwoertern ("zwei Komma fuenf" —
+    besser so als "zwei, fuenf"); zwischen Ziffern wird es zum Dezimalkomma."""
+    parts: list = []                              # Text oder (Zeichen,) fuer einen Befehl
+    pos = count = 0
+    for m in _DICTATION_RE.finditer(text):
+        key = " ".join(m.group(1).lower().split())
+        before, after = text[pos:m.start()], text[m.end():]
+        prev = re.findall(r"\w+", before)
+        nxt = re.findall(r"\w+", after)
+        prev_word = prev[-1].lower() if prev else ""
+        next_word = nxt[0].lower() if nxt else ""
+        symbol = _DICTATION_COMMANDS[key]
+        # Artikel davor, oder Artikel + kleingeschriebenes Adjektiv ("der wichtigste
+        # Punkt"); ein Nomen davor ("bestehen die Schmerzen Punkt") heisst Befehl
+        if key in _DICTATION_NOUN and (prev_word in _DICTATION_ARTICLE or (
+                len(prev) >= 2 and prev[-1].islower() and prev[-2].lower() in _DICTATION_ARTICLE)):
+            continue
+        if key == "komma":
+            if prev_word in _NUMBER_WORDS and next_word in _NUMBER_WORDS:
+                continue
+            if re.search(r"\d\W*$", before) and re.match(r"\W*\d", after):
+                symbol = "decimal"
+        parts += [before, (symbol,)]
+        pos = m.end()
+        count += 1
+    if not count:
+        return text, 0
+    parts.append(text[pos:])
+
+    out, keep, gap, capital, after_command = "", 0, "", False, False
+    for part in parts:
+        if isinstance(part, tuple):
+            symbol = part[0]
+            while len(out) > keep and out[-1] in _WHISPER_PUNCT:     # Whisper-Satzzeichen davor
+                out = out[:-1]
+            if symbol == "decimal":
+                out += ","
+                gap = ""
+            elif symbol in _ATTACH_LEFT:
+                out += symbol
+                gap = "" if symbol.startswith("\n") else " "
+            else:                                 # "(" und "–": Abstand davor
+                out += (" " if out and out[-1] not in "\n(" else "") + symbol
+                gap = "" if symbol == "(" else " "
+            keep = len(out)
+            capital = symbol in (".", "\n", "\n\n")
+            after_command = True
+            continue
+        if after_command:
+            part = part.lstrip(_WHISPER_PUNCT)
+        if part:
+            if capital:
+                part = part[0].upper() + part[1:]
+            out += gap + part
+            capital, after_command = False, False
+    return out.strip(" "), count
+
+
 def _exc_text(exc: BaseException) -> str:
     """Klartext fuer eine geloggte Ausnahme — mit Typ.
 
@@ -705,12 +809,22 @@ async def transcribe_audio(
 async def transcribe_with_units(
     audio_path: str, filename: str = "audio.webm", lang_mode: str = "de"
 ) -> Transcription:
-    """Transkribiert mit Zeitstempeln - Grundlage fuer die Sprecherzuordnung.
+    """Transkribiert mit Zeitstempeln - Grundlage fuer die Sprecherzuordnung."""
+    text, units = await _whisper_units(audio_path, filename, lang_mode)
+    return _clean_transcription(text, lang_mode, units)
+
+
+async def _whisper_units(audio_path: str, filename: str, lang_mode: str) -> tuple[str, list]:
+    """Rohtext und Einheiten ({"start", "end", "text"}) von Whisper, noch ungeputzt.
 
     Angefragt wird Wort-Granularitaet: Whisper-Segmente laufen regelmaessig ueber
     Sprecherwechsel hinweg und wuerden ganze Antworten dem Falschen zuordnen.
     Liefert der Whisper-Server keine Woerter, wird auf Segmentebene
     zurueckgefallen - schlechter, aber besser als gar keine Trennung.
+
+    Ungeputzt, weil die Bloecke des Knopfs (siehe STENO-KNOPF) erst
+    zusammengesetzt und dann als Ganzes bereinigt werden: eine Schleife ueber
+    eine Blockgrenze hinweg ist nur im Ganzen zu sehen.
     """
     # Feldname MIT eckigen Klammern - der faster-whisper-Server bindet den
     # Parameter per Form(alias="timestamp_granularities[]"). Ohne Klammern wird
@@ -741,7 +855,7 @@ async def transcribe_with_units(
             {"start": float(sg["start"]), "end": float(sg["end"]), "text": sg["text"]}
             for sg in segments
         ]
-    return _clean_transcription(text, lang_mode, units)
+    return text, units
 
 
 def _clean_transcription(raw: str, lang_mode: str, units: list | None = None) -> Transcription:
@@ -994,13 +1108,14 @@ def _build_prompt(mode: str, transcript: str, gender: str, diarized: bool) -> st
 
 
 async def _transcribe_and_diarize(
-    audio_path: str, filename: str, lang_mode: str
+    audio_path: str, filename: str, lang_mode: str, diarization: asyncio.Future | None = None
 ) -> tuple[Transcription, str | None]:
     """Transkription und Diarisation parallel; liefert (Transkription, beschriftet).
 
     Beide Dienste lesen dieselbe Datei; die Diarisation ist auf der GPU um ein
     Vielfaches schneller als Whisper (gemessen an einer 45-min-Datei: 41 s gegen
-    gut zwei Minuten) und kostet damit keine zusaetzliche Wartezeit.
+    gut zwei Minuten) und kostet damit keine zusaetzliche Wartezeit. Laeuft sie
+    schon (`diarization`, Steno-Knopf), wird auf diese gewartet.
 
     Nur die Transkription ist Pflicht — scheitert sie, fliegt die Ausnahme.
     Scheitert die Sprechertrennung, ist das beschriftete Transkript None: ein
@@ -1008,7 +1123,7 @@ async def _transcribe_and_diarize(
     """
     transcription, segments = await asyncio.gather(
         transcribe_with_units(audio_path, filename, lang_mode),
-        diarize_audio(audio_path, filename),
+        diarization or diarize_audio(audio_path, filename),
         return_exceptions=True,
     )
     if isinstance(transcription, BaseException):
@@ -1017,7 +1132,12 @@ async def _transcribe_and_diarize(
         # Analyse aufzugeben — dann eben ohne Sprecher.
         logger.warning(f"Transkription mit Zeitstempeln fehlgeschlagen: {_exc_text(transcription)}")
         transcription = await transcribe_audio(audio_path, filename, lang_mode)
+    return transcription, _label_speakers(transcription, segments)
 
+
+def _label_speakers(transcription: Transcription, segments) -> str | None:
+    """Beschriftetes Transkript; None, wenn die Sprechertrennung nichts beitraegt
+    (gescheitert — dann ist `segments` die Ausnahme —, leer, ohne Zeitstempel)."""
     if isinstance(segments, BaseException):
         reason = _exc_text(segments)
     elif not segments:
@@ -1025,9 +1145,9 @@ async def _transcribe_and_diarize(
     elif not transcription.units:
         reason = "keine Zeitstempel"
     else:
-        return transcription, format_diarized_transcript(transcription.units, segments) or None
+        return format_diarized_transcript(transcription.units, segments) or None
     logger.warning(f"Diarisation nicht anwendbar: {reason}")
-    return transcription, None
+    return None
 
 
 async def _analysis_events(transcript: str, mode: str, gender: str, model: str,
@@ -1316,10 +1436,7 @@ def _write_transcript_attachment(ap: str, started: datetime, text: str, transcri
     while path.exists():
         n += 1
         path = folder / f"{stem}_{n}.txt"
-    content = (
-        f"KI-Dokumentation (bitte prüfen) – Aufnahme vom {started:%d.%m.%Y %H:%M}\n\n"
-        f"{text.strip()}\n\n\n=== Transkript ===\n\n{transcript.strip()}\n"
-    )
+    content = _attachment_text(text, transcript, started)
     path.write_text(content.replace("\n", "\r\n"), encoding="utf-8-sig", newline="")
     pvs = f"{GDT.pvs_path.rstrip(chr(92))}\\anhaenge\\{path.name}"
     return path, (path.stem, "TXT", f"Transkript {started:%d.%m.%Y %H:%M}", pvs)
@@ -1366,17 +1483,21 @@ def _deliver_gdt(ap: str, order: gdt.Order | None, text: str, transcript: str, m
                 f"{order.label if order else 'ohne Auftrag (Pat.-Nr. 0)'}, "
                 f"{len(text)} Zeichen" + (f", Anhang {attachment_file.name}" if attachment_file else ""))
     if GDT_DEBUG_DIR and not psycho and not (order and order.device == "psy"):
-        _write_gdt_debug(ap, order, text, mode, model, started, target, data)
+        _write_debug(ap, order, text, mode, model, started, target.name,
+                     f"GDT-Datei, wie T2med sie liest (eine Zeile = ein Feld; Klartext vor dem "
+                     f"Umbruch auf {GDT.line_width} Zeichen in Abschnitt 2)",
+                     data.decode(gdt.ENCODINGS[GDT.charset], errors="replace").replace("\r", ""),
+                     data, "gdt")
     return target, record
 
 
-def _write_gdt_debug(ap: str, order: gdt.Order | None, text: str, mode: str, model: str,
-                     started: datetime, target: Path, data: bytes):
+def _write_debug(ap: str, order: gdt.Order | None, text: str, mode: str, model: str,
+                 started: datetime, target: str, title: str, decoded: str, data: bytes, ext: str):
     """GDT_DEBUG_DIR: <Zeit>_<ap>_<Modus>.txt zum Lesen (Antwort des Sprachmodells,
-    Klartext, GDT-Datei dekodiert) und .gdt mit den Bytes, die T2med bekam.
+    Klartext, Uebergabe lesbar) und .gdt/.json mit den Bytes, die T2med bekam.
 
     Psychotherapie nie — wie beim Logging. Ein Fehler hier haelt die schon
-    abgelegte Uebergabe nicht auf.
+    erfolgte Uebergabe nicht auf.
     """
     try:
         folder = Path(GDT_DEBUG_DIR)
@@ -1386,24 +1507,60 @@ def _write_gdt_debug(ap: str, order: gdt.Order | None, text: str, mode: str, mod
         workstation = GDT.workstations.get(ap, "")
         content = (
             f"Steno {VERSION} – Übergabe an T2med\n"
-            f"Datei:        {target.name}\n"
+            f"Ziel:         {target}\n"
             f"Arbeitsplatz: {ap}" + (f" ({workstation})" if workstation else "") + "\n"
             f"Patient:      {order.label if order else 'ohne Auftrag (Pat.-Nr. 0)'}\n"
             f"Art:          {_MODE_LABELS.get(mode, mode or '–')} ({mode or '–'}), {model}\n"
             f"Aufnahme:     {started:%d.%m.%Y %H:%M:%S}\n"
-            f"Abgelegt:     {now:%d.%m.%Y %H:%M:%S}\n"
+            f"Übergeben:    {now:%d.%m.%Y %H:%M:%S}\n"
             f"\n=== 1. Antwort des Sprachmodells (ungekürzt) ===\n\n{text.strip()}\n"
-            f"\n=== 2. Klartext für die Karteikarte (vor dem Umbruch auf "
-            f"{GDT.line_width} Zeichen) ===\n\n{gdt.plain_text(text)}\n"
-            f"\n=== 3. GDT-Datei, wie T2med sie liest (eine Zeile = ein Feld) ===\n\n"
-            f"{data.decode(gdt.ENCODINGS[GDT.charset], errors='replace').replace(chr(13), '')}"
+            f"\n=== 2. Klartext für die Karteikarte ===\n\n{gdt.plain_text(text)}\n"
+            f"\n=== 3. {title} ===\n\n{decoded}"
         )
         (folder / f"{stem}.txt").write_text(content.replace("\n", "\r\n"),
                                             encoding="utf-8-sig", newline="")
-        (folder / f"{stem}.gdt").write_bytes(data)
+        (folder / f"{stem}.{ext}").write_bytes(data)
         logger.info(f"Debug-Kopie: {stem}.txt")
     except OSError as e:
         logger.warning(f"Debug-Kopie nicht geschrieben: {_exc_text(e)}")
+
+
+def _attachment_text(text: str, transcript: str, started: datetime) -> str:
+    """Inhalt des Transkript-Anhangs (GDT-Datei bzw. FHIR-Anhang): die
+    Dokumentation ungekuerzt vorn, dann das Transkript."""
+    return (f"KI-Dokumentation (bitte prüfen) – Aufnahme vom {started:%d.%m.%Y %H:%M}\n\n"
+            f"{text.strip()}\n\n\n=== Transkript ===\n\n{transcript.strip()}\n")
+
+
+async def _deliver_fhir(ap: str, order: gdt.Order, text: str, transcript: str, mode: str,
+                        model: str, started: datetime, warning: str, notes: tuple,
+                        request_id: str):
+    """Dokumentation per FHIR-Transaktion in den Kontext des Auftrags. Wirft
+    fhir.FhirError (mit retry/unclear) oder ValueError (Kontext ungueltig).
+
+    Psychotherapie bekommt nie einen Anhang und eigenes Kuerzel; Direkt-
+    Transkripte keinen Anhang (der Text ist schon das Transkript).
+    """
+    ctx = fhir.Context.from_dict(order.fhir, FHIR)
+    psycho = mode == "psycho" or order.device == "psy"
+    lines = list(notes)
+    if warning:
+        lines.append(f"Warnung: {warning}")
+    if FHIR.output == "abpro" and mode == "abpro":
+        # Steht nur im Hinweis-Eintrag neben den A/B/P-Zeilen (fhir.build_entries)
+        lines.insert(0, f"KI-generiert ({_MODE_LABELS.get(mode, 'Dokumentation')}, "
+                        f"Steno {VERSION}, Modell {model or OLLAMA_MODEL}). Vor Übernahme prüfen.")
+    extra = ""
+    if FHIR.attachment and transcript and not psycho and mode != "direkt":
+        extra = _attachment_text(text, transcript, started)
+    entries = fhir.build_entries(FHIR, ctx, text, mode, lines, started, psycho, extra)
+    await fhir.send(FHIR, ctx, entries, VERSION, request_id)
+    logger.info(f"An T2med übergeben (FHIR): {order.label}, {len(text)} Zeichen, "
+                f"{', '.join(label for label, _ in entries)}")
+    if GDT_DEBUG_DIR and not psycho:
+        data = json.dumps(fhir.bundle(entries), ensure_ascii=False, indent=2).encode("utf-8")
+        _write_debug(ap, order, text, mode, model, started, f"FHIR {ctx.base}",
+                     "FHIR-Transaktion, wie T2med sie bekam", data.decode("utf-8"), data, "json")
 
 
 @app.get("/gdt/order")
@@ -1436,6 +1593,9 @@ async def gdt_send(request: Request):
     if not text:
         raise HTTPException(status_code=400, detail="Keine Dokumentation zum Senden.")
     order = _parse_order(body.get("order"))
+    if order and order.fhir:
+        # Die Objekt-ID eines FHIR-Auftrags ist keine Patientennummer
+        raise HTTPException(status_code=400, detail="FHIR-Auftrag kann nicht per GDT gesendet werden.")
     try:
         target, record = _deliver_gdt(
             ap, order, text, str(body.get("transcript") or "").strip(), body.get("mode") or "",
@@ -1454,15 +1614,54 @@ async def gdt_send(request: Request):
     return {"file": target.name, "patid": record.get("3000")}
 
 
+@app.post("/fhir/context")
+async def fhir_context(request: Request):
+    """Deep Link aus T2med, vom Knopf weitergereicht: Patient zum Kontext, als
+    Auftrag wie aus "Messung starten". Schon hier wird bei T2med nachgefragt —
+    stimmen Schluessel, Token oder Freigabe nicht, soll das beim Klick in
+    T2med auffallen, nicht erst nach der Sprechstunde.
+
+    Body: ap, kontextId, fhirBasisUrl, oAuthToken (die Parameter des Links),
+    art=psycho fuer einen eigenen Psychotherapie-Eintrag in T2med.
+    """
+    if not FHIR.enabled:
+        raise HTTPException(status_code=404,
+                            detail="FHIR-Anbindung ist nicht eingerichtet (FHIR_API_KEY, FHIR_HOSTS).")
+    body = await request.json()
+    ap = _gdt_workstation(body.get("ap"))
+    try:
+        ctx = fhir.Context.from_dict({"kontext": body.get("kontextId"), "base": body.get("fhirBasisUrl"),
+                                      "token": body.get("oAuthToken")}, FHIR)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    device = "psy" if body.get("art") == "psycho" else ""
+    try:
+        patient = await fhir.read_patient(FHIR, ctx, VERSION)
+    except fhir.FhirError as e:
+        logger.warning(f"FHIR-Kontext an Arbeitsplatz {ap}: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    order = fhir.order_from_patient(patient, ctx, ap, time.time(), device)
+    logger.info(f"FHIR-Kontext an Arbeitsplatz {ap}: {order.label}"
+                + (" (Psychotherapie)" if device else ""))
+    return {"order": order.to_dict()}
+
+
 # ============================================================
 # STENO-KNOPF (client/steno.py)
 # ============================================================
 # Der Knopf auf dem Arbeitsplatz nimmt auf und laedt die Aufnahme hoch, mehr
-# nicht. Alles Weitere laeuft hier ohne offenen Browser bis zur GDT-Datei:
-# Transkription + Sprechertrennung, Modus bestimmen, Dokumentation, Ablage.
+# nicht. Alles Weitere laeuft hier ohne offenen Browser bis T2med:
+# Transkription + Sprechertrennung, Modus bestimmen, Dokumentation, Uebergabe.
 # Gesendet wird automatisch — geprueft wird in T2med; die Zuordnung kommt nur
 # aus dem Auftrag, den der Knopf beim Start beansprucht hat, ohne ihn geht
 # 3000=0 an "Ext. Aufträge".
+#
+# Zwei Wege nach T2med: kam der Auftrag per GDT ("Messung starten"), geht die
+# Dokumentation als GDT-Datei zurueck; kam er per FHIR (Drittanbieter-Knopf in
+# T2med, fhir.py), als FHIR-Transaktion in denselben Kontext. Lehnt T2med die
+# FHIR-Uebergabe ab (Token abgelaufen, Kontext verfallen), geht sie per GDT
+# ohne Patient an "Ext. Aufträge" — mit dem Namen im Kommentar, verloren geht
+# nichts.
 #
 # Bewusst nur im Speicher: die Aufnahme bleibt auf dem Arbeitsplatz liegen,
 # bis der Auftrag hier "gesendet" meldet. Kennt der Server die Auftrags-ID
@@ -1471,14 +1670,34 @@ async def gdt_send(request: Request):
 # "direkt" ist das Transkript selbst, ohne Sprachmodell: fuer Diktate und
 # alles, was schnell in der Kartei stehen soll. Mit Whisper allein steht es
 # Sekunden nach dem Stopp in T2med statt nach ein bis drei Minuten.
-STENO_STATES_DONE = ("gesendet", "fehler")
+#
+# Bloecke (STENO_BLOECKE): der Knopf schneidet die laufende Aufnahme an
+# Sprechpausen und schickt jeden Abschnitt sofort (POST /steno/jobs/{id}/blocks).
+# Transkribiert wird, waehrend noch aufgenommen wird; beim Stopp fehlt nur
+# noch der letzte Abschnitt. Die ganze Aufnahme kommt trotzdem nach dem Stopp
+# — fuer die Sprechertrennung, die das Gespraech am Stueck braucht, und als
+# Rueckfall: fehlt ein Block oder scheitert einer, wird wie bisher das Ganze
+# transkribiert. Die Bloecke beschleunigen, sie entscheiden nichts.
+#
+# Fortsetzen: eine fortgesetzte Aufnahme ist die vorige plus die neue, am Knopf
+# zu einer Datei verbunden, und ersetzt den vorigen Auftrag (`replaces`). Ist
+# der noch nicht in T2med, wird er abgebrochen ("ersetzt"); steht er schon
+# dort, sagt die neue Dokumentation, dass sie die aeltere ersetzt.
+STENO_STATES_DONE = ("gesendet", "fehler", "ersetzt")
 _STENO_ID_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
 _STENO_REQUEST_MODES = ("auto", "sprechstunde", "psycho", "direkt")
 _STENO_SEND_INTERVAL = 5.0
+_STENO_MAX_BLOCKS = 5000           # 120 min in Abschnitten von mind. ~1,5 s
+_STENO_MAX_STREAMS = 50
+_STENO_STREAM_MAX_AGE = 4 * 3600   # laenger nimmt kein Knopf auf (max_minuten)
 
 
 class StenoError(Exception):
     """Fehler mit einer Meldung, die so am Knopf stehen kann."""
+
+
+class StenoReplaced(Exception):
+    """Der Auftrag wurde durch eine fortgesetzte Aufnahme ersetzt."""
 
 
 @dataclass
@@ -1491,9 +1710,11 @@ class StenoJob:
     duration: float            # Sekunden laut Knopf
     audio_path: str
     filename: str
+    replaces: str = ""         # ID des Auftrags, den diese (fortgesetzte) Aufnahme ersetzt
+    replaces_started: datetime | None = None
     created: float = field(default_factory=time.time)
     finished: float = 0.0
-    state: str = "wartet"      # wartet, transkribiert, schreibt, sendet, gesendet, fehler
+    state: str = "wartet"      # wartet, transkribiert, schreibt, sendet, gesendet, fehler, ersetzt
     detail: str = ""
     mode: str = ""
     mode_note: str = ""        # z. B. "automatisch als Psychotherapie erkannt"
@@ -1501,8 +1722,10 @@ class StenoJob:
     transcript: str = ""
     text: str = ""
     warning: str = ""
-    file: str = ""
+    file: str = ""             # GDT-Datei oder "FHIR"
     patid: str = ""
+    cancelled: bool = False
+    task: asyncio.Task | None = None
 
     def to_dict(self, full: bool = False) -> dict:
         d = {
@@ -1518,23 +1741,68 @@ class StenoJob:
         return d
 
 
+@dataclass
+class StenoBlock:
+    seq: int
+    start: float               # Sekunden ab Aufnahmebeginn
+    end: float
+    task: asyncio.Task | None = None   # None = leerer Schlussblock
+    text: str = ""
+    units: list = field(default_factory=list)
+
+
+@dataclass
+class StenoStream:
+    """Die Bloecke einer laufenden Aufnahme, bis ihr Auftrag sie abholt."""
+    id: str
+    ap: str
+    created: float = field(default_factory=time.time)
+    blocks: dict = field(default_factory=dict)     # seq -> StenoBlock
+    final: int | None = None                       # seq des Schlussblocks
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 steno_jobs: dict[str, StenoJob] = {}
+steno_streams: dict[str, StenoStream] = {}
 _steno_tasks: set = set()
 # Je Stufe ein Auftrag nach dem anderen: Whisper, Diarisation und ollama sind
 # mit gespraech-web und ki-atteste geteilt, und drei gleichzeitig beendete
 # Sprechstunden sollen einander nicht in den Timeout treiben. Zwei Stufen statt
 # einer, damit ein Direkt-Transkript nicht hinter einer laufenden
 # Zusammenfassung wartet — und die naechste Transkription schon laeuft,
-# waehrend das Modell noch schreibt.
+# waehrend das Modell noch schreibt. Bloecke laufen in einer eigenen Schlange:
+# ein Abschnitt von zehn Sekunden soll nicht hinter der Transkription einer
+# ganzen Sitzung warten.
 _steno_audio = asyncio.Semaphore(1)
 _steno_llm = asyncio.Semaphore(1)
+_steno_blocks = asyncio.Semaphore(1)
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _steno_tasks.add(task)
+    task.add_done_callback(_steno_tasks.discard)
+    return task
+
+
+def _drop_stream(stream: StenoStream):
+    """Bloecke verwerfen: laufende Transkriptionen abbrechen, deren finally
+    loescht die Datei."""
+    for block in stream.blocks.values():
+        if block.task and not block.task.done():
+            block.task.cancel()
 
 
 def _steno_prune(now: float):
-    """Fertige Auftraege nach STENO_AUFBEWAHRUNG Stunden vergessen — samt Text."""
+    """Fertige Auftraege nach STENO_AUFBEWAHRUNG Stunden vergessen — samt Text.
+    Bloecke, deren Auftrag nie kam (Knopf abgestuerzt, Aufnahme verworfen),
+    nach _STENO_STREAM_MAX_AGE."""
     limit = STENO_AUFBEWAHRUNG * 3600
     for job_id in [j.id for j in steno_jobs.values() if j.finished and now - j.finished > limit]:
         del steno_jobs[job_id]
+    for stream in [s for s in steno_streams.values() if now - s.created > _STENO_STREAM_MAX_AGE]:
+        del steno_streams[stream.id]
+        _drop_stream(stream)
 
 
 async def _steno_mode(job: StenoJob, text: str, seconds: float) -> tuple[str, str]:
@@ -1571,9 +1839,70 @@ def _steno_loggable(job: StenoJob) -> bool:
     return logging_enabled and job.mode != "psycho" and not (job.order and job.order.device == "psy")
 
 
+async def _steno_block_transcribe(block: StenoBlock, path: str, filename: str):
+    """Ein Abschnitt; Zeitstempel auf die Zeitachse der ganzen Aufnahme."""
+    try:
+        async with _steno_blocks:
+            text, units = await _whisper_units(path, filename, "de")
+        block.text = text
+        block.units = [{**u, "start": u["start"] + block.start, "end": u["end"] + block.start}
+                       for u in units]
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+async def _steno_from_blocks(job: StenoJob, stream: StenoStream) -> Transcription | None:
+    """Transkript aus den Bloecken; None = nicht verwendbar, dann das Ganze.
+
+    Gewartet wird nur auf den Schlussblock — er ist winzig und kommt praktisch
+    immer vor der ganzen Aufnahme an. Bereinigt (Schleifen, Fachbegriffe) wird
+    erst das zusammengesetzte Transkript, genau wie eines aus einem Stueck.
+    """
+    try:
+        await asyncio.wait_for(stream.done.wait(), STENO_BLOCK_WARTEN)
+    except asyncio.TimeoutError:
+        reason = "Schlussblock kam nicht"
+    else:
+        blocks = [stream.blocks.get(i) for i in range(stream.final + 1)]
+        if None in blocks:
+            reason = f"{blocks.count(None)} Block/Blöcke fehlen"
+        else:
+            outcomes = await asyncio.gather(*(b.task for b in blocks if b.task),
+                                            return_exceptions=True)
+            failed = [o for o in outcomes if isinstance(o, BaseException)]
+            if not failed:
+                raw = " ".join(b.text.strip() for b in blocks if b.text.strip())
+                logger.info(f"Steno {job.id}: Transkript aus {len(blocks)} Blöcken")
+                return _clean_transcription(raw, "de", [u for b in blocks for u in b.units])
+            reason = f"Block nicht transkribiert: {_exc_text(failed[0])}"
+    logger.warning(f"Steno {job.id}: Blöcke nicht verwendbar ({reason}), transkribiere im Ganzen")
+    return None
+
+
 async def _steno_transcribe(job: StenoJob) -> tuple[Transcription, str | None]:
     job.state, job.detail = "transkribiert", ""
-    result, labeled = await _transcribe_and_diarize(job.audio_path, job.filename, "de")
+    # Die Sprechertrennung braucht immer die ganze Aufnahme und laeuft sofort
+    # los — mit Bloecken ist sie das Einzige, worauf nach dem Stopp noch
+    # gewartet wird.
+    diarization = asyncio.ensure_future(diarize_audio(job.audio_path, job.filename))
+    try:
+        stream = steno_streams.get(job.id)
+        result = None
+        if stream:
+            try:
+                result = await _steno_from_blocks(job, stream)
+            finally:
+                steno_streams.pop(job.id, None)
+                _drop_stream(stream)
+        if result is not None:
+            [segments] = await asyncio.gather(diarization, return_exceptions=True)
+            labeled = _label_speakers(result, segments)
+        else:
+            result, labeled = await _transcribe_and_diarize(job.audio_path, job.filename, "de",
+                                                            diarization)
+    finally:
+        if not diarization.done():
+            diarization.cancel()
     if _is_hallucination(result.text) or len(result.text.strip()) < 10:
         raise StenoError("Kein Gespräch in der Aufnahme erkannt.")
     job.transcript = labeled or result.text
@@ -1633,15 +1962,74 @@ async def _steno_write(job: StenoJob, result: Transcription, labeled: str | None
                   labeled is not None, result.loop_share)
 
 
-async def _steno_send(job: StenoJob):
-    """Ablegen; liegt die vorige Datei noch, wird gewartet statt ueberschrieben."""
-    job.state = "sendet"
+def _steno_check(job: StenoJob):
+    if job.cancelled:
+        raise StenoReplaced()
+
+
+def _steno_replace_note(job: StenoJob) -> str:
+    """Vermerk fuer eine fortgesetzte Aufnahme, deren Vorgaenger womoeglich
+    schon in T2med steht. Entschieden wird erst beim Senden: bis dahin hat sich
+    der Vorgaenger erledigt (abgebrochen oder gesendet)."""
+    if not job.replaces:
+        return ""
+    prev = steno_jobs.get(job.replaces)
+    if prev and prev.state in ("ersetzt", "fehler"):
+        return ""                              # nichts in T2med, das ersetzt werden muesste
+    when = prev.started if prev else (job.replaces_started or job.started)
+    if prev and prev.state == "gesendet":
+        return (f"Fortsetzung der Aufnahme von {when:%H:%M} – ersetzt die dort schon "
+                "übergebene Dokumentation. Die ältere bitte in T2med entfernen.")
+    return (f"Fortsetzung der Aufnahme von {when:%H:%M}. Falls deren Dokumentation schon in "
+            "T2med steht: die ältere entfernen.")
+
+
+def _fhir_patient(order: gdt.Order) -> str:
+    name = ", ".join(x for x in (order.last_name, order.first_name) if x)
+    if order.birth_date:
+        name += f", geb. {date.fromisoformat(order.birth_date):%d.%m.%Y}"
+    return name
+
+
+async def _steno_send_fhir(job: StenoJob, notes: list) -> bool:
+    """True = in T2med. False = T2med lehnt ab, weiter per GDT (der Grund steht
+    dann in `notes`). Wirft StenoError, wenn unklar ist, ob T2med uebernommen
+    hat — dann weder wiederholen noch per GDT nachschieben, sonst steht es
+    womoeglich doppelt in der Kartei."""
     deadline = time.monotonic() + STENO_SENDEN_WARTEN * 60
-    notes = (job.mode_note,) if job.mode_note else ()
     while True:
+        _steno_check(job)
         try:
-            target, record = _deliver_gdt(job.ap, job.order, job.text, job.transcript, job.mode,
-                                          job.model, job.started, job.warning, notes)
+            await _deliver_fhir(job.ap, job.order, job.text, job.transcript, job.mode, job.model,
+                                job.started, job.warning, tuple(notes), job.id)
+            return True
+        except fhir.FhirError as e:
+            if e.unclear:
+                raise StenoError(f"{e}. Ob T2med die Dokumentation übernommen hat, ist unklar – "
+                                 "bitte in T2med nachsehen, der Text steht im Verlauf.")
+            if e.retry and time.monotonic() < deadline:
+                job.detail = f"wartet auf den T2med-Server ({e})"
+                await asyncio.sleep(_STENO_SEND_INTERVAL)
+                continue
+            reason = str(e)
+        except ValueError as e:
+            reason = f"T2med-Kontext ungültig: {e}"
+        logger.warning(f"Steno {job.id}: FHIR-Übergabe gescheitert ({reason})")
+        if not GDT.enabled:
+            raise StenoError(f"FHIR-Übergabe gescheitert: {reason}")
+        notes.append(f"FHIR-Übergabe gescheitert ({reason}). "
+                     f"Patient laut T2med-Kontext: {_fhir_patient(job.order)}.")
+        return False
+
+
+async def _steno_send_gdt(job: StenoJob, order: gdt.Order | None, notes: list):
+    """Ablegen; liegt die vorige Datei noch, wird gewartet statt ueberschrieben."""
+    deadline = time.monotonic() + STENO_SENDEN_WARTEN * 60
+    while True:
+        _steno_check(job)
+        try:
+            target, record = _deliver_gdt(job.ap, order, job.text, job.transcript, job.mode,
+                                          job.model, job.started, job.warning, tuple(notes))
             break
         except FileExistsError:
             if time.monotonic() > deadline:
@@ -1651,7 +2039,30 @@ async def _steno_send(job: StenoJob):
             await asyncio.sleep(_STENO_SEND_INTERVAL)
         except OSError as e:
             raise StenoError(f"GDT-Ordner nicht beschreibbar: {e}")
-    job.file, job.patid, job.detail = target.name, record.get("3000") or "", ""
+    job.file, job.patid = target.name, record.get("3000") or ""
+
+
+async def _steno_send(job: StenoJob):
+    job.state = "sendet"
+    prev = steno_jobs.get(job.replaces) if job.replaces else None
+    if prev and prev.task and not prev.task.done():
+        # Abgebrochen ist er schon (_steno_replace) — nur noch abwarten, ob er
+        # vorher in T2med ankam. Eine Wartepause bei GDT, eine Anfrage bei FHIR.
+        await asyncio.wait({prev.task}, timeout=FHIR.timeout + 2 * _STENO_SEND_INTERVAL)
+    notes = [n for n in (job.mode_note, _steno_replace_note(job)) if n]
+    order = job.order
+    if order and order.fhir:
+        if FHIR.enabled and await _steno_send_fhir(job, notes):
+            job.file, job.patid = "FHIR", order.patid
+        else:
+            if not FHIR.enabled:
+                notes.append(f"FHIR ist auf dem Server abgeschaltet. "
+                             f"Patient laut T2med-Kontext: {_fhir_patient(order)}.")
+            # Die Objekt-ID aus FHIR ist keine Patientennummer: ohne Patient senden
+            await _steno_send_gdt(job, None, notes)
+    else:
+        await _steno_send_gdt(job, order, notes)
+    job.detail = ""
     job.state = "gesendet"
 
 
@@ -1659,12 +2070,19 @@ async def _steno_run(job: StenoJob):
     try:
         async with _steno_audio:
             result, labeled = await _steno_transcribe(job)
+        _steno_check(job)
         if job.request_mode == "direkt":
             _steno_direct(job, result, labeled)
         elif not _steno_short(job, result, labeled):
             async with _steno_llm:
                 await _steno_write(job, result, labeled)
         await _steno_send(job)
+    except StenoReplaced:
+        job.state, job.detail = "ersetzt", "durch die fortgesetzte Aufnahme ersetzt"
+    except asyncio.CancelledError:
+        if not job.cancelled:
+            raise                              # Server faehrt herunter
+        job.state, job.detail = "ersetzt", "durch die fortgesetzte Aufnahme ersetzt"
     except StenoError as e:
         job.state, job.detail = "fehler", str(e)
     except Exception as e:
@@ -1678,6 +2096,20 @@ async def _steno_run(job: StenoJob):
                     + (f", {job.file}" if job.file else ""))
 
 
+def _steno_replace(job_id: str):
+    """Vorgaenger einer fortgesetzten Aufnahme abbrechen, solange er nicht in
+    T2med steht. Laeuft er schon zum Senden, nur vormerken: eine GDT-Datei
+    wird dann gar nicht erst abgelegt, eine FHIR-Anfrage unterwegs laeuft zu
+    Ende — das klaert _steno_replace_note()."""
+    prev = steno_jobs.get(job_id)
+    if not prev or prev.finished:
+        return
+    prev.cancelled = True
+    if prev.state != "sendet" and prev.task and not prev.task.done():
+        prev.task.cancel()
+    logger.info(f"Steno {job_id}: wird durch eine fortgesetzte Aufnahme ersetzt")
+
+
 @app.get("/steno")
 async def steno_config():
     """Was der Knopf beim Start wissen muss."""
@@ -1685,6 +2117,9 @@ async def steno_config():
         "version": VERSION, "gdt": GDT.enabled,
         "workstations": GDT.workstations if GDT.enabled else {},
         "psy_device": GDT.enabled and GDT.psy_device,
+        "fhir": FHIR.enabled,
+        "bloecke": "" if STENO_BLOECKE == "aus" else STENO_BLOECKE,
+        "diktat": True,
     }
 
 
@@ -1697,6 +2132,8 @@ async def steno_job_create(
     mode: str = Form(default="auto"),
     started: str = Form(default=""),
     duration: float = Form(default=0.0),
+    replaces: str = Form(default=""),
+    replaces_started: str = Form(default=""),
 ):
     """Aufnahme vom Knopf annehmen und im Hintergrund bis T2med durchreichen.
 
@@ -1705,7 +2142,7 @@ async def steno_job_create(
     Karteikarte.
     """
     ap = _gdt_workstation(ap)
-    if not _STENO_ID_RE.fullmatch(id):
+    if not _STENO_ID_RE.fullmatch(id) or (replaces and not _STENO_ID_RE.fullmatch(replaces)):
         raise HTTPException(status_code=400, detail="Ungültige Auftrags-ID.")
     if mode not in _STENO_REQUEST_MODES:
         raise HTTPException(status_code=400, detail=f"Unbekannter Modus '{mode}'.")
@@ -1713,18 +2150,110 @@ async def steno_job_create(
     if id in steno_jobs:
         return steno_jobs[id].to_dict()
     parsed_order = _parse_order(order)
+    if parsed_order and parsed_order.fhir and FHIR.enabled:
+        try:
+            fhir.Context.from_dict(parsed_order.fhir, FHIR)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Ungültiger T2med-Kontext: {e}")
     tmp_path = await _save_upload(audio)
     job = StenoJob(id=id, ap=ap, order=parsed_order, request_mode=mode,
                    started=_parse_started(started), duration=max(0.0, duration),
-                   audio_path=tmp_path, filename=audio.filename or "aufnahme.flac")
+                   audio_path=tmp_path, filename=audio.filename or "aufnahme.flac",
+                   replaces=replaces,
+                   replaces_started=_parse_started(replaces_started) if replaces_started else None)
     steno_jobs[id] = job
     logger.info(f"Steno {id} ({ap}): {os.path.getsize(tmp_path) / 1_048_576:.1f} MB, "
                 f"{job.duration / 60:.1f} min, Modus {mode}, "
-                f"{parsed_order.label if parsed_order else 'ohne Auftrag'}")
-    task = asyncio.create_task(_steno_run(job))
-    _steno_tasks.add(task)
-    task.add_done_callback(_steno_tasks.discard)
+                f"{parsed_order.label if parsed_order else 'ohne Auftrag'}"
+                + (f", {len(steno_streams[id].blocks)} Blöcke" if id in steno_streams else "")
+                + (f", ersetzt {replaces}" if replaces else ""))
+    if replaces:
+        _steno_replace(replaces)
+    job.task = _spawn(_steno_run(job))
     return job.to_dict()
+
+
+@app.post("/steno/jobs/{job_id}/blocks")
+async def steno_block(
+    job_id: str,
+    ap: str = Form(...),
+    seq: int = Form(...),
+    start: float = Form(...),
+    end: float = Form(...),
+    final: str = Form(default="false"),
+    audio: UploadFile | None = File(default=None),
+):
+    """Abschnitt einer laufenden Aufnahme (siehe oben, Bloecke). Ohne Datei:
+    leerer Schlussblock. Derselbe Abschnitt noch einmal wird ignoriert."""
+    ap = _gdt_workstation(ap)
+    if STENO_BLOECKE == "aus":
+        raise HTTPException(status_code=404, detail="Blöcke sind abgeschaltet (STENO_BLOECKE).")
+    if not _STENO_ID_RE.fullmatch(job_id):
+        raise HTTPException(status_code=400, detail="Ungültige Auftrags-ID.")
+    if not 0 <= seq < _STENO_MAX_BLOCKS or not 0 <= start <= end:
+        raise HTTPException(status_code=400, detail="Ungültiger Abschnitt.")
+    _steno_prune(time.time())
+    stream = steno_streams.get(job_id)
+    if stream is None:
+        if job_id in steno_jobs:
+            return {"accepted": False}         # zu spaet: der Auftrag laeuft schon im Ganzen
+        if len(steno_streams) >= _STENO_MAX_STREAMS:
+            raise HTTPException(status_code=503, detail="Zu viele laufende Aufnahmen.")
+        stream = steno_streams[job_id] = StenoStream(id=job_id, ap=ap)
+    elif stream.ap != ap:
+        raise HTTPException(status_code=400, detail="Arbeitsplatz passt nicht zur Aufnahme.")
+    if seq not in stream.blocks:
+        block = StenoBlock(seq=seq, start=start, end=end)
+        if audio is not None and audio.filename:
+            path = await _save_upload(audio)
+            block.task = _spawn(_steno_block_transcribe(block, path, audio.filename))
+        stream.blocks[seq] = block
+    if _flag(final) and stream.final is None:
+        stream.final = seq
+        stream.done.set()
+    return {"accepted": True}
+
+
+@app.delete("/steno/jobs/{job_id}/blocks")
+async def steno_blocks_drop(job_id: str):
+    """Aufnahme verworfen: ihre Abschnitte gehoeren nicht auf den Server."""
+    stream = steno_streams.pop(job_id, None)
+    if stream:
+        _drop_stream(stream)
+    return {"dropped": stream is not None}
+
+
+@app.post("/steno/diktat")
+async def steno_dictation(ap: str = Form(...), audio: UploadFile = File(...)):
+    """Diktat (Knopf, Direkt): ein Abschnitt, der Text kommt sofort zurueck und
+    der Knopf gibt ihn an der Schreibmarke ein. Kein Auftrag, kein T2med, kein
+    Log — der Text bleibt nirgends auf dem Server liegen.
+
+    Medizin-Modell und dieselbe Bereinigung wie fuer Gespraeche (Schleifen,
+    verhoerte Fachbegriffe), dazu Diktierbefehle ("neue Zeile", "Komma" …,
+    apply_dictation_commands()). Ein Abschnitt, der nur aus einem bekannten
+    Whisper-Baustein besteht ("Vielen Dank."), ist meist Stille und kommt leer
+    zurueck. Die Schlange teilt er sich mit den Bloecken: was live mitlaeuft,
+    soll nicht hinter einer ganzen Aufnahme warten.
+    """
+    ap = _gdt_workstation(ap)
+    tmp_path = await _save_upload(audio)
+    t0 = time.monotonic()
+    try:
+        async with _steno_blocks:
+            result = await transcribe_audio(tmp_path, audio.filename or "diktat.flac", "de")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Diktat ({ap}): {_exc_text(e)}")
+        raise HTTPException(status_code=502, detail=f"Whisper nicht erreichbar: {_exc_text(e)}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    text = "" if _is_hallucination(result.text) else result.text
+    text, commands = apply_dictation_commands(text)
+    logger.info(f"Diktat ({ap}): {len(text.split())} Wörter, {commands} Befehle "
+                f"in {time.monotonic() - t0:.1f} s")
+    return {"text": text, "loop_share": round(result.loop_share, 3)}
 
 
 @app.get("/steno/jobs/{job_id}")

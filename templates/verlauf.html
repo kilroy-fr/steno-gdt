@@ -25,6 +25,7 @@
              background: var(--run); }
     .state.gesendet { background: var(--ok); }
     .state.fehler { background: var(--err); }
+    .state.ersetzt { background: var(--muted); }
     .detail { margin-top: 6px; color: var(--err); }
     .detail.info { color: var(--muted); }
     .warning { margin-top: 6px; color: var(--run); }
@@ -55,9 +56,10 @@
     // Nachschau fuer die Auftraege des Steno-Knopfs. Gesendet wird von hier
     // nichts: das hat der Server laengst getan; was fehlschlug, steht dabei.
     const STATES = { wartet: "wartet", transkribiert: "transkribiert", schreibt: "schreibt",
-                     sendet: "sendet", gesendet: "an T2med", fehler: "Fehler" };
+                     sendet: "sendet", gesendet: "an T2med", fehler: "Fehler",
+                     ersetzt: "ersetzt" };
     const MODES = { abpro: "A/B/PRO", analyze: "Analyse", summary: "Zusammenfassung",
-                    psycho: "Psychotherapie", clean: "Bereinigung" };
+                    psycho: "Psychotherapie", clean: "Bereinigung", direkt: "Direkt" };
     const select = document.getElementById("ap");
     const list = document.getElementById("jobs");
 
@@ -75,7 +77,8 @@
           <span class="state ${esc(j.state)}">${esc(STATES[j.state] || j.state)}</span>
           <span class="patient">${esc(j.patient || "Ohne Patient (Ext. Aufträge)")}</span>
           <span class="meta">${esc(started)} · ${Math.round(j.duration / 60)} min · AP ${esc(j.ap)}` +
-          (j.mode ? ` · ${esc(MODES[j.mode] || j.mode)}` : "") + `</span>
+          (j.mode ? ` · ${esc(MODES[j.mode] || j.mode)}` : "") +
+          (j.file === "FHIR" ? " · per FHIR" : "") + `</span>
         </div>
         ${j.detail ? `<div class="detail ${info ? "info" : ""}">${esc(j.detail)}</div>` : ""}
         ${j.mode_note ? `<div class="detail info">${esc(j.mode_note)}</div>` : ""}

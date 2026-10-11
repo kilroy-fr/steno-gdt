@@ -9,5 +9,6 @@
 !prompts.py
 !medical_vocab.py
 !gdt.py
+!fhir.py
 !templates/
 !static/

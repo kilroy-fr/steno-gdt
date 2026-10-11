@@ -1,6 +1,6 @@
 # Steno
 
-Schreibt Arzt-Patienten-Gespräche und Psychotherapie-Sitzungen mit, fasst sie zusammen und übergibt die Dokumentation per GDT an T2med. Lokal: faster-whisper für die Transkription, pyannote für die Sprechertrennung, ollama für die Zusammenfassung.
+Schreibt Arzt-Patienten-Gespräche und Psychotherapie-Sitzungen mit, fasst sie zusammen und übergibt die Dokumentation per GDT (optional per FHIR) an T2med. Lokal: faster-whisper für die Transkription, pyannote für die Sprechertrennung, ollama für die Zusammenfassung.
 
 Abzweig von [`ki-transcribe`](../ki-transcribe) — und inzwischen auch dessen Codebasis: `gespraech-web` (KI-Gesprächsanalyse) wird aus diesem Ordner gebaut, nur ohne T2med-Anbindung. Dieser Ordner bringt den Server mit (`transcribe-gdt-web`, Port 8011) und den Steno-Knopf für die Arbeitsplätze ([`client/`](client/README.md)). Whisper, Sprechertrennung und ollama werden mitbenutzt: `diktat-whisper` und `diktat-diarize` aus `ki-transcribe`, `ollama` aus seinem eigenen Container.
 
@@ -11,9 +11,11 @@ Ein runder Knopf, der immer vor T2med liegt:
 1. In T2med beim Patienten **„Messung starten“**. Der Knopf wird rot (■) und nimmt auf.
 2. Am Ende **■** klicken. 1–3 Minuten später steht die Dokumentation in der Karteikarte, als KI-generiert gekennzeichnet.
 
+Statt „Messung starten“ geht auch der Drittanbieter-Knopf **„Steno“** in der T2med-Menüleiste (FHIR, optional). Bis 10 Minuten nach ■ lässt sich eine Aufnahme über das Menü fortsetzen. „Direkt“ (grün) ist ein Diktat: der Text erscheint fast in Echtzeit an der Schreibmarke, ohne Patient und ohne T2med-Übergabe.
+
 Ohne „Messung starten“ nimmt ein Klick auf ▶ „ohne Patient“ auf, und die Dokumentation landet unter „Ext. Aufträge“. Für verhaltenstherapeutische Sitzungen gibt es eine eigene, ausführlichere Zusammenfassung. Sie wird über ein zweites T2med-Gerät, per Rechtsklick am Knopf oder bei langen Aufnahmen automatisch gewählt. Aufgenommen wird nur auf Anforderung, nie dauerhaft.
 
-Einrichtung: [`client/README.md`](client/README.md) (Knopf) und [`T2MED-EINRICHTUNG.md`](T2MED-EINRICHTUNG.md) (T2med, Austauschordner). Nachschau im Browser: `/verlauf`.
+Einrichtung: [`client/README.md`](client/README.md) (Knopf) und [`T2MED-EINRICHTUNG.md`](T2MED-EINRICHTUNG.md) (T2med, Austauschordner, FHIR). Nachschau im Browser: `/verlauf`.
 
 ## 🎯 Features
 
@@ -33,6 +35,8 @@ Einrichtung: [`client/README.md`](client/README.md) (Knopf) und [`T2MED-EINRICHT
 - A/B/PRO-Modus zeigt zusätzlich drei separat kopierbare Karten (Anamnese / Befund / Procedere)
 - Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe, auch nachträglich per Rerun auf der Analyse-Karte
 - „Nächster Patient"-Button: beendet Aufnahme, startet Analyse und sofort eine neue Aufnahme
+- „＋ Fortsetzen": hängt nach der Analyse weitere Aufnahme an dieselbe an, alles zusammen wird neu analysiert
+- Live-Transkript in Abschnitten, geschnitten an Sprechpausen statt alle 30 s
 - Verlauf mehrerer Analysen innerhalb einer Sitzung
 - Automatische Betreffzeile per KI
 - Live-Streaming der LLM-Antwort (SSE)
@@ -363,7 +367,10 @@ Der Code liegt auf GitHub im privaten Repo [`kilroy-fr/steno-gdt`](https://githu
 
 ## 📝 Changelog
 
-### Version 0.12 (aktuell)
+### Version 0.32 (aktuell)
+- Knopf **Direkt** = Diktat an die Schreibmarke: Abschnitte an `/steno/diktat`, Text per Tastatureingabe ins Fenster im Vordergrund, keine GDT/FHIR-Übergabe; Direkt bleibt gewählt
+
+### Version 0.12
 - Modus **Direkt** (grün am Knopf): das Transkript selbst geht nach T2med, ohne Sprachmodell, wenige Sekunden nach dem Stopp
 - Knopf: Fenster so groß wie der Knopf, Ecken durchsichtig; Patient, Laufzeit und Zustand im Hinweisfenster; gespeicherter Platz nur auf einem angeschlossenen Monitor
 - `GDT_DEBUG_DIR`: Kopie jeder Übergabe an T2med zum Einrichten

@@ -9,15 +9,11 @@ let audioBlob = null;
 let uploadedFile = null;
 let timerInterval = null;
 let timerSeconds = 0;
-let liveTranscriptIntervalId = null;
-let isTranscribingLive = false;
 let liveTranscriptText = null;
 let liveTranscriptParts = [];
-let lastTranscribedChunkIndex = 0;
 let recordingStartTime = null;
 let analysisHistory = [];
 let nextPatientPending = false;
-let stopHandled = false;
 let currentTranscript = "";
 let selectedGender = "neutral";   // Geschlecht für die laufende Aufnahme (linke Spalte)
 let analysisGender = "neutral";   // Geschlecht der angezeigten Analyse (rechte Spalte)
@@ -49,6 +45,7 @@ document.addEventListener("DOMContentLoaded", () => {
     nextPatientPending = true;
     stopRecording();
   });
+  document.getElementById("continueBtn").addEventListener("click", continueRecording);
   document.getElementById("analyzeBtn").addEventListener("click", startAnalysis);
   initUploadZone();
   requestMicPermissionOnLoad();
@@ -285,83 +282,248 @@ const MIC_PROCESSING = {
 // knapp 30 MB.
 const RECORDER_BITRATE = 64000;
 
-async function startRecording() {
-  try {
-    const selectedMic = document.getElementById("micSelect")?.value;
-    const audioConstraints = selectedMic
-      ? { ...MIC_PROCESSING, deviceId: { exact: selectedMic } }
-      : MIC_PROCESSING;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-    // Labels sind jetzt verfügbar — Liste mit echten Namen füllen
-    await populateMicrophoneList();
+// Aufgenommen wird ueber einen Web-Audio-Graphen statt direkt vom Mikrofon:
+//   Mikrofon -> recDest -> mediaRecorder   (die ganze Aufnahme, fuer /analyze)
+//            -> levelNode (Pegel je 100 ms) -> PauseCutter
+//   recDest  -> blockRecorder              (ein Abschnitt fuer die Live-Vorschau)
+// Zwei Gruende: der Pegel schneidet die Vorschau an Sprechpausen statt alle
+// 30 s mitten im Wort, und "Fortsetzen" haengt ein neues Mikrofon an denselben
+// recDest — die Aufnahme bleibt EINE Datei (pause/resume), und die Sprecher-
+// trennung sieht das ganze Gespraech, nicht zwei Haelften mit vertauschten
+// SPRECHER A/B.
+let audioCtx = null;
+let workletReady = null;     // Promise<boolean>: AudioWorklet geladen?
+let recDest = null;
+let micStream = null;
+let micSource = null;
+let levelNode = null;        // AudioWorkletNode, im Rueckfall AnalyserNode
+let levelTimer = null;
+let cutter = null;
+let blockRecorder = null;
+let liveSession = 0;         // Ergebnisse frueherer Abschnitte verwerfen
+let liveQueue = [];
+let liveWorkerRunning = false;
+let recorderMime = "audio/webm";
+let continuing = false;      // laufende Aufnahme ist eine Fortsetzung
+let continueBase = "";       // ... und das ist das Transkript des ersten Teils
+let recordingEntryId = null; // Verlaufseintrag der (pausierten) Aufnahme
+let analysisRunning = false;
 
-    audioChunks = [];
-    isTranscribingLive = false;
-    liveTranscriptText = null;
-    liveTranscriptParts = [];
-    lastTranscribedChunkIndex = 0;
-    stopHandled = false;
-    recordingStartTime = new Date();
-    recordingOrder = claimOpenOrder();
+// Abschnitte fuer die Live-Vorschau — dieselben Regeln wie beim Steno-Knopf
+// (Segmenter in client/steno.py): Schwelle folgt dem Raum (unteres Fuenftel
+// der letzten 8 s, verdoppelt, -46 bis -29 dBFS); Schnitt nach 0,8 s Pause,
+// wenn schon 4 s gesprochen wurden, sonst nach 1,5 s; ab 20 s an der ersten
+// leisen Stelle, spaetestens nach 30 s. Geschnitten wird "jetzt", also am Ende
+// der Pause — ein neuer Recorder beginnt, wo der alte aufhoert.
+const CUT = { pause: 0.8, shortPause: 1.5, minLen: 4, maxLen: 20, hardMax: 30, frame: 0.1,
+              history: 80, quantile: 0.2, factor: 2, minLevel: 10 ** (-46 / 20), maxLevel: 10 ** (-29 / 20) };
 
-    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-      ? "audio/webm;codecs=opus"
-      : "audio/webm";
+class PauseCutter {
+  constructor(onCut) {
+    this.onCut = onCut;
+    this.history = [];
+    this.reset();
+  }
 
-    mediaRecorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: RECORDER_BITRATE });
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) audioChunks.push(e.data);
-    };
-    mediaRecorder.onstop = onRecordingStop;
-    mediaRecorder.start(500);
-    renderPatientPanel();
+  reset() {
+    this.length = 0;
+    this.lastLoud = 0;
+    this.speech = false;
+  }
 
-    // Live-Transkription: erst 30s nach Abschluss des vorherigen Chunks starten
-    liveTranscriptIntervalId = setTimeout(runLiveTranscriptionLoop, 30000);
+  threshold() {
+    const sorted = [...this.history].sort((a, b) => a - b);
+    const noise = sorted.length ? sorted[Math.floor((sorted.length - 1) * CUT.quantile)] : 0;
+    return Math.min(Math.max(noise * CUT.factor, CUT.minLevel), CUT.maxLevel);
+  }
 
-    // UI
-    const btn = document.getElementById("recordBtn");
-    btn.textContent = "■ Aufnahme beenden";
-    btn.classList.add("recording");
-    document.getElementById("nextPatientBtn").style.display = "";
-    document.getElementById("recordTimer").classList.add("running");
-    document.getElementById("recordHint").textContent =
-      "Aufnahme läuft... Erneut klicken zum Beenden.";
-    // Vorherige Analyse ausblenden – bleibt über History-Buttons abrufbar
-    document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
-    document.getElementById("analysisSection").style.display = "none";
-    document.getElementById("abproCards").style.display = "none";
-    document.getElementById("genderRerun").style.display = "none";
-    showEntryT2med(null);
-    const prevAe = document.getElementById("analysisText");
-    prevAe.innerHTML = "";
-    prevAe.dataset.raw = "";
-
-    // Live-Transkript-Bereich vorbereiten
-    document.getElementById("emptyState").style.display = "none";
-    document.getElementById("transcriptSection").style.display = "block";
-    const transcriptTextEl = document.getElementById("transcriptText");
-    transcriptTextEl.classList.remove("streaming");
-    transcriptTextEl.textContent = "Transkription beginnt nach 30 Sekunden...";
-
-    // Timer
-    timerSeconds = 0;
-    updateTimer();
-    timerInterval = setInterval(updateTimer, 1000);
-  } catch (e) {
-    document.getElementById("recordHint").textContent =
-      "Mikrofon-Zugriff verweigert. Bitte Berechtigung erteilen.";
-    console.error(e);
+  feed(level) {
+    this.history.push(level);
+    if (this.history.length > CUT.history) this.history.shift();
+    this.length += CUT.frame;
+    const loud = level > this.threshold();
+    if (loud) {
+      this.speech = true;
+      this.lastLoud = this.length;
+    }
+    if (!this.speech) return;
+    const pause = this.length - this.lastLoud;
+    if ((pause >= CUT.pause && (this.lastLoud >= CUT.minLen || pause >= CUT.shortPause))
+        || (this.length >= CUT.maxLen && !loud) || this.length >= CUT.hardMax) {
+      this.reset();
+      this.onCut(true);
+    }
   }
 }
 
+async function ensureAudioContext() {
+  if (!audioCtx) {
+    audioCtx = new AudioContext();
+    workletReady = audioCtx.audioWorklet
+      ? audioCtx.audioWorklet.addModule(`/static/level-worklet.js?v=${window.APP_CONFIG?.version ?? ""}`)
+          .then(() => true, (e) => { console.warn("Pegel-Worklet nicht geladen:", e); return false; })
+      : Promise.resolve(false);
+  }
+  if (audioCtx.state === "suspended") await audioCtx.resume();
+  return audioCtx;
+}
+
+async function connectMic() {
+  const selectedMic = document.getElementById("micSelect")?.value;
+  const audioConstraints = selectedMic
+    ? { ...MIC_PROCESSING, deviceId: { exact: selectedMic } }
+    : MIC_PROCESSING;
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+  // Labels sind jetzt verfügbar — Liste mit echten Namen füllen
+  await populateMicrophoneList();
+  const ctx = await ensureAudioContext();
+  micSource = ctx.createMediaStreamSource(micStream);
+  micSource.connect(recDest);
+  // Stumm an die Lautsprecher: nur so rechnet jeder Browser den Zweig sicher mit
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
+  mute.connect(ctx.destination);
+  if (await workletReady) {
+    levelNode = new AudioWorkletNode(ctx, "level-meter");
+    levelNode.port.onmessage = (e) => cutter?.feed(e.data);
+  } else {
+    // Rueckfall ohne AudioWorklet: Pegel per Timer — im Hintergrund gedrosselt
+    levelNode = ctx.createAnalyser();
+    levelNode.fftSize = 2048;
+    const buf = new Float32Array(levelNode.fftSize);
+    levelTimer = setInterval(() => {
+      levelNode.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (const v of buf) sum += v * v;
+      cutter?.feed(Math.sqrt(sum / buf.length));
+    }, CUT.frame * 1000);
+  }
+  micSource.connect(levelNode);
+  levelNode.connect(mute);
+}
+
+function disconnectMic() {
+  clearInterval(levelTimer);
+  levelTimer = null;
+  try { micSource?.disconnect(); } catch { /* schon getrennt */ }
+  try { levelNode?.disconnect(); } catch { /* schon getrennt */ }
+  if (levelNode?.port) levelNode.port.onmessage = null;
+  micStream?.getTracks().forEach((t) => t.stop());
+  micSource = levelNode = micStream = null;
+}
+
+// Eine pausierte (fortsetzbare) Aufnahme endet, wenn eine neue beginnt.
+function discardPausedRecording() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.ondataavailable = null;
+    mediaRecorder.stop();
+  }
+  mediaRecorder = null;
+  recDest = null;
+  recordingEntryId = null;
+  continuing = false;
+  updateContinueBtn();
+}
+
+async function startRecording() {
+  discardPausedRecording();
+  try {
+    const ctx = await ensureAudioContext();
+    recDest = ctx.createMediaStreamDestination();
+    recDest.channelCount = 1;
+    await connectMic();
+  } catch (e) {
+    disconnectMic();
+    document.getElementById("recordHint").textContent =
+      "Mikrofon-Zugriff verweigert. Bitte Berechtigung erteilen.";
+    console.error(e);
+    return;
+  }
+
+  audioChunks = [];
+  liveTranscriptText = null;
+  liveTranscriptParts = [];
+  continueBase = "";
+  recordingStartTime = new Date();
+  recordingOrder = claimOpenOrder();
+
+  recorderMime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "audio/webm";
+  mediaRecorder = new MediaRecorder(recDest.stream, { mimeType: recorderMime, audioBitsPerSecond: RECORDER_BITRATE });
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) audioChunks.push(e.data);
+  };
+  mediaRecorder.start(500);
+  startLive();
+  renderPatientPanel();
+
+  showRecordingUi("Transkription beginnt nach der ersten Sprechpause...");
+  timerSeconds = 0;
+  updateTimer();
+  timerInterval = setInterval(updateTimer, 1000);
+}
+
+// Die letzte Aufnahme fortsetzen: neues Mikrofon an denselben Recorder, der
+// nur pausiert war. Am Ende wird alles zusammen neu analysiert, und die
+// Analyse ersetzt die vorige im Verlauf (gleicher Patient, gleiche Uhrzeit).
+async function continueRecording() {
+  if (!mediaRecorder || mediaRecorder.state !== "paused" || analysisRunning) return;
+  try {
+    await connectMic();
+  } catch (e) {
+    disconnectMic();
+    document.getElementById("recordHint").textContent =
+      "Mikrofon-Zugriff verweigert. Bitte Berechtigung erteilen.";
+    console.error(e);
+    return;
+  }
+  continuing = true;
+  continueBase = currentTranscript || "";
+  liveTranscriptText = null;
+  liveTranscriptParts = [];
+  mediaRecorder.resume();
+  startLive();
+  renderPatientPanel();
+  showRecordingUi("Fortsetzung läuft – das Live-Transkript wird angehängt.");
+  if (continueBase) showLiveTranscript();
+  timerInterval = setInterval(updateTimer, 1000);
+}
+
+function showRecordingUi(transcriptHint) {
+  const btn = document.getElementById("recordBtn");
+  btn.textContent = "■ Aufnahme beenden";
+  btn.classList.add("recording");
+  document.getElementById("nextPatientBtn").style.display = "";
+  updateContinueBtn();
+  document.getElementById("recordTimer").classList.add("running");
+  document.getElementById("recordHint").textContent =
+    "Aufnahme läuft... Erneut klicken zum Beenden.";
+  // Vorherige Analyse ausblenden – bleibt über History-Buttons abrufbar
+  document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
+  document.getElementById("analysisSection").style.display = "none";
+  document.getElementById("abproCards").style.display = "none";
+  document.getElementById("genderRerun").style.display = "none";
+  showEntryT2med(null);
+  const prevAe = document.getElementById("analysisText");
+  prevAe.innerHTML = "";
+  prevAe.dataset.raw = "";
+
+  // Live-Transkript-Bereich vorbereiten
+  document.getElementById("emptyState").style.display = "none";
+  document.getElementById("transcriptSection").style.display = "block";
+  const transcriptTextEl = document.getElementById("transcriptText");
+  transcriptTextEl.classList.remove("streaming");
+  transcriptTextEl.textContent = transcriptHint;
+}
+
 function stopRecording() {
-  if (!mediaRecorder || mediaRecorder.state === "inactive") return;
-  mediaRecorder.stop();
-  mediaRecorder.stream.getTracks().forEach((t) => t.stop());
+  if (!mediaRecorder || mediaRecorder.state !== "recording") return;
+  stopLive();
+  disconnectMic();
+  // Pausieren statt beenden: so laesst sich die Aufnahme noch fortsetzen.
+  mediaRecorder.pause();
   clearInterval(timerInterval);
-  clearTimeout(liveTranscriptIntervalId);
-  liveTranscriptIntervalId = null;
 
   const btn = document.getElementById("recordBtn");
   btn.textContent = "● Aufnahme starten";
@@ -371,72 +533,117 @@ function stopRecording() {
   document.getElementById("recordHint").textContent =
     nextPatientPending ? "Analyse läuft... Neue Aufnahme startet danach automatisch." : "Aufnahme beendet. Analyse wird gestartet...";
   renderPatientPanel();
+  finishRecording();
 }
 
-async function runLiveTranscriptionLoop() {
-  await transcribeLiveChunk();
-  // Nächsten Chunk erst 30s NACH Abschluss planen (nicht nach Start)
-  if (mediaRecorder && mediaRecorder.state === "recording") {
-    liveTranscriptIntervalId = setTimeout(runLiveTranscriptionLoop, 30000);
+async function finishRecording() {
+  // Was der Recorder noch haelt, abholen — erst dann ist die Aufnahme vollstaendig.
+  const recorder = mediaRecorder;
+  await Promise.race([
+    new Promise((resolve) => {
+      recorder.addEventListener("dataavailable", resolve, { once: true });
+      recorder.requestData();
+    }),
+    new Promise((resolve) => setTimeout(resolve, 2000)),
+  ]);
+  audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+  startAnalysis();
+}
+
+// ---------------------------------------------------------------- Live-Vorschau
+function startLive() {
+  const session = ++liveSession;
+  liveQueue = [];
+  cutter = new PauseCutter(() => cutBlock(session));
+  startBlockRecorder(session);
+}
+
+function stopLive() {
+  liveSession++;                 // Ergebnisse noch laufender Abschnitte verwerfen
+  cutter = null;
+  if (blockRecorder && blockRecorder.state !== "inactive") {
+    blockRecorder.keep = false;  // die volle Analyse kommt ohnehin gleich
+    blockRecorder.stop();
   }
+  blockRecorder = null;
+  liveQueue = [];
 }
 
-async function transcribeLiveChunk() {
-  // Mindestens ~10 Sekunden neues Audio (500ms-Chunks × 20)
-  if (isTranscribingLive || audioChunks.length - lastTranscribedChunkIndex < 20) return;
+function startBlockRecorder(session) {
+  const chunks = [];
+  const rec = new MediaRecorder(recDest.stream, { mimeType: recorderMime, audioBitsPerSecond: RECORDER_BITRATE });
+  rec.keep = true;
+  rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+  rec.onstop = () => {
+    if (rec.keep && session === liveSession && chunks.length) {
+      liveQueue.push({ session, blob: new Blob(chunks, { type: "audio/webm" }) });
+      if (!liveWorkerRunning) runLiveWorker();
+    }
+  };
+  rec.start();
+  blockRecorder = rec;
+}
 
-  isTranscribingLive = true;
-  const capturedIndex = audioChunks.length;
+function cutBlock(session) {
+  if (session !== liveSession || !blockRecorder) return;
+  const finished = blockRecorder;
+  startBlockRecorder(session);
+  finished.stop();
+}
+
+// Ein Abschnitt nach dem anderen, damit die Reihenfolge stimmt.
+async function runLiveWorker() {
+  liveWorkerRunning = true;
   try {
-    // Nur neue Chunks senden; Chunk 0 (WebM-Header) immer voranstellen
-    const newChunks = lastTranscribedChunkIndex === 0
-      ? audioChunks.slice(0, capturedIndex)
-      : [audioChunks[0], ...audioChunks.slice(lastTranscribedChunkIndex, capturedIndex)];
-
-    const blob = new Blob(newChunks, { type: "audio/webm" });
-    const formData = new FormData();
-    formData.append("audio", blob, "chunk.webm");
-    formData.append("lang_mode", getLangMode());
-
-    const r = await fetch("/transcribe-only", { method: "POST", body: formData });
-    if (r.ok) {
-      const data = await r.json();
-      // Schon die Vorschau meldet eine Schleife - dann laeuft das Mikrofon
-      // vermutlich gegen Stille oder Rauschen, und das sollte auffallen,
-      // solange die Aufnahme noch laeuft und man reagieren kann.
-      if ((data.loop_share || 0) >= LOOP_WARN_SHARE) {
-        showLoopWarning(
-          `Vorschau: ${Math.round(data.loop_share * 100)} % des zuletzt transkribierten ` +
-          `Abschnitts waren Wiederholschleife. Bitte Mikrofon und Aussteuerung prüfen.`
-        );
-      }
-      const text = (data.transcript || "").trim();
-      if (text) {
-        lastTranscribedChunkIndex = capturedIndex;
-        liveTranscriptParts.push(text);
-        liveTranscriptText = liveTranscriptParts.join(" ");
-        document.getElementById("transcriptSection").style.display = "block";
-        document.getElementById("transcriptText").textContent = liveTranscriptText;
+    while (liveQueue.length) {
+      const { session, blob } = liveQueue.shift();
+      if (session !== liveSession) continue;
+      try {
+        const formData = new FormData();
+        formData.append("audio", blob, "abschnitt.webm");
+        formData.append("lang_mode", getLangMode());
+        const r = await fetch("/transcribe-only", { method: "POST", body: formData });
+        if (!r.ok || session !== liveSession) continue;
+        const data = await r.json();
+        // Schon die Vorschau meldet eine Schleife - dann laeuft das Mikrofon
+        // vermutlich gegen Stille oder Rauschen, und das sollte auffallen,
+        // solange die Aufnahme noch laeuft und man reagieren kann.
+        if ((data.loop_share || 0) >= LOOP_WARN_SHARE) {
+          showLoopWarning(
+            `Vorschau: ${Math.round(data.loop_share * 100)} % des zuletzt transkribierten ` +
+            `Abschnitts waren Wiederholschleife. Bitte Mikrofon und Aussteuerung prüfen.`
+          );
+        }
+        const text = (data.transcript || "").trim();
+        if (text) {
+          liveTranscriptParts.push(text);
+          liveTranscriptText = liveTranscriptParts.join(" ");
+          showLiveTranscript();
+        }
+      } catch (e) {
+        console.warn("Live-Transkription fehlgeschlagen:", e);
       }
     }
-  } catch (e) {
-    console.warn("Live-Transkription fehlgeschlagen:", e);
   } finally {
-    isTranscribingLive = false;
+    liveWorkerRunning = false;
   }
 }
 
-async function onRecordingStop() {
-  if (stopHandled) return;
-  stopHandled = true;
-  audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+function showLiveTranscript() {
+  const el = document.getElementById("transcriptText");
+  document.getElementById("transcriptSection").style.display = "block";
+  const live = liveTranscriptText || "…";
+  if (continueBase) renderTranscript(el, `${continueBase}\n\n— Fortsetzung —\n${live}`);
+  else el.textContent = live;
+}
 
-  // Wait for any in-progress live transcription to finish before reading audioChunks
-  while (isTranscribingLive) {
-    await new Promise(r => setTimeout(r, 200));
-  }
-
-  startAnalysis();
+// "+ Fortsetzen" nur, wenn es etwas fortzusetzen gibt: Aufnahme pausiert,
+// ihre Analyse fertig, keine neue laeuft.
+function updateContinueBtn() {
+  const btn = document.getElementById("continueBtn");
+  if (!btn) return;
+  const show = !!mediaRecorder && mediaRecorder.state === "paused" && !analysisRunning;
+  btn.style.display = show ? "" : "none";
 }
 
 function updateTimer() {
@@ -569,7 +776,16 @@ async function startAnalysis() {
   formData.append("lang_mode", getLangMode());
   formData.append("diarize", getDiarize());
   // Das Transkript liefert erst der Server (handleSSE -> currentTranscript).
-  await runAnalysis("/analyze", formData, "Sende Audio...", { gender: selectedGender, order });
+  // Eine fortgesetzte Aufnahme ersetzt die Analyse ihres ersten Teils im Verlauf.
+  const rerunId = activeTab === "record" && continuing ? recordingEntryId : null;
+  const recorder = mediaRecorder;
+  const entryId = await runAnalysis("/analyze", formData, "Sende Audio...",
+                                    { gender: selectedGender, order, rerunId });
+  // Nur, wenn danach nicht schon die naechste Aufnahme laeuft ("Nächster Patient")
+  if (activeTab === "record" && entryId !== null && recorder && recorder === mediaRecorder) {
+    recordingEntryId = entryId;
+  }
+  updateContinueBtn();
 }
 
 function startAnalysisFromTranscript(transcript, gender = null, rerunId = null) {
@@ -593,6 +809,8 @@ async function runAnalysis(url, formData, statusText,
   document.querySelectorAll(".history-btn").forEach(b => b.classList.remove("active"));
   setAnalysisMode(mode);
   showStatus(statusText);
+  analysisRunning = true;
+  updateContinueBtn();
   document.getElementById("analyzeBtn").disabled = true;
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("analysisSection").style.display = "none";
@@ -624,8 +842,10 @@ async function runAnalysis(url, formData, statusText,
     showStatus(`Verbindungsfehler: ${e.message}`, true);
   }
 
+  let entryId = null;
   if (analysisRaw) {
-    finishAnalysis(analysisRaw, transcript ?? currentTranscript, mode, model, gender, rerunId, order);
+    entryId = finishAnalysis(analysisRaw, transcript ?? currentTranscript, mode, model, gender,
+                             rerunId, order);
     document.getElementById("genderRerun").style.display = "flex";
     if (mode === "abpro") showAbproCards(analysisRaw);
   }
@@ -635,6 +855,8 @@ async function runAnalysis(url, formData, statusText,
   analysisEl.classList.remove("streaming");
   analysisEl.classList.add("done");
   document.getElementById("analyzeBtn").disabled = false;
+  analysisRunning = false;
+  updateContinueBtn();
 
   const restart = nextPatientPending && analysisRaw;
   nextPatientPending = false;
@@ -642,6 +864,7 @@ async function runAnalysis(url, formData, statusText,
     resetAll();
     await startRecording();
   }
+  return entryId;
 }
 
 // Liest einen SSE-Strom ("data: {...}\n\n") und reicht jedes Event weiter.
@@ -763,17 +986,14 @@ function setAnalysisMode(mode) {
 function resetAll() {
   audioBlob = null;
   uploadedFile = null;
-  isTranscribingLive = false;
   liveTranscriptText = null;
   liveTranscriptParts = [];
-  lastTranscribedChunkIndex = 0;
 
-  // Laufende Aufnahme abbrechen falls aktiv
-  if (mediaRecorder && mediaRecorder.state === "recording") {
-    stopRecording();
-  }
-  clearTimeout(liveTranscriptIntervalId);
-  liveTranscriptIntervalId = null;
+  // Laufende oder pausierte Aufnahme verwerfen — ohne Analyse
+  stopLive();
+  disconnectMic();
+  clearInterval(timerInterval);
+  discardPausedRecording();
 
   // Aufnahme-UI
   document.getElementById("recordTimer").textContent = "00:00";
@@ -814,16 +1034,20 @@ function finishAnalysis(analysisRaw, transcript, mode, model, gender = "neutral"
     const entry = analysisHistory.find(e => e.id === rerunId);
     if (entry) {
       entry.analysisRaw = analysisRaw;
+      entry.transcript = transcript;   // bei einer Fortsetzung laenger geworden
       entry.gender = gender;
       entry.mode = mode;
       entry.model = model;
       entry.warning = warning;
-      entry.sent = null;   // neuer Text — die alte Uebergabe gilt nicht fuer ihn
+      // Neuer Text — die alte Uebergabe gilt nicht fuer ihn. Stand die alte
+      // Fassung schon in T2med, sagt die Leiste das beim erneuten Senden.
+      if (entry.sent) entry.sentBefore = entry.sent;
+      entry.sent = null;
       setAnalysisGender(gender);
       const existingBtn = document.querySelector(`.history-btn[data-id="${rerunId}"]`);
       if (existingBtn) existingBtn.classList.add("active");
       showEntryT2med(entry);
-      return;
+      return entry.id;
     }
   }
   const time = recordingStartTime || new Date();
@@ -836,6 +1060,7 @@ function finishAnalysis(analysisRaw, transcript, mode, model, gender = "neutral"
   addHistoryButton(entry, model);
   setAnalysisGender(gender);
   showEntryT2med(entry);
+  return entry.id;
 }
 
 function addHistoryButton(entry, model) {
@@ -1117,7 +1342,9 @@ function showEntryT2med(entry) {
   if (canAdopt) adopt.textContent = `Zuordnen: ${orderName(openOrder)}`;
 
   document.getElementById("t2medSend").textContent = entry.sent ? "Erneut senden" : "An T2med senden";
-  setT2medResult(entry.sent ? `✓ gesendet um ${entry.sent}` : "");
+  setT2medResult(entry.sent ? `✓ gesendet um ${entry.sent}`
+    : entry.sentBefore ? `Ältere Fassung um ${entry.sentBefore} gesendet – nach dem Senden dort entfernen.`
+    : "");
 }
 
 function setT2medResult(text, isError = false) {

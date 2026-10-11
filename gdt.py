@@ -216,16 +216,23 @@ class Order:
     sex: str = ""            # "M", "W" oder leer
     received: float = 0.0    # Eingang hier (Unix-Zeit)
     device: str = ""         # "" = Standardgeraet, "psy" = Psychotherapie-Geraet
+    # Kam der Auftrag per FHIR (Drittanbieter-Knopf in T2med, fhir.py):
+    # {"kontext", "base", "token"}. patid ist dann T2meds Objekt-ID des
+    # Patienten, nicht die Patientennummer — die Zuordnung haengt am Kontext.
+    fhir: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Order":
-        """Auftrag aus dem Frontend zurueck. Wirft ValueError, wenn er kaputt ist."""
+        """Auftrag aus dem Frontend zurueck. Wirft ValueError, wenn er kaputt ist.
+
+        `fhir` wird nur durchgereicht; geprueft wird es in fhir.Context.from_dict().
+        """
         patid = str(d.get("patid", "")).strip()
         last_name = str(d.get("last_name", "")).strip()
-        if not re.fullmatch(r"\S{1,32}", patid) or patid == "0" or not last_name:
+        if not re.fullmatch(r"\S{1,64}", patid) or patid == "0" or not last_name:
             raise ValueError("Auftrag ohne gueltige Patientennummer oder Nachnamen")
         birth = str(d.get("birth_date") or "")
         if birth:
@@ -236,11 +243,13 @@ class Order:
             sex=d.get("sex") if d.get("sex") in ("M", "W") else "",
             received=float(d.get("received") or 0),
             device="psy" if d.get("device") == "psy" else "",
+            fhir=dict(d["fhir"]) if isinstance(d.get("fhir"), dict) else {},
         )
 
     @property
     def label(self) -> str:
-        return f"{', '.join(x for x in (self.last_name, self.first_name) if x)} (Pat.-Nr. {self.patid})"
+        name = ", ".join(x for x in (self.last_name, self.first_name) if x)
+        return f"{name} (T2med-Kontext)" if self.fhir else f"{name} (Pat.-Nr. {self.patid})"
 
 
 def parse_fields(data: bytes) -> list[tuple[str, str]]:

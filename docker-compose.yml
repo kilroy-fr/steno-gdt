@@ -72,6 +72,22 @@ services:
       # - GDT_PSY_DATEINAME=T2MDSTNP.{ap}
       # - GDT_PSY_AUFTRAG_DATEINAME=STNPT2MD.{ap}
       # - GDT_PSY_ID_GERAET=STENO_PT
+      # --- T2med per FHIR (fhir.py, Einrichtung: T2MED-EINRICHTUNG.md, Abschnitt FHIR) ---
+      # Zweiter Weg neben GDT: Drittanbieter-Knopf "Steno" in T2med. Aus, solange
+      # FHIR_API_KEY oder FHIR_HOSTS leer sind. Den Schluessel nicht hier
+      # eintragen, sondern in .env (FHIR_API_KEY=...) — die Datei ist gitignored.
+      - FHIR_API_KEY=${FHIR_API_KEY:-}
+      # Host(s) des T2med-Servers, wie sie in der fhirBasisUrl stehen (Komma-getrennt).
+      # Nur dorthin schickt der Server Dokumentationen.
+      - FHIR_HOSTS=${FHIR_HOSTS:-}
+      # T2med-Serverzertifikat (PEM) im Container, z. B. /certs/t2med.pem; leer = keine Pruefung
+      - FHIR_ZERTIFIKAT=
+      # freitext = ein Eintrag mit Kuerzel (Standard) | abpro = A/B/PRO als eigene Karteikarten-Zeilen
+      - FHIR_AUSGABE=freitext
+      - FHIR_KUERZEL=KI
+      - FHIR_PSY_KUERZEL=KI
+      # Transkript als Anhang in die Kartei (nie bei Psychotherapie)
+      - FHIR_ANHANG=false
       # --- Steno-Knopf (client/, Einrichtung: client/README.md) ---
       # Dokumentationsart fuer Sprechstunden (abpro | analyze | summary)
       - STENO_MODUS=abpro
@@ -82,12 +98,16 @@ services:
       - STENO_SENDEN_WARTEN=60
       # Stunden, die fertige Auftraege (mit Text) fuer /verlauf im Speicher bleiben
       - STENO_AUFBEWAHRUNG=12
+      # Transkript in Abschnitten schon waehrend der Aufnahme:
+      # direkt (nur Direkt-Aufnahmen) | alle (jede Knopf-Aufnahme) | aus
+      - STENO_BLOECKE=direkt
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
       - ./server.py:/app/server.py:ro
       - ./prompts.py:/app/prompts.py:ro
       - ./medical_vocab.py:/app/medical_vocab.py:ro
       - ./gdt.py:/app/gdt.py:ro
+      - ./fhir.py:/app/fhir.py:ro
       - ./templates:/app/templates:ro
       - ./static:/app/static:ro
       - ./logs:/logs

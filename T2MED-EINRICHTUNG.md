@@ -1,4 +1,4 @@
-# T2med: Steno per GDT einrichten
+# T2med: Steno einrichten (GDT, optional FHIR)
 
 Steno schreibt Gespräche mit und übergibt die fertige Dokumentation als GDT-2.1-Satz 6310 an T2med.
 Ein Klick in T2med auf **„Messung starten“** beim Patienten startet die Aufnahme am Steno-Knopf. Die
@@ -180,6 +180,92 @@ Danach in `docker-compose.yml` die drei Zeilen `GDT_PSY_*` einkommentieren und `
 
 Das Ergebnis geht immer an das Gerät zurück, von dem der Auftrag kam, auch wenn die Art am Knopf umgestellt
 wurde. Dort wartet T2med darauf.
+
+## 4. FHIR statt „Messung starten“ (optional, GDT bleibt)
+
+Zweiter Weg nach T2med, über T2meds FHIR-Schnittstelle für Drittanbieter. Statt „Messung starten“ klickt man
+in T2med auf einen Knopf **„Steno“ in der Menüleiste**. Der Steno-Knopf startet die Aufnahme. Die
+Dokumentation geht ohne Austauschordner direkt in den Behandlungskontext des Patienten. T2med bestätigt dabei
+jede Übergabe, und dass eine vorige Datei noch nicht abgeholt ist, kann nicht vorkommen.
+
+GDT bleibt daneben unverändert: „Messung starten“ funktioniert weiter, Aufnahmen ohne Patient gehen wie
+bisher an „Ext. Aufträge“. Lehnt T2med eine FHIR-Übergabe ab (Anmeldung abgelaufen, Kontext älter als vier
+Stunden), geht die Dokumentation per GDT **ohne Patient** an „Ext. Aufträge“. Der Patientenname steht dann im
+Kommentar, verloren geht nichts.
+
+Grundlage ist T2meds Integrationsleitfaden: [T2med/fhir-demoapplication](https://github.com/T2med/fhir-demoapplication),
+`Integrationsleitfaden-FHIR-API.md`.
+
+**Voraussetzungen**
+
+- Ein **API-Schlüssel** für Steno als Drittanbieter, von T2med. Der öffentliche Test-Schlüssel aus der
+  Demoanwendung reicht nur zum Ausprobieren: Er erlaubt **100 Anfragen je Start des T2med-Servers**, danach
+  antwortet T2med mit 403, bis der T2med-Server neu startet. Steno braucht je Gespräch zwei Anfragen
+  (Patient lesen, Dokumentation schreiben).
+- Der Docker-Rechner erreicht den T2med-Server per HTTPS (Port aus der `fhirBasisUrl`, z. B. `16567`).
+- Steno-Knopf ab Version 0.31.
+
+**Server** (`.env` neben `docker-compose.yml`, nicht einchecken):
+
+```
+FHIR_API_KEY=<Schlüssel von T2med>
+FHIR_HOSTS=<Host des T2med-Servers, wie er in der fhirBasisUrl steht>
+```
+
+`FHIR_HOSTS` ist eine Freigabeliste: Dokumentationen gehen nur an diese Hosts. Welchen Host T2med einsetzt,
+steht nach dem ersten Klick im Log (`T2med-Server … ist nicht freigegeben (FHIR_HOSTS)`). Kann der Container
+den Namen nicht auflösen, in `docker-compose.yml` einen `extra_hosts`-Eintrag ergänzen. Danach
+`docker compose up -d`. `curl localhost:8011/steno` zeigt `"fhir": true`.
+
+T2med erzeugt sein HTTPS-Zertifikat je Installation selbst. Ohne `FHIR_ZERTIFIKAT` prüft Steno es nicht.
+Besser ist es, das Zertifikat des T2med-Servers als PEM in den Container zu legen (Mount) und den Pfad dort
+einzutragen.
+
+**T2med** (einmal, gilt für alle Arbeitsplätze):
+
+1. In der T2med-Suche `dritt` eingeben, **Drittanbieter-Zugriffe verwalten** öffnen, den Eintrag für Steno
+   bearbeiten (Stift).
+2. Eine URL hinzufügen, Bezeichnung `Steno`:
+   ```
+   steno://?kontextId=${kontextId}&fhirBasisUrl=${fhirBasisUrl}&oAuthToken=${oAuthToken}
+   ```
+   Für Psychotherapie optional eine zweite, Bezeichnung `Steno Psychotherapie`:
+   ```
+   steno://?kontextId=${kontextId}&fhirBasisUrl=${fhirBasisUrl}&oAuthToken=${oAuthToken}&art=psycho
+   ```
+3. Speichern (Häkchen), den Zugriff aktiv schalten.
+4. **Knopf in der Menüleiste einrichten** und ihm den Eintrag `Steno` zuweisen (ggf. einen zweiten für
+   Psychotherapie).
+
+`steno://` meldet der Steno-Knopf beim Start selbst bei Windows an, ohne Adminrechte. Ein Klick in T2med
+startet `Steno.exe` mit dem Link. Läuft der Knopf schon, bekommt er den Link übergeben. Der Link enthält ein
+Anmelde-Token, er wird weder protokolliert noch gespeichert.
+
+**Was in T2med ankommt** (`FHIR_AUSGABE`):
+
+| Wert | In der Karteikarte |
+|---|---|
+| `freitext` (Standard) | **ein** Freitext-Eintrag mit Kürzel `KI` (`FHIR_KUERZEL`, bei Psychotherapie `FHIR_PSY_KUERZEL`): die Dokumentation und darunter Hinweise wie Schleifen-Warnung oder „Nur 12 Wörter …“. Das Kürzel zeigt, dass niemand gegengelesen hat. |
+| `abpro` | eine A/B/PRO-Dokumentation als **eigene Zeilen** Anamnese, Befund und Prozedere, dazu ein Freitext-Eintrag `KI` mit „KI-generiert … Vor Übernahme prüfen“. Psychotherapie, Direkt und andere Arten bleiben Freitext. |
+
+Mit `FHIR_ANHANG=true` kommt das Transkript als Anhang dazu (nie bei Psychotherapie und Direkt). Alle
+Einträge gehen in einer Transaktion: entweder alle oder keiner.
+
+`abpro` erst nach einem Test mit `freitext` einschalten. Die A/B/P-Zeilen sehen in der Kartei aus wie von
+Hand geschrieben, nur der `KI`-Eintrag daneben zeigt den Ursprung.
+
+**Test**
+
+1. Testpatienten öffnen, in der Menüleiste **Steno** klicken. Am Knopf erscheint „T2med: Patient wird
+   geladen…“, dann der Name, und die Aufnahme läuft. Im Server-Log steht `FHIR-Kontext an Arbeitsplatz 001: …`.
+   - Meldet der Knopf `T2med lehnt den API-Schlüssel ab`: `FHIR_API_KEY` prüfen, beim Test-Schlüssel den
+     T2med-Server neu starten.
+   - `… nicht freigegeben (FHIR_HOSTS)`: den Host aus der Meldung in `FHIR_HOSTS` eintragen.
+   - Passiert gar nichts: Ist der Knopf ab 0.31 einmal gestartet worden (Anmeldung von `steno://`)?
+2. Sprechen, **■**. Nach 1–3 Minuten (Direkt: Sekunden) steht der `KI`-Eintrag beim Patienten, `/verlauf`
+   zeigt „per FHIR“.
+3. Gegenprobe: Patient A öffnen, Steno klicken, dann Patient B öffnen und Steno klicken. Der Knopf fragt.
+4. Mit `GDT_DEBUG_DIR` liegt je Übergabe die FHIR-Transaktion als `.json` in `logs\gdt-debug\`, ohne Token.
 
 ## Debug: Was ging an T2med?
 

@@ -27,6 +27,7 @@ def steno(fake, monkeypatch, settings, tmp_path):
     monkeypatch.setattr(server, "GDT", settings)
     monkeypatch.setattr(server, "gdt_orders", gdt.OrderBook())
     monkeypatch.setattr(server, "steno_jobs", {})
+    monkeypatch.setattr(server, "steno_streams", {})
     monkeypatch.setattr(server, "_STENO_SEND_INTERVAL", 0.02)
     # Die Attrappe spricht 12 Woerter; die Grenze fuer "zu kurz" pruefen eigene Tests
     monkeypatch.setattr(server, "STENO_MIN_WOERTER", 5)
@@ -136,11 +137,72 @@ def test_job_rejects_bad_input(steno):
     assert steno.get("/steno/jobs/unbekannt-123").status_code == 404
 
 
-def test_steno_config(steno):
+def test_steno_config(steno, monkeypatch):
     assert steno.get("/steno").json() == {
         "version": server.VERSION, "gdt": True,
         "workstations": {"001": "Sprechzimmer 1", "002": ""}, "psy_device": True,
+        "fhir": False, "bloecke": "direkt", "diktat": True,
     }
+    monkeypatch.setattr(server, "STENO_BLOECKE", "aus")
+    assert steno.get("/steno").json()["bloecke"] == ""
+
+
+# ---------------------------------------------------------------- Diktat (Direkt)
+
+def dictate(client, ap="001"):
+    return client.post("/steno/diktat", data={"ap": ap},
+                       files={"audio": ("d-0.flac", b"fLaC-diktat", "audio/flac")})
+
+
+def test_dictation_returns_text_and_leaves_nothing(steno, fake, tmp_path):
+    r = dictate(steno)
+    assert r.status_code == 200 and r.json()["text"] == fake.text
+    assert fake.whisper_calls() == 1 and not server.steno_jobs and not server.steno_streams
+    assert not list(tmp_path.glob("T2MD*"))                         # nichts an T2med
+
+
+def test_dictation_drops_lone_hallucination(steno, fake):
+    fake.text = "Vielen Dank."
+    assert dictate(steno).json()["text"] == ""
+
+
+def test_dictation_applies_commands(steno, fake):
+    fake.text = "Fieber ebenfalls, neue Zeile. An Vorerkrankungen Doppelpunkt Hypertonie."
+    assert dictate(steno).json()["text"] == "Fieber ebenfalls\nAn Vorerkrankungen: Hypertonie."
+
+
+@pytest.mark.parametrize("spoken, written", [
+    ("Fieber ebenfalls, neue Zeile. An Vorerkrankungen", "Fieber ebenfalls\nAn Vorerkrankungen"),
+    ("Neue Zeile.", "\n"),
+    ("Komma, und dann", ", und dann"),
+    ("Befund Doppelpunkt unauffällig. Absatz. diagnose", "Befund: unauffällig\n\nDiagnose"),
+    ("Kopfschmerz Klammer auf frontal Klammer zu seit drei Tagen",
+     "Kopfschmerz (frontal) seit drei Tagen"),
+    ("Ramipril Gedankenstrich bitte prüfen", "Ramipril – bitte prüfen"),
+    ("ebenfalls Punkt neue Zeile. an Vorerkrankungen", "ebenfalls.\nAn Vorerkrankungen"),
+    ("Folgendes, Doppelpunkt, neue Zeile, Gedankenstrich, Kontrolle", "Folgendes:\n– Kontrolle"),
+    ("Neuer Absatz. Procedere", "\n\nProcedere"),
+    ("bestehen die Schmerzen Punkt", "bestehen die Schmerzen."),
+    # Dezimalkomma zwischen Ziffern, Zahlwoerter bleiben stehen
+    ("Bisoprolol 2 Komma 5 mg", "Bisoprolol 2,5 mg"),
+    ("zwei Komma fünf Milligramm", "zwei Komma fünf Milligramm"),
+    # Woerter, keine Befehle
+    ("im letzten Absatz steht der wichtigste Punkt.", "im letzten Absatz steht der wichtigste Punkt."),
+    ("Das ist ein wunder Punkt.", "Das ist ein wunder Punkt."),
+    ("Druckpunkt und Doppelpunktion", "Druckpunkt und Doppelpunktion"),
+])
+def test_dictation_commands(spoken, written):
+    assert server.apply_dictation_commands(spoken)[0] == written
+
+
+def test_dictation_errors(steno, fake):
+    assert dictate(steno, ap="009").status_code == 400
+    fake.whisper_fails = True
+    assert dictate(steno).status_code == 500
+    fake.whisper_fails = False
+    fake.down.add("diktat-whisper")
+    fake.down.add(server.WHISPER_HOST)
+    assert dictate(steno).status_code == 502
 
 
 def test_history_page(steno):
@@ -309,3 +371,116 @@ def test_without_psy_device_psycho_goes_to_standard_device():
     assert not s.psy_device and s.order_files() == [("STNOT2MD.{ap}", "")]
     assert s.result_target(None, True) == ("T2MDSTNO.{ap}", "STENO")
 
+
+
+# ---------------------------------------------------------------- Bloecke
+
+def block(client, job_id, seq, start, end, final=False, audio=True, ap="001"):
+    files = {"audio": ("block.flac", b"fLaC-block", "audio/flac")} if audio else None
+    return client.post(f"/steno/jobs/{job_id}/blocks", files=files,
+                       data={"ap": ap, "seq": str(seq), "start": str(start), "end": str(end),
+                             "final": "true" if final else "false"})
+
+
+def test_blocks_replace_whole_transcription(steno, fake):
+    """Ein Abschnitt ab 100 s: seine Zeitstempel muessen auf die ganze Aufnahme
+    verschoben werden, sonst passt die Sprechertrennung nicht dazu."""
+    fake.segments = [{**s, "start": s["start"] + 100, "end": s["end"] + 100} for s in fake.segments]
+    assert block(steno, "blk-job-0001", 0, 100.0, 105.0).json() == {"accepted": True}
+    assert block(steno, "blk-job-0001", 0, 100.0, 105.0).json() == {"accepted": True}   # doppelt: egal
+    block(steno, "blk-job-0001", 1, 105.0, 105.0, final=True, audio=False)
+    job = wait(steno, upload(steno, id="blk-job-0001", mode="direkt").json()["id"])
+    assert job["state"] == "gesendet"
+    assert fake.whisper_calls() == 1                                  # nur der Block, nicht das Ganze
+    listed = steno.get("/steno/jobs").json()["jobs"][0]
+    assert listed["transcript"] == LABELED
+    assert not server.steno_streams
+
+
+def test_blocks_without_final_fall_back(steno, fake, monkeypatch):
+    monkeypatch.setattr(server, "STENO_BLOCK_WARTEN", 0.1)
+    block(steno, "blk-job-0002", 0, 0.0, 5.0)
+    job = wait(steno, upload(steno, id="blk-job-0002", mode="direkt").json()["id"])
+    assert job["state"] == "gesendet" and fake.whisper_calls() == 2  # Block + doch das Ganze
+
+
+def test_blocks_with_gap_fall_back(steno, fake):
+    block(steno, "blk-job-0003", 0, 0.0, 5.0)
+    block(steno, "blk-job-0003", 2, 9.0, 12.0, final=True)            # 1 fehlt
+    job = wait(steno, upload(steno, id="blk-job-0003", mode="direkt").json()["id"])
+    assert job["state"] == "gesendet" and fake.whisper_calls() == 3
+
+
+def test_failed_block_falls_back(steno, fake):
+    fake.verbose_fails = True                                          # Block scheitert
+    block(steno, "blk-job-0004", 0, 0.0, 5.0, final=True)
+    job = wait(steno, upload(steno, id="blk-job-0004", mode="direkt").json()["id"])
+    assert job["state"] == "gesendet"                                  # im Ganzen, ohne Sprecher
+
+
+def test_late_block_and_dropped_blocks(steno):
+    job_id = upload(steno, mode="direkt").json()["id"]
+    wait(steno, job_id)
+    assert block(steno, job_id, 0, 0.0, 5.0).json() == {"accepted": False}
+    block(steno, "blk-job-0005", 0, 0.0, 5.0)
+    assert steno.delete("/steno/jobs/blk-job-0005/blocks").json() == {"dropped": True}
+    assert "blk-job-0005" not in server.steno_streams
+
+
+def test_blocks_rejects_bad_input(steno, monkeypatch):
+    assert block(steno, "../x", 0, 0, 1).status_code in (400, 404)
+    assert block(steno, "blk-job-0006", -1, 0, 1).status_code == 400
+    assert block(steno, "blk-job-0006", 0, 5, 1).status_code == 400
+    assert block(steno, "blk-job-0006", 0, 0, 1, ap="009").status_code == 400
+    block(steno, "blk-job-0007", 0, 0, 1)
+    assert block(steno, "blk-job-0007", 1, 1, 2, ap="002").status_code == 400
+    monkeypatch.setattr(server, "STENO_BLOECKE", "aus")
+    assert block(steno, "blk-job-0008", 0, 0, 1).status_code == 404
+
+
+# ---------------------------------------------------------------- Fortsetzen
+
+def test_continuation_replaces_running_job(steno, fake, tmp_path, monkeypatch):
+    blocked = server.asyncio.Semaphore(0)                              # Sprachmodell besetzt
+    monkeypatch.setattr(server, "_steno_llm", blocked)
+    first = upload(steno, mode="sprechstunde", order=json.dumps(order_dict())).json()["id"]
+    end = time.monotonic() + 5
+    while steno.get(f"/steno/jobs/{first}").json()["state"] != "transkribiert":
+        assert time.monotonic() < end
+        time.sleep(0.02)
+    second = upload(steno, mode="direkt", order=json.dumps(order_dict()), replaces=first,
+                    replaces_started="2026-10-05T09:30:00").json()["id"]
+    assert wait(steno, first)["state"] == "ersetzt"
+    assert wait(steno, second)["state"] == "gesendet"
+    comments = " ".join(fields_of(tmp_path / "T2MDSTNO.001")["6227"])
+    assert "Fortsetzung" not in comments                               # nur eine Dokumentation
+
+
+def test_continuation_of_sent_job_says_it_replaces(steno, tmp_path):
+    first = wait(steno, upload(steno, order=json.dumps(order_dict())).json()["id"])
+    (tmp_path / "T2MDSTNO.001").unlink()                               # T2med hat abgeholt
+    second = wait(steno, upload(steno, order=json.dumps(order_dict()), replaces=first["id"]).json()["id"])
+    assert second["state"] == "gesendet"
+    comments = " ".join(fields_of(tmp_path / "T2MDSTNO.001")["6227"])
+    assert "Fortsetzung der Aufnahme von 09:30" in comments and "ältere bitte" in comments
+
+
+def test_continuation_of_unknown_job_hints(steno, tmp_path):
+    wait(steno, upload(steno, replaces="vorher-unbekannt-1", replaces_started="2026-10-05T08:15:00").json()["id"])
+    comments = " ".join(fields_of(tmp_path / "T2MDSTNO.001")["6227"])
+    assert "Fortsetzung der Aufnahme von 08:15" in comments and "Falls deren" in comments
+
+
+def test_continuation_stops_job_waiting_for_pickup(steno, tmp_path):
+    blocker = tmp_path / "T2MDSTNO.001"
+    blocker.write_bytes(b"vorige")
+    first = upload(steno).json()["id"]
+    end = time.monotonic() + 5
+    while steno.get(f"/steno/jobs/{first}").json()["state"] != "sendet":
+        assert time.monotonic() < end
+        time.sleep(0.02)
+    second = upload(steno, replaces=first).json()["id"]
+    assert wait(steno, first)["state"] == "ersetzt"
+    blocker.unlink()
+    assert wait(steno, second)["state"] == "gesendet"
+    assert "Fortsetzung" not in " ".join(fields_of(blocker)["6227"])

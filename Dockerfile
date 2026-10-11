@@ -9,6 +9,7 @@ COPY server.py .
 COPY prompts.py .
 COPY medical_vocab.py .
 COPY gdt.py .
+COPY fhir.py .
 COPY templates/ templates/
 COPY static/ static/
 
