@@ -126,6 +126,7 @@ environment:
   - AUDIO_TIMEOUT=1800             # Wartezeit (s) auf Whisper und Diarisation
   - LOOP_WARN_SHARE=0.15           # ab diesem Schleifenanteil warnt die Oberfläche
   - LOG_DIR=/logs                  # Ziel für optionalen Logging-Modus
+  - WOERTERBUCH=/daten/woerterbuch.json  # eigenes Wörterbuch der Praxis (leer = aus)
   - TZ=Europe/Berlin               # Ortszeit für T2med und Log-Dateinamen
   - GDT_DIR=/gdt                   # GDT-Austauschordner mit T2med (leer = Anbindung aus)
   - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3;004=Home
@@ -191,7 +192,11 @@ docker compose restart transcribe-gdt-web
 
 `medical_vocab.py` enthält eine kuratierte Liste deutscher Hausarzt-Begriffe. `MEDICAL_GLOSSARY` wird in `ANALYZE_PROMPT`, `ABPRO_PROMPT` und `CLEAN_PROMPT` eingebettet, damit das LLM verzerrte ASR-Ausgaben gegen bekannte Fachbegriffe abgleichen kann. Außerdem ersetzt der Server schon im Transkript Wörter, die einem Begriff der Liste sehr ähnlich sind („Ranipril“ → „Ramipril“) — damit stimmen die Namen auch im Direkt-Modus ohne Sprachmodell. Neue Begriffe einfach in die passende Liste eintragen und den Container neu starten. Echte Präparate, die einem Eintrag ähneln (Prednison neben Prednisolon), gehören mit hinein, sonst werden sie „korrigiert“; Fachgebiete (Neurologe) nicht. Zusätzlich zieht die Ersetzung `medikamente_wortliste.json` heran (~970 Wirkstoffe und Handelsnamen; nicht im Glossar, das hielte den Prompt unnötig lang).
 
-> **Hinweis:** Das Glossar wird bewusst **nicht** als faster-whisper `hotwords`-Parameter verwendet — eine Liste dieser Größe sprengt dessen 448-Token-Decoder-Budget und lässt Whisper mit `ValueError: The maximum decoding length must be > 0` abstürzen.
+> **Hinweis:** Das Glossar wird bewusst **nicht** als faster-whisper `hotwords`-Parameter verwendet — eine Liste dieser Größe sprengt dessen 448-Token-Decoder-Budget und lässt Whisper mit `ValueError: The maximum decoding length must be > 0` abstürzen. Das kurze eigene Wörterbuch (unten) geht dagegen als `hotwords` an Whisper, begrenzt auf `WOERTERBUCH_WHISPER_ZEICHEN`.
+
+### Eigenes Wörterbuch
+
+Für Wörter der Praxis, die in keiner Liste stehen — Namen von Kolleginnen und Kollegen, Kliniken, Orte. Zwei Wege hinein: ein Wort im Transkript oder in der Analyse markieren (auch in `/verlauf`) → das Feld darunter ist vorbelegt, bei Bedarf die richtige Schreibweise eintragen → „In Wörterbuch übernehmen“; oder im Einstellungen-Dialog unter „Eigenes Wörterbuch“ (dort auch entfernen). Die Einträge gehen als `hotwords` an Whisper (die jüngsten bis `WOERTERBUCH_WHISPER_ZEICHEN`), in die Ersetzung im Transkript (ab 7 Buchstaben; ein eigener Eintrag wird außerdem nie „korrigiert“) und ins Glossar der Prompts. Gespeichert in `./daten/woerterbuch.json` (gitignored), wirkt ohne Neustart.
 
 ---
 
@@ -330,6 +335,7 @@ transcribe-gdt/
 ├── templates/verlauf.html     # Nachschau der Knopf-Aufträge (/verlauf)
 ├── static/                    # CSS, JS, Favicon, Logo
 ├── logs/                      # Ziel für optionalen Logging-Modus (LOG_DIR)
+├── daten/                     # eigenes Wörterbuch (WOERTERBUCH, gitignored)
 └── gdt/                       # GDT-Austauschordner mit T2med (Standard-Mount, gitignored)
 ```
 

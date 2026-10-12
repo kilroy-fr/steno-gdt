@@ -41,7 +41,7 @@ from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.33.2"
+VERSION = "0.33.3"
 
 
 def _flag(value: str) -> bool:
@@ -102,6 +102,11 @@ LOOP_WARN_SHARE = float(os.getenv("LOOP_WARN_SHARE", "0.15"))
 # "nur eine Beschwerde"-Dokumentationen: die anderen standen am Anfang.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
 LOG_DIR = os.getenv("LOG_DIR", "/logs")
+# Eigenes Woerterbuch der Praxis (Abschnitt EIGENES WOERTERBUCH): JSON-Datei,
+# leer = aus, dann blendet das Frontend es aus. Wie viele Zeichen davon als
+# hotwords an Whisper gehen, begrenzt WOERTERBUCH_WHISPER_ZEICHEN.
+WOERTERBUCH = os.getenv("WOERTERBUCH", "")
+WOERTERBUCH_WHISPER_ZEICHEN = int(os.getenv("WOERTERBUCH_WHISPER_ZEICHEN", "300"))
 # Kopfzeile der Web-UI. Derselbe Code laeuft auch als gespraech-web
 # (../ki-transcribe, ohne GDT) — dort unter seinem alten Namen.
 APP_TITLE = os.getenv("APP_TITLE", "Steno")
@@ -409,11 +414,9 @@ _TERM_WORD_RE = re.compile(r"[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-]*")
 _TERM_MIN_LEN = 7           # kuerzere Woerter: zu viele echte Nachbarn
 _TERM_CUTOFF = 0.86         # difflib-Aehnlichkeit; bei 7 Buchstaben genuegt kein Tausch
 _TERM_INFLECTION = {"e", "n", "en", "s", "es", "er", "ern", "ns", "nen"}
-_TERM_KNOWN = {t.lower() for t in CORRECTION_TERMS}
-_TERM_POOL = {
-    t.lower().replace("-", ""): t for t in CORRECTION_TERMS
-    if len(t) >= _TERM_MIN_LEN and " " not in t
-}
+# Beide werden mit dem eigenen Woerterbuch neu gebaut (_set_words())
+_TERM_KNOWN: set = set()
+_TERM_POOL: dict = {}
 
 
 @functools.lru_cache(maxsize=4096)
@@ -451,6 +454,108 @@ def correct_terms(text: str) -> tuple[str, int]:
         return term
 
     return _TERM_WORD_RE.sub(fix, text), count
+
+
+# ============================================================
+# EIGENES WOERTERBUCH
+# ============================================================
+# Woerter der Praxis, die in keiner Liste stehen: Namen von Kolleginnen und
+# Kollegen, Kliniken, Orten. Gepflegt in der Oberflaeche — Wort markieren und
+# "In Woerterbuch uebernehmen" (auch in /verlauf) oder im Einstellungen-Dialog.
+# Dreifach wirksam:
+#  - an Whisper als `hotwords`: sie stehen im Decoder-Prompt JEDES 30-s-Fensters
+#    (anders als initial_prompt, das mit condition_on_previous_text=False nur
+#    das erste erreicht) — der einzige Weg, einen Namen gleich richtig zu
+#    hoeren. Begrenzt auf WOERTERBUCH_WHISPER_ZEICHEN, juengste zuerst: das
+#    Decoder-Budget ist 448 Tokens, die ganze Fachbegriffsliste als hotwords
+#    liess Whisper abstuerzen (siehe medical_vocab.py).
+#  - in correct_terms(): als Ziel (Woerter ab 7 Buchstaben, wie die
+#    Fachbegriffe) und als bekannt — ein Name, der einem Praeparat aehnelt,
+#    wird nie "korrigiert".
+#  - im Glossar der Prompts (_build_prompt()).
+# Geloggt werden nur Zahlen: wer markiert, markiert womoeglich auch einmal
+# einen Patientennamen.
+WOERTERBUCH_MAX = 1000
+_DICT_MAX_LEN = 40
+_DICT_STRIP = " \t.,;:!?\"'„“”‚‘’»«()[]{}<>"
+_DICT_CHARS_RE = re.compile(r"[\w.'’\- ]+")
+_custom_words: list = []
+_hotwords = ""
+
+
+def normalize_word(raw: str) -> str:
+    """Eintrag fuers Woerterbuch: Leerraum zusammengezogen, Satzzeichen am Rand
+    weg ("Schmitt," aus einer Markierung). Leer, wenn es kein Wort ist."""
+    word = re.sub(r"\s+", " ", str(raw or "")).strip(_DICT_STRIP)
+    if (not word or len(word) > _DICT_MAX_LEN or not _DICT_CHARS_RE.fullmatch(word)
+            or not re.search(r"[^\W\d_]", word)):
+        return ""
+    return word
+
+
+def _set_words(words: list) -> None:
+    """Woerterbuch uebernehmen: Korrektur-Index, hotwords."""
+    global _custom_words, _hotwords, _TERM_KNOWN, _TERM_POOL
+    _custom_words = list(words)
+    parts = [p for w in words for p in w.split()]
+    _TERM_KNOWN = {t.lower() for t in CORRECTION_TERMS + words + parts}
+    # Aus "Klinikum Rothenburg" wird "Rothenburg" ein Ziel; nur grossgeschriebene
+    # Woerter, denn nur solche korrigiert correct_terms()
+    targets = [p for p in parts if p[0].isupper() and _TERM_WORD_RE.fullmatch(p)]
+    _TERM_POOL = {
+        t.lower().replace("-", ""): t for t in CORRECTION_TERMS + targets
+        if len(t) >= _TERM_MIN_LEN and " " not in t
+    }
+    _correct_term.cache_clear()
+    hot = []
+    for w in reversed(words):
+        if len(", ".join(hot + [w])) > WOERTERBUCH_WHISPER_ZEICHEN:
+            break
+        hot.append(w)
+    _hotwords = ", ".join(hot)
+
+
+def _load_words() -> list:
+    if not WOERTERBUCH:
+        return []
+    try:
+        data = json.loads(Path(WOERTERBUCH).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        logger.warning(f"Woerterbuch nicht lesbar ({WOERTERBUCH}): {exc}")
+        return []
+    words: dict = {}
+    for raw in data if isinstance(data, list) else []:
+        word = normalize_word(raw) if isinstance(raw, str) else ""
+        if word:
+            words.setdefault(word.lower(), word)
+    return list(words.values())
+
+
+def _save_words(words: list) -> None:
+    """Atomar schreiben (Temp-Datei + replace), dann uebernehmen."""
+    path = Path(WOERTERBUCH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(words, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.error(f"Woerterbuch nicht gespeichert ({WOERTERBUCH}): {exc}")
+        raise HTTPException(status_code=500, detail="Wörterbuch konnte nicht gespeichert werden")
+    _set_words(words)
+
+
+def _custom_glossary() -> str:
+    if not _custom_words:
+        return ""
+    return ("\n\nEigene Begriffe der Praxis (Namen von Ärztinnen und Ärzten, Kliniken, "
+            "Orten u. Ä. – in dieser Schreibweise übernehmen, wenn sie gemeint sind; "
+            "nicht einfügen, wenn sie nicht fallen):\n" + ", ".join(_custom_words))
+
+
+_set_words(_load_words())
 
 
 # Diktierbefehle (nur /steno/diktat): gesprochen -> Zeichen. Laengere zuerst,
@@ -765,6 +870,8 @@ def _whisper_model_fields(lang_mode: str, model_override: str = None) -> dict:
         fields["model"] = model
     if lang_mode == "de":
         fields["language"] = WHISPER_LANGUAGE
+    if _hotwords:
+        fields["hotwords"] = _hotwords
     return fields
 
 
@@ -1103,7 +1210,7 @@ def _build_prompt(mode: str, transcript: str, gender: str, diarized: bool) -> st
     speaker_context = speaker.format(**gender_context)
     return template.format(
         transcript=transcript,
-        medical_glossary=MEDICAL_GLOSSARY,
+        medical_glossary=MEDICAL_GLOSSARY + _custom_glossary(),
         speaker_context=speaker_context,
         **gender_context,
     )
@@ -1202,6 +1309,7 @@ async def index(request: Request):
         context={"version": VERSION, "default_model": OLLAMA_MODEL,
                  "title": APP_TITLE, "subtitle": APP_SUBTITLE,
                  "loop_warn_share": LOOP_WARN_SHARE,
+                 "woerterbuch": bool(WOERTERBUCH),
                  "gdt": {"enabled": GDT.enabled, "workstations": GDT.workstations}},
     )
 
@@ -1248,6 +1356,50 @@ async def set_logging_mode(request: Request):
     logging_enabled = bool(body.get("enabled", False))
     logger.info(f"Logging mode set to: {logging_enabled}")
     return {"enabled": logging_enabled}
+
+
+def _woerterbuch_state(**extra) -> dict:
+    """`whisper` = wie viele Eintraege (die juengsten) als hotwords an Whisper gehen."""
+    if not WOERTERBUCH:
+        raise HTTPException(status_code=404, detail="Kein Wörterbuch eingerichtet (WOERTERBUCH)")
+    whisper = len(_hotwords.split(", ")) if _hotwords else 0
+    return {"words": _custom_words, "whisper": whisper, **extra}
+
+
+@app.get("/woerterbuch")
+async def get_woerterbuch():
+    return _woerterbuch_state()
+
+
+@app.post("/woerterbuch")
+async def add_word(request: Request):
+    """Body: {"wort"}. Gleiches Wort in anderer Gross-/Kleinschreibung ersetzt das alte."""
+    _woerterbuch_state()
+    body = await request.json()
+    word = normalize_word(body.get("wort", ""))
+    if not word:
+        raise HTTPException(status_code=400, detail=(
+            f"Kein gültiges Wort (Buchstaben, Ziffern, Bindestrich, Punkt; höchstens {_DICT_MAX_LEN} Zeichen)"))
+    # Ab hier kein await mehr: Lesen und Schreiben sind ein Schritt der Ereignisschleife
+    existing = next((w for w in _custom_words if w.lower() == word.lower()), None)
+    if existing == word:
+        return _woerterbuch_state(word=word, added=False)
+    if existing is None and len(_custom_words) >= WOERTERBUCH_MAX:
+        raise HTTPException(status_code=400, detail=f"Wörterbuch voll ({WOERTERBUCH_MAX} Einträge)")
+    _save_words([w for w in _custom_words if w.lower() != word.lower()] + [word])
+    logger.info(f"Woerterbuch: Eintrag uebernommen ({len(_custom_words)} Eintraege)")
+    return _woerterbuch_state(word=word, added=True)
+
+
+@app.delete("/woerterbuch")
+async def remove_word(wort: str):
+    _woerterbuch_state()
+    words = [w for w in _custom_words if w.lower() != wort.strip().lower()]
+    if len(words) == len(_custom_words):
+        raise HTTPException(status_code=404, detail="Nicht im Wörterbuch")
+    _save_words(words)
+    logger.info(f"Woerterbuch: Eintrag entfernt ({len(_custom_words)} Eintraege)")
+    return _woerterbuch_state()
 
 
 @app.post("/transcribe-only")
@@ -2278,7 +2430,7 @@ async def steno_job_list(ap: str = ""):
 async def steno_history(request: Request, ap: str = ""):
     return templates.TemplateResponse(
         request=request, name="verlauf.html",
-        context={"version": VERSION, "ap": ap,
+        context={"version": VERSION, "ap": ap, "woerterbuch": bool(WOERTERBUCH),
                  "workstations": GDT.workstations if GDT.enabled else {}},
     )
 

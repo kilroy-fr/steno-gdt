@@ -52,6 +52,7 @@
   </header>
   <main id="jobs"><div class="empty">Lade…</div></main>
 
+  {% if woerterbuch %}<script src="/static/woerterbuch.js?v={{ version }}"></script>{% endif %}
   <script>
     // Nachschau fuer die Auftraege des Steno-Knopfs. Gesendet wird von hier
     // nichts: das hat der Server laengst getan; was fehlschlug, steht dabei.
@@ -92,6 +93,9 @@
 
     let jobs = [];
     async function load() {
+      // Neu zeichnen loescht eine Markierung — nicht, solange jemand ein Wort
+      // fuers Woerterbuch markiert hat
+      if (window.Woerterbuch?.busy(list)) return;
       try {
         const r = await fetch(`/steno/jobs?ap=${encodeURIComponent(select.value)}`);
         jobs = (await r.json()).jobs;
@@ -114,6 +118,7 @@
       history.replaceState(null, "", select.value ? `?ap=${select.value}` : location.pathname);
       load();
     });
+    window.Woerterbuch?.attach([list]);
     load();
     setInterval(load, 5000);
   </script>

@@ -46,6 +46,12 @@ services:
       # hochgeladene Dreiviertelstunde durchlaeuft.
       - AUDIO_TIMEOUT=1800
       - LOG_DIR=/logs
+      # Eigenes Woerterbuch der Praxis (Namen, Kliniken, Orte), gepflegt in der
+      # Oberflaeche. Liegt in ./daten, nicht im Image — ueberlebt jeden Rebuild.
+      # Leer = aus. WOERTERBUCH_WHISPER_ZEICHEN: wie viel davon (die juengsten
+      # Eintraege) als hotwords an Whisper geht; mehr frisst Decoder-Budget.
+      - WOERTERBUCH=/daten/woerterbuch.json
+      - WOERTERBUCH_WHISPER_ZEICHEN=300
       # Ortszeit: geht als Untersuchungszeit nach T2med und benennt die Logs
       - TZ=Europe/Berlin
       # --- T2med per GDT (gdt.py, Einrichtung: T2MED-EINRICHTUNG.md) ---
@@ -112,6 +118,8 @@ services:
       - ./templates:/app/templates:ro
       - ./static:/app/static:ro
       - ./logs:/logs
+      # Der Ordner, nicht die Datei: gespeichert wird per Temp-Datei + Umbenennen
+      - ./daten:/daten
       # GDT-Austauschordner, den auch T2med erreichen muss. Standard: ./gdt
       # auf diesem Rechner (nur zum Testen). Im Betrieb S:\_steno auf der
       # sono-gdt-Freigabe: Volume gdt-share unten einkommentieren und hier

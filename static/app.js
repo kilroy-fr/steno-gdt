@@ -58,6 +58,7 @@ function initSettings() {
   const overlay = document.getElementById("settingsModal");
   document.getElementById("settingsBtn").addEventListener("click", () => {
     overlay.style.display = "flex";
+    if (window.APP_CONFIG?.woerterbuch) loadDictionary();
   });
   document.getElementById("settingsClose").addEventListener("click", () => {
     overlay.style.display = "none";
@@ -88,6 +89,66 @@ function initSettings() {
       document.getElementById("loggingStatus").textContent = enabled ? "Aus" : "An";
     });
   });
+
+  initDictionary();
+}
+
+// ============================================================
+// EIGENES WÖRTERBUCH (static/woerterbuch.js, WOERTERBUCH in server.py)
+// ============================================================
+// Zwei Wege hinein: Wort in Transkript oder Analyse markieren, oder hier im
+// Einstellungen-Dialog. Herausnehmen nur hier.
+function initDictionary() {
+  if (!window.APP_CONFIG?.woerterbuch) return;
+  document.getElementById("dictRow").style.display = "";
+  Woerterbuch.attach(["transcriptText", "analysisText", "abproCards"].map((id) => document.getElementById(id)));
+
+  const input = document.getElementById("dictInput");
+  document.getElementById("dictForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!input.value.trim()) return;
+    try {
+      renderDictionary(await Woerterbuch.add(input.value));
+      input.value = "";
+    } catch (err) {
+      setDictHint(err.message, true);
+    }
+  });
+  document.getElementById("dictList").addEventListener("click", async (e) => {
+    const word = e.target.closest("[data-word]")?.dataset.word;
+    if (!word) return;
+    try {
+      renderDictionary(await Woerterbuch.remove(word));
+    } catch (err) {
+      setDictHint(err.message, true);
+    }
+  });
+  document.addEventListener("woerterbuch-changed", (e) => renderDictionary(e.detail));
+}
+
+async function loadDictionary() {
+  try {
+    renderDictionary(await Woerterbuch.list());
+  } catch (err) {
+    setDictHint(err.message, true);
+  }
+}
+
+function renderDictionary(data) {
+  const words = [...data.words].sort((a, b) => a.localeCompare(b, "de"));
+  document.getElementById("dictList").innerHTML = words.length
+    ? words.map((w) => `<span class="dict-chip">${escapeHtml(w)}<button type="button" data-word="${escapeHtml(w)}" title="Entfernen" aria-label="${escapeHtml(w)} entfernen">×</button></span>`).join("")
+    : '<span class="hint-text">Noch keine Einträge.</span>';
+  // Whisper bekommt nur die jüngsten (hotwords haben ein festes Budget)
+  setDictHint(data.whisper < data.words.length
+    ? `${data.words.length} Einträge – die ${data.whisper} jüngsten gehen auch direkt an die Spracherkennung, die übrigen nur an Korrektur und Sprachmodell.`
+    : "Namen von Kolleginnen und Kollegen, Kliniken, Orten – keine Patientennamen. Schneller: ein Wort im Transkript markieren.");
+}
+
+function setDictHint(text, isError = false) {
+  const hint = document.getElementById("dictHint");
+  hint.textContent = text;
+  hint.classList.toggle("dict-error", isError);
 }
 
 // ============================================================

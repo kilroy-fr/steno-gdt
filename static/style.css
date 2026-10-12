@@ -721,6 +721,50 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 
 .settings-select { width: 100%; }
 
+/* Eigenes Wörterbuch */
+.settings-panel { max-width: min(440px, calc(100vw - 32px)); }
+.dict-add { display: flex; gap: 6px; }
+.dict-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text);
+  background: var(--background);
+  border: 1px solid var(--secondary);
+  border-radius: 6px;
+}
+.dict-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.dict-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 9px;
+  font-size: 0.82rem;
+  background: var(--card-bg);
+  border-radius: 12px;
+}
+.dict-chip button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 8px;
+}
+.dict-chip button:hover { color: var(--text); background: var(--danger); }
+.dict-hint { margin: 0; font-size: 0.78rem; }
+.dict-hint.dict-error { color: var(--danger); }
+
 .settings-toggle-row {
   flex-direction: row;
   justify-content: space-between;

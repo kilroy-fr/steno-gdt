@@ -43,6 +43,8 @@ Transkripte_Raw/
 *.mp3
 temp/
 logs/
+# Eigenes Woerterbuch (WOERTERBUCH), wird in der Oberflaeche gepflegt
+daten/
 # GDT-Austauschordner mit T2med (Patientendaten)
 gdt/
 
