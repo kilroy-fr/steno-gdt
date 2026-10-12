@@ -106,6 +106,16 @@ def test_settings_from_env():
         gdt.Settings.from_env({"GDT_AUFTRAG_DATEINAME": "T2MDSTNO.{ap}"})
     with pytest.raises(ValueError):
         gdt.Settings.from_env({"GDT_ARBEITSPLAETZE": "Sprechzimmer"})
+    with pytest.raises(ValueError):
+        gdt.Settings.from_env({"GDT_ZEILENBREITE": "991"})
+
+
+def test_line_width_max_fits_length_field():
+    """Bei der groessten Breite passt jede Zeile noch ins dreistellige Laengenfeld."""
+    s = gdt.Settings.from_env({"GDT_ZEILENBREITE": str(gdt.MAX_CONTENT)})
+    r = gdt.Record("6310").text("6220", "x" * 2000, s.line_width)
+    lines = r.encode().split(b"\r\n")[2:-1]
+    assert [len(line) + 2 for line in lines] == [999, 999, 2000 - 2 * gdt.MAX_CONTENT + 9]
 
 
 # ---------------------------------------------------------------- OrderBook

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Feld 9206: 1 = 7 Bit, 2 = IBM CP437 (GDT-Standard), 3 = ISO 8859-1 / CP1252
 ENCODINGS = {1: "ascii", 2: "cp437", 3: "cp1252"}
+MAX_CONTENT = 999 - 3 - 4 - 2   # Zeichen je Feld: Zeilenlaenge dreistellig, abzueglich Laenge, Kennung, CRLF
 # 6301 Stammdaten uebermitteln, 6302 Neue Untersuchung anfordern
 ORDER_RECORD_TYPES = {"6301", "6302"}
 
@@ -67,7 +68,9 @@ class Settings:
     charset: int = 2                        # 9206
     test_ident: str = "ALLG00"              # 8402, muss zur Geraetekonfiguration in T2med passen
     order_valid_minutes: int = 60
-    line_width: int = 60                    # Freitextzeilen (6220/6227); GDT 2.1: max. 60
+    # Freitextzeilen (6220/6227). GDT 2.1 empfiehlt 60, T2med zeigt jedes Feld aber als
+    # eigene Zeile an - breiter = Absaetze am Stueck. Grenze: dreistelliges Laengenfeld.
+    line_width: int = 60
     # Wie T2med (Windows) den GDT-Ordner sieht, z. B. S:\_steno.
     # Nur fuer den Transkript-Anhang (6305) noetig; leer = kein Anhang.
     pvs_path: str = ""
@@ -104,6 +107,8 @@ class Settings:
             s.workstations = parse_workstations(env["GDT_ARBEITSPLAETZE"])
         if s.charset not in ENCODINGS:
             raise ValueError("GDT_ZEICHENSATZ muss 1, 2 oder 3 sein")
+        if not 20 <= s.line_width <= MAX_CONTENT:
+            raise ValueError(f"GDT_ZEILENBREITE muss zwischen 20 und {MAX_CONTENT} liegen")
         names = [n.replace("{ap}", "") for n in (s.result_filename, s.order_filename,
                                                  s.psy_result_filename, s.psy_order_filename) if n]
         if len(names) != len(set(names)):

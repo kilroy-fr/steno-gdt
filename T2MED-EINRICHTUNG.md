@@ -59,9 +59,18 @@ Steno nutzt die Freigabe von sono-gdt mit. Sie ist in jedem Sprechzimmer schon a
 1. In `\\192.168.2.70\sono-gdt` den Ordner `_steno` anlegen (z. B. im Explorer als `S:\_steno`).
 2. Prüfen, ob `S:` an **jedem** Arbeitsplatz verbunden ist, auch an „Home“. Rechte: Lesen, Schreiben, Löschen
    (für sono-gdt ohnehin nötig).
-3. Auf dem Docker-Rechner in `docker-compose.yml` das Volume `gdt-share` einkommentieren
-   (`device: //192.168.2.70/sono-gdt/_steno`), die Zugangsdaten `GDT_SMB_USER` und `GDT_SMB_PASSWORD` in `.env`
-   eintragen (dieselben wie für sono-gdt sind möglich) und den Mount auf `gdt-share:/gdt` umstellen.
+3. Auf dem Docker-Rechner die Zugangsdaten in `.env` eintragen (dieselben wie für sono-gdt sind möglich).
+   `docker-compose.yml` mountet `//192.168.2.70/sono-gdt/_steno` als Volume `gdt-share` nach `/gdt`.
+   ```
+   GDT_SMB_DOMAIN=PRAXIS
+   GDT_SMB_USER=Netadmin
+   GDT_SMB_PASSWORD=...
+   ```
+   Domäne und Benutzer **getrennt**: Docker mountet über den Kernel, nicht über `mount.cifs`, und der versteht
+   `PRAXIS\Netadmin` nicht (Fehler „permission denied“). Ein leeres `domain=` lehnt er ebenfalls ab („invalid
+   argument“), Compose bricht deshalb ohne `GDT_SMB_DOMAIN` ab. Nach einer Änderung der Zugangsdaten das Volume
+   neu anlegen, sonst behält Docker die alten Optionen: `docker compose down`,
+   `docker volume rm transcribe-gdt_gdt-share`, `docker compose up -d`.
 4. Optional für den Transkript-Anhang: `GDT_PVS_PFAD=S:\_steno`.
 5. `docker compose up -d` im Projektordner. Das fasst nur `transcribe-gdt-web` an. Whisper, Sprechertrennung
    und ollama laufen weiter. Prüfen: `curl localhost:8011/steno` muss `"gdt": true` zeigen.
@@ -76,6 +85,11 @@ Die Gerätekonfiguration gilt **je Arbeitsplatz** (Reiter *Eigene* = dieser Arbe
 anderen). Einmal einrichten, an den anderen Arbeitsplätzen über *Weitere → Übernehmen* kopieren, mit dem
 Bleistift bearbeiten und **nur die beiden Dateinamen** auf die eigene Endung ändern *(sono-gdt)*. **Nach jeder
 Änderung T2med an diesem Arbeitsplatz neu starten.**
+
+Werte ohne die Backticks aus dieser Datei und ohne Leerzeichen eintragen: Die Dateinamen haben genau 12 Zeichen,
+das Kennfeld genau 6, mehr lässt T2med nicht zu („Der Dateiname darf höchstens 12 Zeichen lang sein“). In Feldern
+ohne Längenprüfung (Verzeichnisse, GDT-IDs) nimmt T2med ein überzähliges Zeichen ohne Meldung an, das Gerät
+funktioniert dann aber nicht.
 
 | Raum | T2med-Arbeitsplatz | Dateiname Import | Dateiname Export | Steno-Knopf `arbeitsplatz` |
 |---|---|---|---|---|
@@ -136,9 +150,9 @@ die der Server nicht kennt, lehnt er mit „Unbekannter Arbeitsplatz“ ab.
 | Sichtplatz (nur Befundanzeige) | aus *(sono-gdt)* | |
 | Abweichendes Anzeigeprogramm | leer | |
 | Kürzel Gerätegruppe | `STNO` | |
-| Ergebnisse anzeigen | „In T2med anzeigen“ *(sono-gdt)* | |
+| Ergebnisse anzeigen | „In T2med bearbeiten“ | erprobt am 12.10.2026 (Home) |
 | Parameter für Anzeigeprogramm | leer | |
-| nachträgliche Befundung | keine nachträgliche Befundung *(sono-gdt)* | |
+| nachträgliche Befundung | „als neuen Befund“ | erprobt am 12.10.2026 (Home) |
 
 ### Übernahme von Befunden
 
@@ -152,10 +166,10 @@ die der Server nicht kennt, lehnt er mit „Unbekannter Arbeitsplatz“ ab.
 | Inhaltsbeschreibung übernehmen | an *(sono-gdt)* | „Transkript 05.10.2026 10:15“ |
 | Einleseverzögerung | `10` ms *(sono-gdt)* | Steno legt die Datei fertig (atomar) ab |
 | Automatische Zuordnung | „Letzter eAkteneintrag“ *(sono-gdt)* | Gegenprobe im Test, Schritt 7 |
-| Inhalte der freien Kategorie | „Messwerte jeweils einzeilig“ *(sono-gdt)* | |
+| **Inhalte der freien Kategorie** | **„Messwerte jeweils mehrzeilig“** | „einzeilig“ (sono-gdt) zeigt nur „Befund Steno“, der Text erst per Doppelklick |
 | **Kurzeintrag erstellen** | **an** *(sono-gdt)* | damit die Dokumentation (6220) in der Karteikarte steht |
-| Anzahl der Zeilen | so hoch wie möglich | sono-gdt braucht 5 Zeilen für einen Kurzbefund, eine Dokumentation hat 10–40 Zeilen. Test, Schritt 6. |
-| Messergebnis Felder | leer | |
+| Anzahl der Zeilen | so hoch wie möglich (erprobt: `8`) | Begrenzt den Kurzeintrag. Mit `GDT_ZEILENBREITE=990` ist ein Absatz eine Zeile. Test, Schritt 6. |
+| **Messergebnis Felder** | **alle** (DIAGNOSE, BEFUND, FREMDBEFUND, ERGEBNISSE, KOMMENTAR, FREIE_KATEGORIE, …) | BEFUND = Dokumentation (6220), KOMMENTAR = Prüfhinweis (6227) |
 
 ## 3. Zweites Gerät „Steno Psychotherapie“ (optional)
 
@@ -319,9 +333,10 @@ Ablauf:
 6. In T2med prüfen:
    - richtiger Patient, Datum/Uhrzeit = Aufnahmebeginn?
    - Umlaute korrekt? Sonst `GDT_ZEICHENSATZ=3` (und in T2med ISO 8859-1/CP1252) probieren.
-   - **Zeilenumbrüche:** GDT 2.1 begrenzt eine Zeile auf 60 Zeichen, die Dokumentation wird deshalb umgebrochen.
-     Steht ein A/B/PRO-Absatz zerstückelt auf mehreren Zeilen, `GDT_ZEILENBREITE=200` probieren. Wird dann
-     abgeschnitten, zurück auf 60.
+   - **Zeilenumbrüche:** T2med zeigt jedes GDT-Feld als eigene Zeile. Mit der GDT-2.1-Empfehlung von 60 Zeichen
+     stand ein A/B/PRO-Absatz zerstückelt auf mehreren Zeilen (12.10.2026), deshalb `GDT_ZEILENBREITE=990`
+     (Formatgrenze). Mit einem langen Absatz prüfen, ob er vollständig ankommt; wird er abgeschnitten, die
+     Breite senken.
    - Steht die ganze Dokumentation im Kurzeintrag oder nur die ersten Zeilen („Anzahl der Zeilen“)?
 7. Gegenprobe ohne „Messung starten“: ▶ klicken, sprechen, ■. Die Dokumentation muss unter **Ext. Aufträge**
    erscheinen und darf **nicht** automatisch beim zuletzt geöffneten Patienten landen.

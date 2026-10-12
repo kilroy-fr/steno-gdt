@@ -65,6 +65,9 @@ services:
       - GDT_KENNFELD=ALLG00
       # Minuten, die ein "Messung starten" auf seine Aufnahme wartet
       - GDT_AUFTRAG_GUELTIG=60
+      # Umbruch der Dokumentation in GDT-Felder. T2med zeigt jedes Feld als eigene
+      # Zeile, 60 (GDT-2.1-Empfehlung) zerhackt die Absaetze. 990 = Formatgrenze.
+      - GDT_ZEILENBREITE=990
       # Wie T2med den Austauschordner sieht - nur fuer den Transkript-Anhang,
       # leer = kein Anhang. Beispiel: S:\_steno (Netzlaufwerk S: von sono-gdt)
       - GDT_PVS_PFAD=
@@ -120,11 +123,10 @@ services:
       - ./logs:/logs
       # Der Ordner, nicht die Datei: gespeichert wird per Temp-Datei + Umbenennen
       - ./daten:/daten
-      # GDT-Austauschordner, den auch T2med erreichen muss. Standard: ./gdt
-      # auf diesem Rechner (nur zum Testen). Im Betrieb S:\_steno auf der
-      # sono-gdt-Freigabe: Volume gdt-share unten einkommentieren und hier
-      # "gdt-share:/gdt" eintragen.
-      - ${GDT_HOST_DIR:-./gdt}:/gdt
+      # GDT-Austauschordner, den auch T2med erreichen muss: S:\_steno auf der
+      # sono-gdt-Freigabe (Volume gdt-share unten, Zugangsdaten in .env).
+      # Zum Testen ohne T2med stattdessen "./gdt:/gdt".
+      - gdt-share:/gdt
     networks:
       - diktat-network
       - ollama-network
@@ -155,10 +157,10 @@ networks:
 # Unterstrich ist noetig, sonst haelt sono-gdt ihn fuer einen Patientenordner.
 # Gemountet wird nur _steno, nicht die Ultraschallbilder.
 # Zugangsdaten nicht einchecken - in .env ablegen.
-# volumes:
-#   gdt-share:
-#     driver: local
-#     driver_opts:
-#       type: cifs
-#       device: //192.168.2.70/sono-gdt/_steno
-#       o: "username=${GDT_SMB_USER},password=${GDT_SMB_PASSWORD},uid=0,gid=0,file_mode=0660,dir_mode=0770,vers=3.0"
+volumes:
+  gdt-share:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //192.168.2.70/sono-gdt/_steno
+      o: "username=${GDT_SMB_USER},password=${GDT_SMB_PASSWORD},domain=${GDT_SMB_DOMAIN:?GDT_SMB_DOMAIN in .env fehlt},uid=0,gid=0,file_mode=0660,dir_mode=0770,vers=3.0"
