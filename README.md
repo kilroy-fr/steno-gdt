@@ -456,6 +456,12 @@ Basierend auf:
 
 ## 📜 Lizenz
 
-Dieses Projekt nutzt:
+Steno steht unter der [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0). Wer den Code
+verändert und als Netzdienst betreibt, muss den Nutzern den veränderten Quelltext zugänglich machen.
+
+Übernommener Code aus asklaion (MIT): siehe [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+Genutzte Dienste und Bibliotheken (nicht Teil dieses Repositorys):
 - **faster-whisper**: MIT License
 - **ollama**: MIT License
+- **pyannote.audio**: MIT License; das Modell `speaker-diarization-community-1` steht unter CC-BY-4.0
