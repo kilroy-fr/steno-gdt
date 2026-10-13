@@ -266,3 +266,18 @@ def test_index_title(client, monkeypatch):
     r = client.get("/")
     assert "<title>KI-Gesprächsanalyse</title>" in r.text
     assert "<h1>KI-Gesprächsanalyse</h1>" in r.text and "Transkription und Analyse" in r.text
+
+
+def test_index_knopf_link(client, monkeypatch, tmp_path):
+    """Einstellungen: Link zur Knopf-exe — eigene bereitgelegte oder STENO_KNOPF_URL."""
+    monkeypatch.setattr(server, "STENO_KNOPF_DIR", "")
+    monkeypatch.setattr(server, "STENO_KNOPF_URL", "")
+    assert 'id="knopfRow"' not in client.get("/").text
+    from test_steno import publish_knopf
+    publish_knopf(tmp_path / "knopf")
+    monkeypatch.setattr(server, "STENO_KNOPF_DIR", str(tmp_path / "knopf"))
+    assert 'href="/steno/knopf/Steno.exe"' in client.get("/").text
+    url = "https://steno.example/steno/knopf/Steno.exe"           # gespraech-web
+    monkeypatch.setattr(server, "STENO_KNOPF_DIR", "")
+    monkeypatch.setattr(server, "STENO_KNOPF_URL", url)
+    assert f'href="{url}"' in client.get("/").text

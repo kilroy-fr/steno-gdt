@@ -33,7 +33,11 @@ selbst. Am Ende **■** klicken. Nach 1–3 Minuten steht die Dokumentation in T
 
 **Diktat (Direkt):** Ring oben auf grün **Direkt**, ins Zielfeld klicken (T2med, Word, Browser …), **▶**, sprechen.
 Der Text erscheint an der Schreibmarke, jeweils ein bis zwei Sekunden nach einer Sprechpause (spätestens alle 20 s).
-**■** beendet das Diktat; der letzte Satz kommt danach. Ein Diktat geht an keinen Patienten und nicht an T2med,
+**■** beendet das Diktat; der letzte Satz kommt danach. Den Punkt am Ende eines Abschnitts setzt der Knopf erst,
+wenn der nächste zeigt, dass ein neuer Satz beginnt — wer mitten im Satz Luft holt, bekommt keinen. Klickt man
+während des Diktats in ein anderes Feld, beginnt der Text dort neu. Gesprochene Befehle: „neue Zeile“, „(neuer)
+Absatz“, „Punkt“, „Komma“, „Doppelpunkt“, „Semikolon“, „Fragezeichen“, „Ausrufezeichen“, „Gedankenstrich“,
+„Klammer auf/zu“. „Ähm“, „hm“ und Ähnliches werden nicht getippt. Ein Diktat geht an keinen Patienten und nicht an T2med,
 keine Zusammenfassung, keine Aufnahme auf der Platte. Direkt bleibt gewählt, bis man umschaltet. Ein „Messung
 starten“ aus T2med nimmt trotzdem als Sprechstunde auf (danach steht der Knopf wieder auf Direkt); ein offener
 Auftrag bleibt beim Diktieren offen.
@@ -71,25 +75,35 @@ Die Aufnahme liegt bis zur Bestätigung „an T2med gesendet“ in `%LOCALAPPDAT
 nur die jüngste noch so lange liegen, wie sie sich fortsetzen lässt (`fortsetzen_minuten`), und wird dann
 gelöscht, spätestens beim Beenden. Absturz oder Neustart verlieren nichts: Beim nächsten Start wird nachgeholt.
 
-## Bauen
+## Bauen und bereitlegen
 
 Auf einem Windows-Rechner mit Python 3.13:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File client\build.ps1
+powershell -ExecutionPolicy Bypass -File client\build.ps1                    # nur bauen
+powershell -ExecutionPolicy Bypass -File client\build.ps1 -Veroeffentlichen  # bauen und an alle Knöpfe verteilen
 ```
 
-Ergebnis: `client\dist\Steno.exe` (eine Datei, etwa 30 MB, ohne Python auf den Arbeitsplätzen).
+Ergebnis: `client\dist\Steno.exe` (eine Datei, etwa 35 MB, ohne Python auf den Arbeitsplätzen).
+`-Veroeffentlichen` legt sie zusätzlich mit `Steno.json` (Version, Prüfsumme) nach `knopf\` neben die
+Compose-Datei. Der Server bietet sie unter `https://steno.hausarzt-rothenburg.de/steno/knopf/Steno.exe`
+an, und jeder installierte Knopf fragt beim nächsten Start, ob er sich aktualisieren soll.
+**Vorher `VERSION` in `client/steno.py` hochzählen**, sonst sehen die Knöpfe nichts Neues (das Skript warnt).
 
-## Installieren (je Sprechzimmer)
+## Installieren (je Benutzer, ohne Adminrechte)
 
-1. `Steno.exe` nach `C:\Program Files\Steno\` kopieren.
-2. Einmal von Hand mit Server und Arbeitsplatz starten, die Werte werden gespeichert:
+1. Am Arbeitsplatz im Browser `https://steno.hausarzt-rothenburg.de/steno/knopf/Steno.exe` öffnen (oder in der
+   Web-Oberfläche, auch `transcribe.…`: ⚙ Einstellungen → „Steno.exe herunterladen“) und die Datei starten. Windows warnt vor einer unbekannten Datei („Der Computer wurde durch Windows geschützt“):
+   **Weitere Informationen → Trotzdem ausführen**. Die exe ist nicht signiert.
+2. Frage „Steno-Knopf für diesen Benutzer installieren?“ → **Ja**. Steno kopiert sich nach
+   `%LOCALAPPDATA%\Programs\Steno`, startet ab jetzt bei jeder Anmeldung (Autostart), steht im Startmenü
+   und unter **Einstellungen → Apps** als „Steno-Knopf“. Danach startet der installierte Knopf.
+   „Nein“ startet Steno nur dieses eine Mal aus dem Download-Ordner.
+3. Beim ersten Start fragt der Knopf nach Server (`https://steno.hausarzt-rothenburg.de`) und Arbeitsplatz.
+   Oder gleich mitgeben, die Werte werden gespeichert:
    ```
-   "C:\Program Files\Steno\Steno.exe" --server https://steno.hausarzt-rothenburg.de --arbeitsplatz 001
+   Steno.exe --server https://steno.hausarzt-rothenburg.de --arbeitsplatz 001
    ```
-   Ohne Parameter fragt der Knopf beim ersten Start danach.
-3. Verknüpfung auf `Steno.exe` in den Autostart legen (`Win+R` → `shell:startup`).
 4. Mikrofon: die EPOS Expand 40 per **USB** (nicht Bluetooth) und in Windows als Standard-Aufnahmegerät.
    Oder in den Einstellungen (Rechtsklick → „Einstellungen…“) unter Mikrofon die EPOS auswählen.
 
@@ -101,7 +115,33 @@ Ergebnis: `client\dist\Steno.exe` (eine Datei, etwa 30 MB, ohne Python auf den A
 | Home | `004` | `T2MDSTNO.004` / `STNOT2MD.004` |
 
 Die Arbeitsplatznummer muss zur Endung der Dateinamen passen, die T2med an diesem Rechner benutzt
-(`T2MED-EINRICHTUNG.md`).
+(`T2MED-EINRICHTUNG.md`). Installiert wird je Windows-Benutzer: wer sich an einem Rechner unter einem
+anderen Konto anmeldet, installiert dort noch einmal.
+
+**Umstieg von der alten Einrichtung** (exe in `C:\Program Files\Steno`, Verknüpfung in `shell:startup`):
+den alten Knopf beenden, wie oben installieren. Verknüpfungen mit „Steno“ im Namen im Autostart-Ordner
+entfernt die Installation selbst. Den Ordner unter `C:\Program Files` löschen (braucht Adminrechte, schadet
+aber nicht, wenn er bleibt). Einstellungen und Aufnahmen bleiben, sie lagen schon immer im Benutzerprofil.
+
+## Aktualisieren
+
+Beim Start fragt der Knopf den Server nach der bereitgelegten Version. Ist sie neuer:
+„Neue Version 0.42.0 verfügbar … Jetzt aktualisieren?“ → **Ja**: Steno lädt sie, prüft die Prüfsumme,
+ersetzt sich und startet nach einigen Sekunden von selbst wieder. Einstellungen, Fensterposition und
+Aufnahmen im Ausgang bleiben. **Nein**: diesmal nicht, beim nächsten Start fragt er wieder.
+
+Gefragt wird nur beim Start, nicht während der Arbeit. Und nicht, wenn T2med den Knopf über den
+FHIR-Knopf „Steno“ gestartet hat (dann soll gleich die Aufnahme laufen) — das Update kommt beim nächsten
+Start. Scheitert das Laden, läuft die bisherige Version weiter. Ein aus dem Download-Ordner gestarteter
+(nicht installierter) Knopf aktualisiert sich nicht.
+
+## Deinstallieren
+
+**Einstellungen → Apps → Steno-Knopf → Deinstallieren** (oder `Steno.exe --deinstallieren`). Läuft der
+Knopf, erst beenden (Rechtsklick → Beenden). Entfernt Programm, Autostart, Startmenü-Eintrag und
+`steno://`. Auf Nachfrage auch Einstellungen und Protokoll. Aufnahmen, die noch nicht an T2med übergeben
+sind, bleiben in `%LOCALAPPDATA%\Steno\aufnahmen` liegen und werden nach einer erneuten Installation
+nachgeholt.
 
 ## Einstellungen
 

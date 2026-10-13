@@ -720,6 +720,8 @@ h2 { font-size: 1.1rem; margin-bottom: 1rem; }
 }
 
 .settings-select { width: 100%; }
+.knopf-download { align-self: flex-start; text-decoration: none; }
+.knopf-hint { margin-top: 0; }
 
 /* Eigenes Wörterbuch */
 .settings-panel { max-width: min(440px, calc(100vw - 32px)); }

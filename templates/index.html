@@ -335,6 +335,16 @@
             </label>
           </div>
         </div>
+        {% if knopf_url %}
+        <div class="settings-row" id="knopfRow">
+          <label>Steno-Knopf für Windows</label>
+          <a class="btn-small knopf-download" href="{{ knopf_url }}" download>Steno.exe herunterladen</a>
+          <p class="hint-text knopf-hint">Ein runder Aufnahmeknopf, der vor T2med liegt und die Dokumentation selbst
+            an T2med übergibt. Datei herunterladen und starten, dann „Installieren“ – ohne Adminrechte, aktualisiert
+            sich danach selbst. Warnt Windows vor einer unbekannten Datei: Rechtsklick auf die Datei → Eigenschaften
+            → „Zulassen“ anhaken, oder „Weitere Informationen → Trotzdem ausführen“.</p>
+        </div>
+        {% endif %}
       </div>
     </div>
   </div>

@@ -4,7 +4,7 @@ Steno – Arzt-Patienten-Gespraeche und Psychotherapie-Sitzungen mitschreiben,
 zusammenfassen und per GDT an T2med uebergeben.
 """
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
@@ -41,7 +41,7 @@ from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.40.1"
+VERSION = "0.42.0"
 
 
 def _flag(value: str) -> bool:
@@ -57,6 +57,11 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
 WHISPER_MEDICAL_MODEL = os.getenv("WHISPER_MEDICAL_MODEL", "jimmymeister/whisper-large-v3-turbo-german-ct2")
 WHISPER_FAST_MODEL = os.getenv("WHISPER_FAST_MODEL", "small")
+# Diktat (/steno/diktat): eigenes Modell zum Ausprobieren. Gemessen am
+# 13.10.2026 mit TTS-Diktat: large-v3 schreibt einzelne Woerter richtiger
+# ("arterielle", "Linkstyp" statt weggelassen), braucht aber ~2,0 s je
+# Abschnitt statt ~0,7 s — beim Diktat wartet man darauf.
+WHISPER_DIKTAT_MODEL = os.getenv("WHISPER_DIKTAT_MODEL", "") or WHISPER_MEDICAL_MODEL
 # Silero-VAD im Whisper-Server: schneidet Stille heraus, BEVOR das Modell sie
 # sieht. Das ist der wirksamste Hebel gegen Halluzinationen — gemessen an einer
 # Testaufnahme (4:11, davon 3:45 Stille) lieferte der Server ohne VAD
@@ -141,6 +146,14 @@ STENO_BLOECKE = os.getenv("STENO_BLOECKE", "direkt").strip().lower()
 if STENO_BLOECKE not in ("direkt", "alle", "aus"):
     raise ValueError("STENO_BLOECKE muss direkt, alle oder aus sein")
 STENO_BLOCK_WARTEN = float(os.getenv("STENO_BLOCK_WARTEN", "20"))
+# Neue Knopf-Versionen: client/build.ps1 -Veroeffentlichen legt Steno.exe und
+# Steno.json (Version, SHA-256) hierher. Der Knopf fragt beim Start /steno und
+# laedt eine neuere Version nach Rueckfrage. Leer = keine Updates.
+STENO_KNOPF_DIR = os.getenv("STENO_KNOPF_DIR", "").strip()
+# Link "Steno-Knopf installieren" im Einstellungen-Dialog. Leer = die eigene
+# bereitgelegte Version (STENO_KNOPF_DIR), falls eine da ist. gespraech-web
+# hat keine und verweist hiermit auf die exe des Steno-Servers.
+STENO_KNOPF_URL = os.getenv("STENO_KNOPF_URL", "").strip()
 
 WHISPER_URL = f"http://{WHISPER_HOST}:{WHISPER_PORT}"
 OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
@@ -170,7 +183,7 @@ WHISPER_HALLUCINATIONS = {
     "thanks.", "thanks!",
     "untertitel der amara.org-community",
     "untertitel von stephanie geiges",
-    "Untertitelung des ZDF, 2020",
+    "untertitelung des zdf, 2020",
     "[musik]", "[applaus]", "♪",
 }
 
@@ -564,6 +577,7 @@ _DICTATION_COMMANDS = {
     "neuer absatz": "\n\n", "neue zeile": "\n", "absatz": "\n\n",
     "klammer auf": "(", "klammer zu": ")",
     "doppelpunkt": ":", "gedankenstrich": "–", "komma": ",", "punkt": ".",
+    "fragezeichen": "?", "ausrufezeichen": "!", "semikolon": ";",
 }
 _DICTATION_RE = re.compile(
     r"(?<!\w)(" + "|".join(k.replace(" ", r"\s+") for k in _DICTATION_COMMANDS) + r")(?!\w)",
@@ -579,7 +593,10 @@ _NUMBER_WORDS = {
     "null", "eins", "ein", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun",
     "zehn", "elf", "zwölf", "zwanzig", "dreißig", "vierzig", "fünfzig", "hundert", "tausend",
 }
-_ATTACH_LEFT = {",", ".", ":", ")", "\n", "\n\n"}
+_ATTACH_LEFT = {",", ".", ":", ";", "?", "!", ")", "\n", "\n\n"}
+_GLUED_COMMA_RE = re.compile(r"(?<!\w)(\w{3,}?)komma(?!\w)", re.IGNORECASE)
+_REAL_COMMA_WORDS = {"dezimal", "gleit", "fließ", "fliess"}
+_SPOKEN_DOT_RE = re.compile(r"(\w{2,})\.(?=(?:neuer?\s+(?:zeile|absatz)|absatz)(?!\w))", re.IGNORECASE)
 _WHISPER_PUNCT = " ,.;:!?"
 
 
@@ -592,6 +609,13 @@ def apply_dictation_commands(text: str) -> tuple[str, int]:
     Wort bleiben stehen: "Absatz/Punkt/Komma" hinter einem Artikel, auch mit
     Adjektiv dazwischen ("im letzten Absatz"), und "Komma" zwischen Zahlwoertern ("zwei Komma fuenf" —
     besser so als "zwei, fuenf"); zwischen Ziffern wird es zum Dezimalkomma."""
+    # Whisper klebt "Komma" gern ans Wort davor ("Schwindelkomma", gemessen 13.10.2026)
+    text = _GLUED_COMMA_RE.sub(
+        lambda m: m.group(0) if m.group(1).lower() in _REAL_COMMA_WORDS else f"{m.group(1)} Komma", text)
+    # ... und schreibt ein gesprochenes "Punkt" als "." ohne Leerzeichen vor den
+    # naechsten Befehl ("Kopfschmerzen.neue Zeile") — der zaehlt, anders als
+    # Whispers eigener Punkt mit Leerzeichen ("ebenfalls. Neue Zeile")
+    text = _SPOKEN_DOT_RE.sub(r"\1 Punkt ", text)
     parts: list = []                              # Text oder (Zeichen,) fuer einen Befehl
     pos = count = 0
     for m in _DICTATION_RE.finditer(text):
@@ -635,7 +659,7 @@ def apply_dictation_commands(text: str) -> tuple[str, int]:
                 out += (" " if out and out[-1] not in "\n(" else "") + symbol
                 gap = "" if symbol == "(" else " "
             keep = len(out)
-            capital = symbol in (".", "\n", "\n\n")
+            capital = symbol in (".", "?", "!", "\n", "\n\n")
             after_command = True
             continue
         if after_command:
@@ -646,6 +670,159 @@ def apply_dictation_commands(text: str) -> tuple[str, int]:
             out += gap + part
             capital, after_command = False, False
     return out.strip(" "), count
+
+
+# Diktat aufraeumen (nur /steno/diktat). Gemessen am 13.10.2026 mit TTS-Diktat
+# gegen den echten Whisper: Stille, Klicks und Atmer laesst VAD gar nicht erst
+# durch. Text entsteht aus Geraeuschen, die wie Sprache klingen: "aehm" -> "M.",
+# "hm hm" -> "Um, um." (mit Kontext ",,,,,, .,, …" bei avg_logprob -1,27),
+# "also aeh" -> "Also, eh ...". Im Diktat will das niemand an der Schreibmarke.
+_FILLERS = {"äh", "ähm", "öh", "öhm", "ehm", "hm", "hmm", "hmmm", "mhm", "mh"}
+# Nur als ganzer Abschnitt Fuellsel: "um", "eh", "also" sind auch Woerter
+_FILLER_CHUNK = _FILLERS | {"eh", "um", "uh", "m", "also", "so", "okay", "ok"}
+_FILLER_RE = re.compile(          # mit dem Komma davor: "hat, ähm, Schmerzen" -> "hat Schmerzen"
+    r"(?:,\s*)?(?<!\w)(?:" + "|".join(sorted(_FILLERS, key=len, reverse=True))
+    + r")(?!\w)(?:,|\.\.\.|…)*", re.IGNORECASE)
+_SUBTITLE_RE = re.compile(r"untertitel|amara\.org|f[üu]r'?s zuschauen", re.IGNORECASE)
+# Segmente darunter verwirft das Diktat; -1,0 ist auch faster-whispers eigene
+# Schwelle fuer den Temperatur-Rueckfall, 2,4 die fuer Wiederholungen
+_DICTATION_MIN_LOGPROB = -1.0
+_DICTATION_MAX_COMPRESSION = 2.4
+_DICTATION_CONTEXT = 300            # Zeichen Vortext als Prompt (~100 Tokens, Budget 448)
+
+
+def clean_dictation_noise(text: str) -> str:
+    """Fuellwoerter und Untertitel-Floskeln raus; ein Abschnitt nur aus Fuellsel
+    (oder ohne ein Wort) wird leer. "..." ist Zoegern: mitten im Text ein
+    Leerzeichen, am Ende ein Punkt."""
+    words = re.findall(r"\w+", text.lower())
+    if (not words or all(w in _FILLER_CHUNK for w in words)
+            or _is_hallucination(text) or _SUBTITLE_RE.search(text)):
+        return ""
+    capital = text[:1].isupper()
+    out = _FILLER_RE.sub("", text)
+    out = re.sub(r"\s*(?:\.\.\.|…)+\s*$", ".", out)
+    out = re.sub(r"\s*(?:\.\.\.|…)+\s*", " ", out)
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+    out = re.sub(r"([,;:])(?:\s*[,;:])+", r"\1", out)          # "Schmerzen, äh, seit" -> ", ,"
+    out = re.sub(r"[,;]+(?=\s*[.!?]?\s*$)", "", out)            # "Schmerzen, äh." -> "Schmerzen."
+    out = re.sub(r"^[\s,;:.]+", "", out)
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    if capital and out[:1].islower():                            # "Äh, die Patientin"
+        out = out[0].upper() + out[1:]
+    return out
+
+
+# Abkuerzungen, deren Punkt am Abschnittsende kein Satzende ist
+_ABBREVIATIONS = {
+    "usw", "etc", "bzw", "ca", "vgl", "ggf", "evtl", "inkl", "bzgl", "dr", "prof", "pat",
+    "z.b", "d.h", "u.a", "v.a", "z.n", "o.b", "o.ä", "s.o", "s.u",
+}
+
+
+def split_sentence_end(text: str) -> tuple[str, str]:
+    """Whispers Satzzeichen am Abschnittsende abtrennen: ("…Knie", ".").
+
+    Der Abschnitt endet, weil eine Pause kam, nicht weil der Satz zu Ende ist —
+    Whisper setzt trotzdem fast immer einen Punkt (gemessen: "…im rechten Knie.
+    Seit etwa drei Wochen."). Ob er stehen bleibt, entscheidet der Knopf am
+    naechsten Abschnitt."""
+    m = re.search(r"([.?!])$", text)
+    if not m or text.endswith(".."):
+        return text, ""
+    last = re.findall(r"[\w.]+$", text[:-1])
+    if last and (len(last[0]) == 1 or last[0].lower() in _ABBREVIATIONS):
+        return text, ""
+    return text[:-1].rstrip(), m.group(1)
+
+
+# "Befund, Kniegelenk …" -> "Befund: Kniegelenk …": Whisper macht aus dem
+# gesprochenen Doppelpunkt nach einer Ueberschrift ein Komma. Nur am Satzanfang
+# und nicht in Aufzaehlungen ("Befund, Diagnose und Therapie besprochen").
+_HEADINGS = {
+    "anamnese", "befund", "befunde", "diagnose", "diagnosen", "dauerdiagnosen", "medikation",
+    "dauermedikation", "therapie", "procedere", "prozedere", "beurteilung", "empfehlung",
+    "epikrise", "labor", "allergien", "vorgeschichte",
+}
+
+
+def heading_colon(text: str) -> str:
+    whole = re.fullmatch(r"(\w+)[.!?,]?", text)
+    if whole and whole.group(1).lower() in _HEADINGS and whole.group(1)[0].isupper():
+        return whole.group(1) + ":"
+
+    def fix(m: re.Match) -> str:
+        sentence = text[m.end():]
+        sentence = sentence[:re.search(r"[.!?\n]|$", sentence).start()]
+        if m.group(2).lower() not in _HEADINGS or re.search(r"\b(?:und|oder|sowie)\b", sentence):
+            return m.group(0)
+        return m.group(1) + m.group(2) + ": "
+
+    return re.sub(r"(^|[.!?\n]\s*)([A-ZÄÖÜ]\w+),\s+", fix, text)
+
+
+# Sie/sie: Whisper hat das Siezen aus Untertiteln gelernt und schreibt "Sie",
+# wo im Diktat fast immer die Patientin gemeint ist. Eindeutig ist es nur mit
+# dem Verb: die Hoeflichkeitsform verlangt die Pluralform ("Sie haben"), steht
+# eine Singularform im selben Teilsatz ("dass Sie die Tabletten nehmen soll"),
+# ist es "sie". Am Satzanfang bleibt es gross, Partizipien gleicher Form
+# ("berichtet", "verneint") stehen nicht in der Liste ("Haben Sie berichtet").
+_SIE_VERBS = frozenset("""
+hat hatte habe hätte ist war sei wäre wird wurde werde würde kann konnte könne könnte
+muss musste müsse müsste soll sollte solle will wollte wolle darf durfte dürfe dürfte
+mag mochte möge möchte klagt klagte klage leidet litt leide gibt gab gebe nimmt nahm nehme
+kommt kam komme bekommt bekam bekomme erhält erhielt erhalte fühlt fühlte fühle wirkt wirkte wirke
+schläft schlief schlafe isst aß esse trinkt trank trinke raucht rauchte rauche arbeitet
+arbeitete arbeite lebt lebte lebe wohnt wohnte wohne geht ging gehe braucht brauchte brauche
+weiß wusste wisse sieht sah sehe hört hörte höre spürt spürte spüre läuft lief laufe liegt lag
+liege sitzt saß sitze steht stand stehe verträgt vertrug vertrage wünscht wünschte meint
+meinte sagt sagte denkt dachte denke glaubt glaubte findet fand finde macht machte mache tut
+tat wiegt wog misst maß hustet hustete huste schwitzt schwitzte friert fror blutet blutete
+berichtete schildert schilderte beschreibt beschrieb äußert äußerte verneinte bejahte
+bemerkte merkt merkte merke stellt stellte pflegt pflegte sage glaube
+""".split())
+# Davor: "Sie" ist Objekt ("die Patientin, die Sie kennt"); im selben
+# Teilsatz: ein anderes Subjekt ("dass Sie der Kollege anruft", "wenn der
+# Kollege Sie sprechen will")
+_SIE_OBJECT_BEFORE = {"der", "die", "das", "den", "dem", "welche", "welcher", "welches"}
+_SIE_OTHER_SUBJECT = {"der", "er", "ich", "man", "wer", "jemand", "niemand"}
+_CLAUSE_END_RE = re.compile(r"[,;:.!?()\n–]")
+_POSSESSIVE_RE = re.compile(r"(?<!\w)Ihr(?:e|en|em|er|es)?(?!\w)")
+
+
+def fix_sie(text: str) -> tuple[str, int]:
+    """"Sie" mitten im Satz mit einem Verb im Singular -> "sie", Possessiva im
+    selben Teilsatz mit ("dass Sie Ihre Tabletten nimmt"). Liefert Text und Zahl."""
+    edits: list = []                              # (Anfang, Ende, Ersatz)
+    for m in re.finditer(r"(?<!\w)Sie(?!\w)", text):
+        before = text[:m.start()].rstrip(" \"„“")
+        if not before or before[-1] in ".!?:\n":
+            continue                              # Satzanfang
+        prev = re.findall(r"\w+", before)
+        if prev and prev[-1].lower() in _SIE_OBJECT_BEFORE:
+            continue
+        clause_start = max((c.end() for c in _CLAUSE_END_RE.finditer(before)), default=0)
+        if any(w.lower() in _SIE_OTHER_SUBJECT for w in re.findall(r"\w+", before[clause_start:])):
+            continue                              # "wenn der Kollege Sie sprechen will"
+        rest = text[m.end():]
+        end = _CLAUSE_END_RE.search(rest)
+        clause = rest[:end.start()] if end else rest
+        verb = False
+        for word in re.findall(r"\w+", clause)[:10]:
+            if word in _SIE_VERBS:                # klein geschrieben: "Macht" ist ein Nomen
+                verb = True
+                break
+            if word.lower() in _SIE_OTHER_SUBJECT:
+                break
+        if not verb:
+            continue
+        edits.append((m.start(), m.end(), "sie"))
+        for p in _POSSESSIVE_RE.finditer(clause):
+            start = m.end() + p.start()
+            edits.append((start, start + 1, "i"))
+    for start, stop, new in sorted(edits, reverse=True):
+        text = text[:start] + new + text[stop:]
+    return text, sum(new == "sie" for _, _, new in edits)
 
 
 def _exc_text(exc: BaseException) -> str:
@@ -923,6 +1100,36 @@ async def transcribe_with_units(
     return _clean_transcription(text, lang_mode, units)
 
 
+async def transcribe_dictation(audio_path: str, filename: str, prompt: str = "") -> tuple[Transcription, int]:
+    """Ein Diktat-Abschnitt; liefert das Ergebnis und die Zahl verworfener Segmente.
+
+    `prompt` ist der Text davor (vom Knopf): Whisper schreibt damit eine
+    Fortsetzung klein und setzt weniger Punkte an Abschnittsgrenzen — gemessen
+    am 13.10.2026 "seit etwa drei Wochen" statt "Seit etwa drei Wochen.", aber
+    nur, wenn der Prompt nicht selbst mit einem Satzzeichen endet (das schneidet
+    der Knopf ab). Wort-Zeitstempel, weil whisper-patch/stt.py nur dann
+    hallucination_silence_threshold setzt. Segmente, bei denen Whisper selbst
+    unsicher war (avg_logprob) oder sich wiederholt (compression_ratio), fallen weg.
+    """
+    data = {
+        "response_format": "verbose_json",
+        "timestamp_granularities[]": ["word", "segment"],
+        **_whisper_model_fields("de", WHISPER_DIKTAT_MODEL),
+    }
+    if prompt:
+        data["prompt"] = prompt
+    response = await _post_whisper(audio_path, filename, data)
+    payload = response.json()
+    segments = payload.get("segments")
+    if not segments:
+        return _clean_transcription((payload.get("text") or "").strip(), "de"), 0
+    kept = [s for s in segments
+            if s.get("avg_logprob", 0.0) >= _DICTATION_MIN_LOGPROB
+            and s.get("compression_ratio", 0.0) <= _DICTATION_MAX_COMPRESSION]
+    raw = " ".join(s["text"].strip() for s in kept if s.get("text"))
+    return _clean_transcription(raw, "de"), len(segments) - len(kept)
+
+
 async def _whisper_units(audio_path: str, filename: str, lang_mode: str) -> tuple[str, list]:
     """Rohtext und Einheiten ({"start", "end", "text"}) von Whisper, noch ungeputzt.
 
@@ -997,17 +1204,64 @@ def _clean_transcription(raw: str, lang_mode: str, units: list | None = None) ->
     return Transcription(text, share, units)
 
 
+# Das deutsche Medizin-Modell (WHISPER_MEDICAL_MODEL) schreibt nie "ß" —
+# Schweizer Schreibung aus seinen Trainingsdaten. Gemessen am 13.10.2026 mit
+# TTS: "Fuss", "grosse", "regelmässige", "Massnahmen", "schliesslich", "heisst",
+# "Strasse", "äusserst"; large-v3 schreibt alles richtig. Ersetzt werden nur
+# Wortstaemme, deren ss-Form kein eigenes Wort ist ("Masse", "Riss", "Biss",
+# "Blässe", "dass" bleiben), auch mitten im Wort ("Plattfuss", "Blutgefässe").
+# An den 116 Logs von gespraech-web: 421 Ersetzungen, 98 verschiedene, keine
+# macht aus einem richtigen Wort ein falsches (meist "weiss", "heisst", "Fuss").
+_SHARP_S_STEMS = (
+    "äusser", "draussen", "gross", "gröss", "fuss", "füss", "strasse", "heiss", "weiss",
+    "schliess", "liess", "hiess", "giess", "geniess", "beiss", "stoss", "stöss", "spass",
+    "gruss", "grüss", "schweiss", "gefäss", "gesäss", "süss", "bloss", "mässig", "gemäss",
+    "massnahm", "ausmass", "übermass", "massstab", "massband", "ermassen",   # einigermaßen
+)
+# Nur am Wortanfang: "Hausservice" ist Haus + Service
+_SHARP_S_START = ("ausser", "aussen")
+# ... und nie in diesen Woertern ("Aussendung" = aus + Sendung, "Fussel", "weissagen")
+_SHARP_S_KEEP_RE = re.compile(r"aussend|fussel|weissag", re.IGNORECASE)
+_SHARP_S_RE = re.compile(
+    "|".join([*sorted(_SHARP_S_STEMS, key=len, reverse=True), *(f"^{s}" for s in _SHARP_S_START)]),
+    re.IGNORECASE)
+_WORD_RE = re.compile(r"\w+")
+
+
+def fix_sharp_s(text: str) -> tuple[str, int]:
+    """ss -> ß in bekannten Staemmen (jeder hat genau ein "ss"); Woerter aus dem
+    eigenen Woerterbuch (Namen wie "Weiss", "Strasser") bleiben. Liefert Text
+    und Zahl der geaenderten Woerter."""
+    count = 0
+
+    def word(m: re.Match) -> str:
+        nonlocal count
+        w = m.group(0)
+        if "ss" not in w.lower() or _SHARP_S_KEEP_RE.search(w) or w.lower() in _TERM_KNOWN:
+            return w
+        new = _SHARP_S_RE.sub(lambda s: re.sub("ss", "ß", s.group(0), count=1, flags=re.IGNORECASE), w)
+        count += new != w
+        return new
+
+    return _WORD_RE.sub(word, text), count
+
+
 def _fix_terms(text: str, units: list = ()) -> str:
-    """correct_terms() auf Fliesstext und Einheiten; nur fuer deutsche Aufnahmen.
+    """correct_terms() und fix_sharp_s() auf Fliesstext und Einheiten; nur fuer
+    deutsche Aufnahmen.
 
     Geloggt wird nur die Zahl: welches Praeparat in welcher Sitzung fiel, gehoert
     nicht ins Container-Log (auch Psychotherapie laeuft hier durch).
     """
     text, count = correct_terms(text)
+    text, sharp = fix_sharp_s(text)
     for u in units:
         u["text"], _ = correct_terms(u["text"])
+        u["text"], _ = fix_sharp_s(u["text"])
     if count:
         logger.info(f"Fachbegriffe korrigiert: {count}")
+    if sharp:
+        logger.info(f"ss -> ß: {sharp}")
     return text
 
 
@@ -1310,8 +1564,15 @@ async def index(request: Request):
                  "title": APP_TITLE, "subtitle": APP_SUBTITLE,
                  "loop_warn_share": LOOP_WARN_SHARE,
                  "woerterbuch": bool(WOERTERBUCH),
-                 "gdt": {"enabled": GDT.enabled, "workstations": GDT.workstations}},
+                 "gdt": {"enabled": GDT.enabled, "workstations": GDT.workstations},
+                 "knopf_url": _knopf_url()},
     )
+
+
+def _knopf_url() -> str:
+    if STENO_KNOPF_URL:
+        return STENO_KNOPF_URL
+    return "/steno/knopf/Steno.exe" if _knopf_release() else ""
 
 
 @app.get("/models")
@@ -2275,7 +2536,35 @@ async def steno_config():
         "fhir": FHIR.enabled,
         "bloecke": "" if STENO_BLOECKE == "aus" else STENO_BLOECKE,
         "diktat": True,
+        "knopf": _knopf_release(),
     }
+
+
+def _knopf_release() -> dict | None:
+    """Die bereitliegende Knopf-Version, oder None. Steno.json kommt von
+    build.ps1 nach der exe: passen beide nicht zusammen (gerade wird
+    veroeffentlicht), scheitert beim Knopf die Pruefsumme, nichts weiter."""
+    if not STENO_KNOPF_DIR:
+        return None
+    folder = Path(STENO_KNOPF_DIR)
+    try:
+        meta = json.loads((folder / "Steno.json").read_text(encoding="utf-8-sig"))
+        size = (folder / "Steno.exe").stat().st_size
+    except (OSError, ValueError):
+        return None
+    version, sha256 = str(meta.get("version", "")), str(meta.get("sha256", "")).lower()
+    if not re.fullmatch(r"\d+(\.\d+){1,3}", version) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        return None
+    return {"version": version, "sha256": sha256, "size": size}
+
+
+@app.get("/steno/knopf/Steno.exe")
+async def steno_knopf_download():
+    """Die Knopf-exe: fuer das Update und zum ersten Installieren im Browser."""
+    if not _knopf_release():
+        raise HTTPException(status_code=404, detail="Keine Knopf-Version bereitgelegt.")
+    return FileResponse(Path(STENO_KNOPF_DIR) / "Steno.exe", filename="Steno.exe",
+                        media_type="application/vnd.microsoft.portable-executable")
 
 
 @app.post("/steno/jobs")
@@ -2379,24 +2668,33 @@ async def steno_blocks_drop(job_id: str):
 
 
 @app.post("/steno/diktat")
-async def steno_dictation(ap: str = Form(...), audio: UploadFile = File(...)):
+async def steno_dictation(ap: str = Form(...), audio: UploadFile = File(...),
+                          kontext: str = Form(""), satzende: str = Form("")):
     """Diktat (Knopf, Direkt): ein Abschnitt, der Text kommt sofort zurueck und
     der Knopf gibt ihn an der Schreibmarke ein. Kein Auftrag, kein T2med, kein
-    Log — der Text bleibt nirgends auf dem Server liegen.
+    Log — der Text bleibt nirgends auf dem Server liegen, auch `kontext` nicht.
 
-    Medizin-Modell und dieselbe Bereinigung wie fuer Gespraeche (Schleifen,
-    verhoerte Fachbegriffe), dazu Diktierbefehle ("neue Zeile", "Komma" …,
-    apply_dictation_commands()). Ein Abschnitt, der nur aus einem bekannten
-    Whisper-Baustein besteht ("Vielen Dank."), ist meist Stille und kommt leer
-    zurueck. Die Schlange teilt er sich mit den Bloecken: was live mitlaeuft,
-    soll nicht hinter einer ganzen Aufnahme warten.
+    Medizin-Modell (WHISPER_DIKTAT_MODEL) und dieselbe Bereinigung wie fuer
+    Gespraeche (Schleifen, verhoerte Fachbegriffe), dazu: unsichere Segmente,
+    Fuellwoerter und Floskeln raus (transcribe_dictation(),
+    clean_dictation_noise()), Diktierbefehle ("neue Zeile", "Komma" …,
+    apply_dictation_commands()), "Befund, …" -> "Befund: …" und Sie/sie
+    (fix_sie()). Die Schlange teilt er sich mit den Bloecken: was live
+    mitlaeuft, soll nicht hinter einer ganzen Aufnahme warten.
+
+    `kontext` = der Text davor in diesem Diktat (Prompt fuer Whisper).
+    `satzende=offen` (Knopf ab 0.42): Whispers Satzzeichen am Ende kommt
+    getrennt als `satzende` zurueck, der Knopf haelt es zurueck, bis der
+    naechste Abschnitt zeigt, ob der Satz weitergeht. Aeltere Knoepfe bekommen
+    es wie bisher im Text.
     """
     ap = _gdt_workstation(ap)
+    prompt = " ".join(kontext.split())[-_DICTATION_CONTEXT:]
     tmp_path = await _save_upload(audio)
     t0 = time.monotonic()
     try:
         async with _steno_blocks:
-            result = await transcribe_audio(tmp_path, audio.filename or "diktat.flac", "de")
+            result, unsure = await transcribe_dictation(tmp_path, audio.filename or "diktat.flac", prompt)
     except HTTPException:
         raise
     except Exception as e:
@@ -2404,11 +2702,21 @@ async def steno_dictation(ap: str = Form(...), audio: UploadFile = File(...)):
         raise HTTPException(status_code=502, detail=f"Whisper nicht erreichbar: {_exc_text(e)}")
     finally:
         Path(tmp_path).unlink(missing_ok=True)
-    text = "" if _is_hallucination(result.text) else result.text
+    text = clean_dictation_noise(result.text)
+    end = ""
+    if satzende == "offen":
+        text, end = split_sentence_end(text)
     text, commands = apply_dictation_commands(text)
-    logger.info(f"Diktat ({ap}): {len(text.split())} Wörter, {commands} Befehle "
+    text = heading_colon(text)
+    text, sie = fix_sie(text)
+    if not text or text[-1] in ".?!:;,\n(–":
+        end = ""                                  # ein Befehl am Ende hat das letzte Wort
+    notes = "".join([f", {unsure} Segmente unsicher" if unsure else "",
+                     f", {sie}× Sie->sie" if sie else "",
+                     ", leer" if result.text and not text else ""])
+    logger.info(f"Diktat ({ap}): {len(text.split())} Wörter, {commands} Befehle{notes} "
                 f"in {time.monotonic() - t0:.1f} s")
-    return {"text": text, "loop_share": round(result.loop_share, 3)}
+    return {"text": text, "satzende": end, "loop_share": round(result.loop_share, 3)}
 
 
 @app.get("/steno/jobs/{job_id}")

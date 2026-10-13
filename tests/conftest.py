@@ -40,6 +40,7 @@ class FakeServices:
         self.segments = [dict(s) for s in SEGMENTS]
         self.whisper_fails = False      # jede Whisper-Anfrage -> 500
         self.verbose_fails = False      # nur verbose_json -> 500
+        self.whisper_segments = None    # eigene Segmente fuer verbose_json (Diktat: avg_logprob)
         self.diarize_status = 200
         self.llm_tokens = ["Hallo ", "Welt"]
         self.llm_done_reason = "stop"
@@ -70,7 +71,7 @@ class FakeServices:
             if b"verbose_json" in body:
                 return httpx.Response(200, json={
                     "text": self.text,
-                    "segments": [{"start": 0.0, "end": 4.8, "text": self.text}],
+                    "segments": self.whisper_segments or [{"start": 0.0, "end": 4.8, "text": self.text}],
                     "words": [{"word": w, "start": s, "end": e} for w, s, e in self.words],
                 })
             return httpx.Response(200, text=self.text + "\n")

@@ -141,17 +141,50 @@ def test_steno_config(steno, monkeypatch):
     assert steno.get("/steno").json() == {
         "version": server.VERSION, "gdt": True,
         "workstations": {"001": "Sprechzimmer 1", "002": ""}, "psy_device": True,
-        "fhir": False, "bloecke": "direkt", "diktat": True,
+        "fhir": False, "bloecke": "direkt", "diktat": True, "knopf": None,
     }
     monkeypatch.setattr(server, "STENO_BLOECKE", "aus")
     assert steno.get("/steno").json()["bloecke"] == ""
 
 
+def publish_knopf(folder, data=b"MZ-steno", version="0.41.0", sha256=None):
+    import hashlib
+    folder.mkdir(exist_ok=True)
+    (folder / "Steno.exe").write_bytes(data)
+    sha256 = sha256 or hashlib.sha256(data).hexdigest()
+    # mit BOM, wie PowerShell 5.1 sie gern schreibt
+    (folder / "Steno.json").write_text(json.dumps({"version": version, "sha256": sha256}),
+                                       encoding="utf-8-sig")
+    return sha256
+
+
+def test_knopf_release_and_download(steno, monkeypatch, tmp_path):
+    folder = tmp_path / "knopf"
+    monkeypatch.setattr(server, "STENO_KNOPF_DIR", str(folder))
+    assert steno.get("/steno").json()["knopf"] is None            # Ordner fehlt
+    assert steno.get("/steno/knopf/Steno.exe").status_code == 404
+    sha256 = publish_knopf(folder)
+    assert steno.get("/steno").json()["knopf"] == {"version": "0.41.0", "sha256": sha256, "size": 8}
+    r = steno.get("/steno/knopf/Steno.exe")
+    assert r.status_code == 200 and r.content == b"MZ-steno"
+
+    publish_knopf(folder, version="neu")                           # kaputte Angaben: kein Update
+    assert steno.get("/steno").json()["knopf"] is None
+    publish_knopf(folder, sha256="xyz")
+    assert steno.get("/steno").json()["knopf"] is None
+    monkeypatch.setattr(server, "STENO_KNOPF_DIR", "")             # gespraech-web
+    assert steno.get("/steno").json()["knopf"] is None
+
+
 # ---------------------------------------------------------------- Diktat (Direkt)
 
-def dictate(client, ap="001"):
-    return client.post("/steno/diktat", data={"ap": ap},
+def dictate(client, ap="001", **fields):
+    return client.post("/steno/diktat", data={"ap": ap, **fields},
                        files={"audio": ("d-0.flac", b"fLaC-diktat", "audio/flac")})
+
+
+def whisper_request(fake) -> bytes:
+    return [b for _, p, b in fake.requests if p == "/v1/audio/transcriptions"][-1]
 
 
 def test_dictation_returns_text_and_leaves_nothing(steno, fake, tmp_path):
@@ -190,9 +223,130 @@ def test_dictation_applies_commands(steno, fake):
     ("im letzten Absatz steht der wichtigste Punkt.", "im letzten Absatz steht der wichtigste Punkt."),
     ("Das ist ein wunder Punkt.", "Das ist ein wunder Punkt."),
     ("Druckpunkt und Doppelpunktion", "Druckpunkt und Doppelpunktion"),
+    # neu in 0.42
+    ("Hat sie Fieber Fragezeichen", "Hat sie Fieber?"),
+    ("Achtung Ausrufezeichen bitte prüfen", "Achtung! Bitte prüfen"),
+    ("Ibuprofen Semikolon Novalgin", "Ibuprofen; Novalgin"),
+    ("Die Patientin klagt über Schwindelkomma vor allem morgens", "Die Patientin klagt über Schwindel, vor allem morgens"),
+    ("das Dezimalkomma fehlt", "das Dezimalkomma fehlt"),
+    ("seit gestern Kopfschmerzen.neue Zeile. Blutdruck", "seit gestern Kopfschmerzen.\nBlutdruck"),
 ])
 def test_dictation_commands(spoken, written):
     assert server.apply_dictation_commands(spoken)[0] == written
+
+
+def test_dictation_context_and_sentence_end(steno, fake):
+    """Knopf ab 0.42: Kontext geht als Prompt an Whisper, Whispers Punkt am Ende
+    kommt getrennt zurueck — ausser ein Diktierbefehl setzt ihn."""
+    fake.text = "Seit drei Wochen."
+    r = dictate(steno, kontext="Schmerzen im\nrechten Knie", satzende="offen").json()
+    assert (r["text"], r["satzende"]) == ("Seit drei Wochen", ".")
+    body = whisper_request(fake)
+    assert b'name="prompt"\r\n\r\nSchmerzen im rechten Knie\r\n' in body
+    assert b"verbose_json" in body and b'"word"' not in body and b"\r\n\r\nword\r\n" in body
+    fake.text = "Seit drei Wochen Punkt."
+    r = dictate(steno, satzende="offen").json()
+    assert (r["text"], r["satzende"]) == ("Seit drei Wochen.", "")
+    assert b'name="prompt"' not in whisper_request(fake)
+    fake.text = "Seit drei Wochen."                              # Knopf bis 0.41
+    assert dictate(steno).json() == {"text": "Seit drei Wochen.", "satzende": "", "loop_share": 0.0}
+
+
+def test_dictation_drops_unsure_segments_and_fillers(steno, fake):
+    fake.whisper_segments = [
+        {"start": 0.0, "end": 2.0, "text": " Die Patientin klagt über Schwindel.", "avg_logprob": -0.2,
+         "compression_ratio": 1.0},
+        {"start": 2.0, "end": 3.0, "text": " ,,,,,, .,, ,,", "avg_logprob": -1.27, "compression_ratio": 1.4},
+    ]
+    assert dictate(steno).json()["text"] == "Die Patientin klagt über Schwindel."
+    fake.whisper_segments = None
+    for noise in ("M.", "Um, um.", "Also, eh ...", "Untertitel im Auftrag des ZDF für funk, 2017"):
+        fake.text = noise
+        assert dictate(steno, satzende="offen").json() == {"text": "", "satzende": "", "loop_share": 0.0}
+
+
+def test_dictation_heading_and_sie(steno, fake):
+    fake.text = "Befund, Kniegelenk frei. Ich habe ihr erklärt, dass Sie Ihre Tabletten nehmen soll."
+    assert dictate(steno).json()["text"] == ("Befund: Kniegelenk frei. Ich habe ihr erklärt, "
+                                             "dass sie ihre Tabletten nehmen soll.")
+    fake.text = "Befund."
+    assert dictate(steno, satzende="offen").json()["text"] == "Befund:"
+
+
+@pytest.mark.parametrize("spoken, written", [
+    ("Äh, die Patientin hat, ähm, Schmerzen.", "Die Patientin hat Schmerzen."),
+    ("Schmerzen, äh.", "Schmerzen."),
+    ("Seit drei Tagen ...", "Seit drei Tagen."),
+    ("Die Patientin ... hat Fieber", "Die Patientin hat Fieber"),
+    ("Um 8 Uhr nüchtern", "Um 8 Uhr nüchtern"),                     # "um" ist auch ein Wort
+    ("Vielen Dank.", ""),
+])
+def test_dictation_noise(spoken, written):
+    assert server.clean_dictation_noise(spoken) == written
+
+
+@pytest.mark.parametrize("text, split", [
+    ("Schmerzen im rechten Knie.", ("Schmerzen im rechten Knie", ".")),
+    ("Wie geht es?", ("Wie geht es", "?")),
+    ("Blutdruck 130/80.", ("Blutdruck 130/80", ".")),
+    ("Termin bei Dr.", ("Termin bei Dr.", "")),
+    ("Schmerzen, Übelkeit usw.", ("Schmerzen, Übelkeit usw.", "")),
+    ("Hepatitis A.", ("Hepatitis A.", "")),
+    ("ohne Punkt", ("ohne Punkt", "")),
+])
+def test_split_sentence_end(text, split):
+    assert server.split_sentence_end(text) == split
+
+
+@pytest.mark.parametrize("text, fixed", [
+    ("Diagnosen, Arterielle Hypertonie, Diabetes mellitus Typ 2.",
+     "Diagnosen: Arterielle Hypertonie, Diabetes mellitus Typ 2."),
+    ("Die Patientin klagt. Labor, Kreatinin 1,1.", "Die Patientin klagt. Labor: Kreatinin 1,1."),
+    ("Befund, Diagnose und Therapie besprochen.", "Befund, Diagnose und Therapie besprochen."),
+    ("Röntgen, Labor, EKG unauffällig.", "Röntgen, Labor, EKG unauffällig."),
+    ("Ohne Befund, alles gut.", "Ohne Befund, alles gut."),
+    ("Prozedere", "Prozedere:"),
+])
+def test_heading_colon(text, fixed):
+    assert server.heading_colon(text) == fixed
+
+
+@pytest.mark.parametrize("text, fixed", [
+    ("Ich habe ihr erklärt, dass Sie die Tabletten morgens einnehmen soll.",
+     "Ich habe ihr erklärt, dass sie die Tabletten morgens einnehmen soll."),
+    ("Die Tochter berichtet, Sie habe Ihre Mutter kaum erreicht und Sie wirke verwirrt.",
+     "Die Tochter berichtet, sie habe ihre Mutter kaum erreicht und sie wirke verwirrt."),
+    # bleibt: Satzanfang, Hoeflichkeitsform, Partizip, Objekt
+    ("Sie hat seit gestern Fieber.", "Sie hat seit gestern Fieber."),
+    ("Können Sie mir sagen, ob Sie Fieber haben?", "Können Sie mir sagen, ob Sie Fieber haben?"),
+    ("Haben Sie berichtet, dass es schlimmer wird?", "Haben Sie berichtet, dass es schlimmer wird?"),
+    ("Die Patientin, die Sie kennt, kommt morgen.", "Die Patientin, die Sie kennt, kommt morgen."),
+    ("Wir bitten Sie um Mitbeurteilung.", "Wir bitten Sie um Mitbeurteilung."),
+    ("Rufen Sie an, wenn der Kollege Sie sprechen will.", "Rufen Sie an, wenn der Kollege Sie sprechen will."),
+])
+def test_fix_sie(text, fixed):
+    assert server.fix_sie(text)[0] == fixed
+
+
+@pytest.mark.parametrize("text, fixed", [
+    # so schreibt das Medizin-Modell (gemessen 13.10.2026)
+    ("Ausserdem einen geschwollenen Fuss und grosse Schmerzen.",
+     "Außerdem einen geschwollenen Fuß und große Schmerzen."),
+    ("regelmässige Massnahmen, schliesslich heisst es: sie weiss es, die Strasse, äusserst",
+     "regelmäßige Maßnahmen, schließlich heißt es: sie weiß es, die Straße, äußerst"),
+    ("geäussert, Eiweiss, Blutgefässe, Plattfuss, Aussenmeniskus, einigermassen, Massstab",
+     "geäußert, Eiweiß, Blutgefäße, Plattfuß, Außenmeniskus, einigermaßen, Maßstab"),
+    # richtig mit ss
+    ("Meniskusriss, Biss, Blässe, Masse, massiv, Abszess, dass, Schluss, Aussendung, Fussel, Hausservice",
+     "Meniskusriss, Biss, Blässe, Masse, massiv, Abszess, dass, Schluss, Aussendung, Fussel, Hausservice"),
+])
+def test_fix_sharp_s(text, fixed):
+    assert server.fix_sharp_s(text)[0] == fixed
+
+
+def test_sharp_s_spares_own_words(fake, monkeypatch):
+    monkeypatch.setattr(server, "_TERM_KNOWN", server._TERM_KNOWN | {"weiss"})
+    assert server.fix_sharp_s("Frau Weiss ist gross")[0] == "Frau Weiss ist groß"
 
 
 def test_dictation_errors(steno, fake):

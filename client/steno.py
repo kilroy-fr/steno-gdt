@@ -59,9 +59,10 @@ import sounddevice as sd
 import soundfile as sf
 from PIL import ImageTk
 
+import installation
 import knopf
 
-VERSION = "0.40.0"
+VERSION = "0.42.0"
 
 APP_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Steno"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Steno"
@@ -468,6 +469,13 @@ if sys.platform == "win32":
         _anonymous_ = ("u",)
         _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
 
+    class _GUITHREADINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                    ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                    ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                    ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                    ("rcCaret", wintypes.RECT)]
+
 TYPE_DELAY = 0.005              # Sekunden nach jeder Taste aus dem Tastaturlayout
 PACKET_DELAY = 0.03             # nach jedem Zeichen ohne Taste (VK_PACKET), siehe type_text()
 _KEYUP, _UNICODE = 0x0002, 0x0004
@@ -565,6 +573,20 @@ def typing_blocked() -> str:
     return ""
 
 
+def input_focus():
+    """Wohin gerade getippt wird: Fenster im Vordergrund und Steuerelement mit
+    dem Fokus. Aendert es sich mitten im Diktat, faengt der Text dort neu an.
+    Programme, die ihre Felder selbst zeichnen, haben nur ein Steuerelement —
+    dort faellt ein Feldwechsel eben nicht auf."""
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    info = _GUITHREADINFO(cbSize=ctypes.sizeof(_GUITHREADINFO))
+    thread = user32.GetWindowThreadProcessId(hwnd, None)
+    if hwnd and user32.GetGUIThreadInfo(thread, ctypes.byref(info)):
+        return hwnd, info.hwndFocus
+    return hwnd, None
+
+
 class Dictation:
     """Direkt: Diktat an die Schreibmarke.
 
@@ -575,21 +597,33 @@ class Dictation:
     auf der Platte: der Text steht danach dort, wo er hingehoert, und sonst
     nirgends. Scheitert ein Abschnitt, fehlt sein Text — das meldet der Knopf.
 
+    Satzzeichen an Abschnittsgrenzen (Server ab 0.42): ein Abschnitt endet an
+    einer Pause, nicht am Satzende, Whisper setzt trotzdem einen Punkt. Der
+    Server gibt ihn getrennt zurueck (`satzende`), hier wartet er: faengt der
+    naechste Abschnitt gross an, kommt er davor, sonst faellt er weg; am Ende
+    des Diktats kommt er. Damit das klappt, geht der bisher eingegebene Text
+    ohne dieses Zeichen als Kontext mit — Whisper schreibt eine Fortsetzung
+    dann klein. Wechselt das Eingabefeld (input_focus()), beginnt alles neu.
+
     Meldungen gehen als ("flash", Text) in die Ereignisschlange der App.
     """
     RETRIES = 3
     WAIT_FLASH = 600                     # "Diktat wartet …" steht, bis es weitergeht
+    CONTEXT = 300                        # Zeichen Vortext fuer Whisper (Server kuerzt ebenso)
 
     def __init__(self, api: "Api", ap: str, events: queue.Queue,
-                 type_text=type_text, blocked=typing_blocked):
+                 type_text=type_text, blocked=typing_blocked, focus=input_focus):
         self.api, self.ap, self.events = api, ap, events
-        self.type_text, self.blocked = type_text, blocked
+        self.type_text, self.blocked, self.focus = type_text, blocked, focus
         self.queue: queue.Queue = queue.Queue()
         self.lock = threading.Lock()
         self.pending = 0                 # Abschnitte, deren Text noch nicht eingegeben ist
         self.dropped: set = set()
         self.typed_in = ""               # Diktat, in dem zuletzt Text eingegeben wurde
         self.last_char = ""              # ... und sein letztes Zeichen: nach "\n" und "(" kein Leerzeichen
+        self.context = ""                # ... was dort eingegeben wurde (Kontext fuer Whisper)
+        self.held = ""                   # ... und das zurueckgehaltene Satzzeichen
+        self.target = None               # Eingabefokus beim letzten Eingeben
         self.closing = False
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -599,6 +633,10 @@ class Dictation:
             with self.lock:
                 self.pending += 1
             self.queue.put((entry_id, rate, seq, samples))
+        if final:                        # Schluss: das zurueckgehaltene Satzzeichen
+            with self.lock:
+                self.pending += 1
+            self.queue.put((entry_id, rate, seq, None))
 
     def drop(self, entry_id: str):
         """Verworfenes Diktat: was noch kommt, nicht mehr eingeben."""
@@ -626,14 +664,33 @@ class Dictation:
                 with self.lock:
                     self.pending -= 1
 
+    def _where(self):
+        try:
+            return self.focus()
+        except Exception:
+            return None
+
+    def _finish(self, entry_id: str):
+        held, self.held = self.held, ""
+        if (not held or self.typed_in != entry_id or entry_id in self.dropped
+                or not self._wait_for_target(entry_id) or self._where() != self.target):
+            return
+        self.type_text(held)
+        self.last_char = held
+        self.context += held
+
     def _handle(self, entry_id: str, rate: int, seq: int, samples):
+        if samples is None:
+            self._finish(entry_id)
+            return
         if entry_id in self.dropped:
             return
         buffer = io.BytesIO()
         sf.write(buffer, samples, rate, format="FLAC", subtype="PCM_16")
+        context = self.context[-self.CONTEXT:] if self.typed_in == entry_id else ""
         for attempt in range(self.RETRIES):
             try:
-                text = self.api.dictate(self.ap, buffer.getvalue(), f"{entry_id}-{seq}.flac")
+                text, end = self.api.dictate(self.ap, buffer.getvalue(), f"{entry_id}-{seq}.flac", context)
                 break
             except ValueError as e:                  # 4xx: wird nicht besser
                 log.warning(f"Diktat {entry_id}: Abschnitt {seq} abgelehnt: {e}")
@@ -650,10 +707,17 @@ class Dictation:
         text = "\n".join(" ".join(line.split()) for line in text.split("\n"))
         if not text.strip(" ") or not self._wait_for_target(entry_id):
             return
-        joined = (self.typed_in == entry_id and self.last_char not in "\n("
-                  and text[0] not in ",.:;!?)\n")
-        self.type_text((" " if joined else "") + text)
-        self.typed_in, self.last_char = entry_id, text[-1]
+        where = self._where()
+        if self.typed_in != entry_id or where != self.target:
+            self.typed_in, self.last_char, self.context, self.held = entry_id, "\n", "", ""
+        # Gross = neuer Satz, das Satzzeichen davor gilt; klein, Ziffer,
+        # Satzzeichen oder Umbruch (Diktierbefehl) = es faellt weg
+        held = self.held if text[0].isupper() else ""
+        space = (held or self.last_char not in "\n(") and text[0] not in ",.:;!?)\n"
+        typed = held + (" " if space else "") + text
+        self.type_text(typed)
+        self.last_char, self.target, self.held = text[-1], where, end
+        self.context = (self.context + typed)[-self.CONTEXT:]
 
     def _wait_for_target(self, entry_id: str) -> bool:
         shown = ""
@@ -828,15 +892,19 @@ class Api:
         self.session.delete(self._url(f"/steno/jobs/{entry_id}/blocks"),
                             timeout=CONNECT_TIMEOUT).raise_for_status()
 
-    def dictate(self, ap: str, data: bytes, name: str) -> str:
-        """Ein Diktat-Abschnitt -> Text. ValueError bei 4xx (wird nicht besser)."""
-        r = self.session.post(self._url("/steno/diktat"), data={"ap": ap},
+    def dictate(self, ap: str, data: bytes, name: str, context: str = "") -> tuple[str, str]:
+        """Ein Diktat-Abschnitt -> (Text, zurueckgehaltenes Satzzeichen); `context`
+        ist der Text davor. ValueError bei 4xx (wird nicht besser). Ein Server vor
+        0.42 kennt beides nicht und liefert das Satzzeichen im Text."""
+        r = self.session.post(self._url("/steno/diktat"),
+                              data={"ap": ap, "kontext": context, "satzende": "offen"},
                               files={"audio": (name, data, "audio/flac")},
                               timeout=(CONNECT_TIMEOUT, 120))
         if 400 <= r.status_code < 500:
             raise ValueError(_detail(r))
         r.raise_for_status()
-        return r.json().get("text") or ""
+        body = r.json()
+        return body.get("text") or "", body.get("satzende") or ""
 
     def fhir_context(self, ap: str, link: dict) -> dict:
         """Deep Link aus T2med -> Auftrag (Patient zum Kontext). Wirft ValueError
@@ -1958,14 +2026,6 @@ class SettingsDialog:
 # ============================================================
 # START
 # ============================================================
-def single_instance() -> bool:
-    """Autostart und Doppelklick sollen nicht zwei Knoepfe ergeben."""
-    if sys.platform != "win32":
-        return True
-    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\Steno-Knopf")
-    return ctypes.windll.kernel32.GetLastError() != 183      # ERROR_ALREADY_EXISTS
-
-
 def setup_logging():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3,
@@ -2022,10 +2082,32 @@ def main():
     parser.add_argument("link", nargs="?", help="steno://-Link aus T2med (setzt Windows ein)")
     parser.add_argument("--server", help="Adresse des Steno-Servers (wird gespeichert)")
     parser.add_argument("--arbeitsplatz", help="Arbeitsplatznummer, z. B. 001 (wird gespeichert)")
+    parser.add_argument("--deinstallieren", action="store_true",
+                        help="Steno für diesen Benutzer entfernen (Einstellungen → Apps)")
+    parser.add_argument("--portabel", action="store_true",
+                        help="von hier starten, ohne nach der Installation zu fragen")
+    # intern: --aktualisieren = neue Version aus dem Update-Ordner installiert
+    # sich; --warten = auf das Ende des vorigen Knopfs warten (installation.py)
+    parser.add_argument("--aktualisieren", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--warten", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     setup_logging()
-    if not single_instance():
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+    if args.deinstallieren:
+        installation.uninstall(APP_DIR, DATA_DIR, SPOOL_DIR)
+        return
+    if installation.running_exe() and not installation.is_installed() and not args.link \
+            and not args.portabel:
+        passthrough = [*(["--server", args.server] if args.server else []),
+                       *(["--arbeitsplatz", args.arbeitsplatz] if args.arbeitsplatz else [])]
+        if installation.install(passthrough, VERSION, update=args.aktualisieren):
+            return
+    if not installation.acquire_mutex(installation.WAIT_FOR_OLD if args.warten else 0):
         if args.link:
             # Windows startet fuer jeden Klick in T2med eine neue exe: den Link
             # dem laufenden Knopf geben. Der ist vielleicht selbst gerade erst
@@ -2038,11 +2120,8 @@ def main():
         else:
             log.info("Steno laeuft schon")
         return
-    if sys.platform == "win32":
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
+    if installation.is_installed():
+        installation.cleanup(DATA_DIR)
 
     cfg = Config()
     if args.server:
@@ -2052,6 +2131,7 @@ def main():
     log.info(f"Steno-Knopf {VERSION}, Einstellungen: {CONFIG_FILE}")
 
     link = args.link
+    check_update = not link and not args.warten   # nicht vor einer Aufnahme aus T2med, nicht gleich nach dem Update
     while True:                                   # nach geaenderten Einstellungen neu aufbauen
         root = tk.Tk()
         root.withdraw()
@@ -2060,6 +2140,11 @@ def main():
             root.destroy()
             return
         api, ap, ap_name, info = setup
+        if check_update and installation.offer_update(root, api.session, api.base, info.get("knopf"),
+                                                      VERSION, DATA_DIR):
+            root.destroy()
+            return
+        check_update = False
         if info.get("fhir"):
             register_link_scheme()
         spool = Spool()

@@ -110,10 +110,21 @@ Antwort auf Deutsch."""
 # Kuerzung: in einer Sitzung traegt das Detail (welche Situation, welcher
 # Gedanke, wer hat was gesagt) die Information. Keine Diagnostik, keine
 # Deutung. Der eigene Sprecher-Kontext ersetzt "Arzt"/"Anamnesefragen".
-SPEAKER_CONTEXT_PSY_PLAIN = """SPRECHER: Das Transkript ist ein Dialog ohne Sprecherkennzeichnung zwischen Therapeut/in und {patient_label}. Ordne Aussagen anhand des Kontexts zu; wenn die Zuordnung unklar bleibt, formuliere neutral ("es wurde besprochen") statt zu raten. Was die Therapeutin/der Therapeut als Frage, Hypothese oder Beispiel einbringt, ist keine Aussage von {patient_label}."""
+#
+# Die Gliederung folgt dem, was fuer die stundenbezogene Verlaufsdokumentation
+# empfohlen wird — BPtK-Dokumentationsempfehlungen (Abschnitt 9: Interventionen
+# und Ergebnisse, Inhalt des Therapiegeschehens, Aenderungen u. a. Suizidalitaet,
+# Ereignisse ausserhalb der Therapie, Umsetzungsprobleme, Fort-/Rueckschritte),
+# Stundenprotokoll der Uni Wuerzburg (letzte Hausaufgabe, Themen, Ergebnisse,
+# neue Hausaufgabe, besondere Absprachen) und der KVT-Sitzungsablauf nach
+# J. Beck (Befinden, Hausaufgaben, Themen, Zusammenfassung, neue Aufgabe,
+# Rueckmeldung). Bewusst weggelassen: Interaktionsverhalten und beobachteter
+# Befund — das Transkript zeigt nur, was gesagt wurde; beides ergaenzt die
+# Therapeutin selbst.
+SPEAKER_CONTEXT_PSY_PLAIN = """SPRECHER: Das Transkript ist ein Dialog ohne Sprecherkennzeichnung zwischen Therapeut/in und {patient_label}. Ordne Aussagen anhand des Kontexts zu; wenn die Zuordnung unklar bleibt, formuliere neutral ("es wurde besprochen") statt zu raten. Was die Therapeutin/der Therapeut als Frage, Hypothese oder Beispiel einbringt, hat nicht {patient_label} gesagt."""
 
 SPEAKER_CONTEXT_PSY_DIARIZED = """SPRECHER: Die Sprecher wurden automatisch getrennt – jede Zeile beginnt mit einem anonymen Marker (SPRECHER A, SPRECHER B, ...). Welcher Marker Therapeut/in und welcher {patient_label} ist, steht NICHT fest: erschließe es aus dem Gesprächsverlauf – wer fragt, strukturiert, zusammenfasst und Übungen vorschlägt, ist die Therapeutin/der Therapeut.
-Die Sprechertrennung ist fehleranfällig, vor allem an Sprecherwechseln und bei kurzen Einwürfen. Wenn Marker und Inhalt sich widersprechen, hat der Inhalt Vorrang. Was die Therapeutin/der Therapeut als Frage, Hypothese oder Beispiel einbringt, ist keine Aussage von {patient_label}.
+Die Sprechertrennung ist fehleranfällig, vor allem an Sprecherwechseln und bei kurzen Einwürfen. Wenn Marker und Inhalt sich widersprechen, hat der Inhalt Vorrang. Was die Therapeutin/der Therapeut als Frage, Hypothese oder Beispiel einbringt, hat nicht {patient_label} gesagt.
 Übernimm die Marker NICHT in deine Ausgabe."""
 
 PSYCHO_PROMPT = """Du bist ein KI-Assistent für die Dokumentation verhaltenstherapeutischer Sitzungen.
@@ -126,27 +137,37 @@ Fasse das folgende Transkript einer Psychotherapiesitzung (Verhaltenstherapie) f
 </transkript>
 
 REGELN:
-- Geh die Sitzung von Anfang bis Ende durch. Die Themen wechseln; jedes Thema gehört in die Zusammenfassung, auch wenn es nur kurz angesprochen wurde.
-- Kürze nicht zu stark. Gib wieder, was {patient_label} berichtet: konkrete Situationen und Ereignisse (auch seit der letzten Sitzung), Gedanken, Gefühle, Körperempfindungen, Verhalten und dessen Folgen, Beziehungen – mit den Einzelheiten, die genannt wurden (wer, wann, was).
-- Prägnante Formulierungen von {patient_label} als kurzes wörtliches Zitat in Anführungszeichen übernehmen.
-- Was die Therapeutin/der Therapeut tut, so benennen, wie es im Gespräch vorkommt (z. B. Situationsanalyse, Arbeit an Gedanken, Exposition, Psychoedukation, Übung, Rollenspiel) – nichts als Intervention bezeichnen, was nicht stattfand.
+- Du fasst zusammen, was gesagt wurde – nicht mehr. Die Therapeutin/der Therapeut ergänzt selbst, was nur zu beobachten war (Stimmung, Affekt, Kontaktverhalten); dazu schreibst du nichts, auch nicht vermutend.
+- Geh die Sitzung von Anfang bis Ende durch. Die Themen wechseln; jedes Thema gehört in die Zusammenfassung, auch wenn es nur kurz angesprochen wurde. Weglassen darfst du nur Begrüßung, Smalltalk und Organisatorisches ohne Bezug zur Behandlung.
+- Kürze nicht zu stark. Gib wieder, was {patient_label} berichtet: konkrete Situationen und Ereignisse, Gedanken, Gefühle, Körperempfindungen, Verhalten und dessen Folgen, Beziehungen – mit den Einzelheiten, die genannt wurden (wer, wann, was). Andere Personen mit der Beziehung bezeichnen, die im Gespräch genannt wurde (z. B. "der Ehemann", "eine Kollegin").
+- Zahlen wörtlich übernehmen: Skalenwerte (z. B. Stimmung 4 von 10, Anspannung 80 %), Häufigkeiten, Dauer, Daten.
+- Was {patient_label} prägnant formuliert – vor allem Gedanken und Bewertungen in eigenen Worten –, als kurzes wörtliches Zitat in Anführungszeichen übernehmen.
+- Was die Therapeutin/der Therapeut tut, so beschreiben, wie es im Gespräch geschieht: was gefragt, erklärt, geübt oder vorgeschlagen wurde und wie {patient_label} darauf reagierte. Einen Fachbegriff (z. B. Situationsanalyse, kognitive Umstrukturierung, Exposition, Psychoedukation, Rollenspiel, Aktivitätenplan) nur, wenn er im Gespräch fällt oder das Vorgehen eindeutig ist – sonst beschreiben, was getan wurde. Erklärungen der Therapeutin/des Therapeuten knapp inhaltlich wiedergeben.
+- Ergebnisse, Erkenntnisse, Fort- oder Rückschritte nur, wenn sie im Gespräch ausgesprochen wurden – wenn {patient_label} sie benennt oder die Therapeutin/der Therapeut sie zusammenfasst. Nicht selbst bewerten, ob etwas gelungen ist.
 - Keine Diagnosen, keine Deutungen, keine Empfehlungen, die nicht im Gespräch ausgesprochen wurden.
-- Suizidgedanken, Selbstverletzung oder Gefährdung anderer nur aufführen, wenn sie im Gespräch vorkamen – dann vollständig und möglichst wörtlich. Nichts erschließen.
+- Suizidgedanken, Selbstverletzung oder Gefährdung anderer nur aufführen, wenn sie im Gespräch vorkamen – dann vollständig und möglichst wörtlich, einschließlich dazu getroffener Absprachen. Nichts erschließen.
 - Unklare oder phonetisch verzerrte Stellen exakt abschreiben oder als [unverständlich] markieren; nichts erfinden.
+- Wurde ein Abschnitt in der Sitzung nicht angesprochen, schreib den dort genannten Ersatztext – fülle ihn nicht aus anderen Teilen auf.
 
 Gliedere so:
+
+## Befinden und Ereignisse seit der letzten Sitzung
+(Wie es {patient_label} nach eigener Aussage geht; was sich seither ereignet oder verändert hat – Arbeit, Familie, Partnerschaft, Gesundheit, Behandlung anderswo (Facharzt, Klinik, Medikation) – sonst: Nicht besprochen)
+
+## Hausaufgaben aus der letzten Sitzung
+(Was vereinbart war, ob und wie es umgesetzt wurde, was dabei herauskam, was schwierig war – sonst: Nicht besprochen)
 
 ## Themen
 (Stichwortliste aller Themen in der Reihenfolge des Gesprächs)
 
 ## Verlauf der Sitzung
-(Je Thema eine Zwischenüberschrift "### <Thema>" und darunter ein bis drei Absätze in ganzen Sätzen: was berichtet wurde, wie daran gearbeitet wurde, was dabei herauskam)
+(Je Thema eine Zwischenüberschrift "### <Thema>" und darunter ein bis drei Absätze in ganzen Sätzen: was berichtet wurde, wie daran gearbeitet wurde und wie {patient_label} reagierte, was dabei herauskam. Was {patient_label} zur Sitzung oder zur Therapie zurückmeldet, beim passenden Thema oder am Ende)
 
 ## Vereinbarungen
-(Übungen, Hausaufgaben, Ziele bis zur nächsten Sitzung, nächster Termin – sonst: Keine besprochen)
+(Neue Übungen und Hausaufgaben so konkret wie besprochen – was, wann, wie oft; weitere Absprachen, z. B. Facharzttermin, Klinik, Kontakt mit Angehörigen; was in der nächsten Sitzung drankommen soll; nächster Termin – sonst: Keine besprochen)
 
 ## Gefährdung
-(Nur was dazu gesagt wurde – sonst: Nicht thematisiert)
+(Nur was dazu gesagt wurde, mit Absprachen dazu – sonst: Nicht thematisiert)
 
 Antworte auf Deutsch, in der dritten Person."""
 

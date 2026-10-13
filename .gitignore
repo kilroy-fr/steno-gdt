@@ -70,3 +70,5 @@ client/.venv/
 client/build/
 client/dist/
 client/*.spec
+# Bereitgelegte Knopf-Version fuer Updates (client/build.ps1 -Veroeffentlichen)
+knopf/

@@ -23,6 +23,7 @@ except (ImportError, OSError) as e:          # sounddevice ohne PortAudio wirft 
     pytest.skip(f"Client-Abhaengigkeiten fehlen: {e}", allow_module_level=True)
 
 import gdt
+import installation
 import server
 from test_gdt import fields_of, t2med_order
 
@@ -556,13 +557,22 @@ def test_order_during_dictation_asks(app):
 
 
 class FakeDictateApi:
+    """Antworten als Text oder (Text, zurueckgehaltenes Satzzeichen)."""
     def __init__(self, texts):
         self.texts = list(texts)
         self.calls: list = []
+        self.contexts: list = []
 
-    def dictate(self, ap, data, name):
+    def dictate(self, ap, data, name, context=""):
         self.calls.append(name)
-        return self.texts.pop(0)
+        self.contexts.append(context)
+        answer = self.texts.pop(0)
+        return answer if isinstance(answer, tuple) else (answer, "")
+
+
+def dictation(api, typed, events=None, blocked=lambda: "", focus=lambda: 1):
+    return steno.Dictation(api, "001", events or queue.Queue(), type_text=typed.append,
+                           blocked=blocked, focus=focus)
 
 
 def wait_until(condition, timeout=5.0):
@@ -575,7 +585,7 @@ def wait_until(condition, timeout=5.0):
 def test_dictation_types_in_order_and_waits_for_target():
     api = FakeDictateApi(["Patient  klagt über\nSchwindel.", "", "Seit drei Tagen.", "Neues Diktat."])
     typed, blocked, events = [], ["bitte in das Textfeld klicken"], queue.Queue()
-    d = steno.Dictation(api, "001", events, type_text=typed.append, blocked=lambda: blocked[0])
+    d = dictation(api, typed, events, blocked=lambda: blocked[0])
     d.put("d-1", 16000, 0, 0.0, 1.0, tone(1), False)
     wait_until(lambda: not events.empty())               # wartet auf ein fremdes Fenster
     assert events.get()[1][0].startswith("Diktat wartet") and not typed and d.pending == 1
@@ -587,6 +597,7 @@ def test_dictation_types_in_order_and_waits_for_target():
     wait_until(lambda: d.pending == 0)
     assert typed == ["Patient klagt über\nSchwindel.", " Seit drei Tagen.", "Neues Diktat."]
     assert len(api.calls) == 4
+    assert api.contexts == ["", "Patient klagt über\nSchwindel.", "Patient klagt über\nSchwindel.", ""]
     d.close()
 
 
@@ -595,7 +606,7 @@ def test_dictation_no_space_around_commands():
     "Klammer zu", keines nach einem Umbruch oder "Klammer auf"."""
     api = FakeDictateApi(["Befund", ":", "unauffällig\n", "Diagnose (", "Migräne", ")", "."])
     typed = []
-    d = steno.Dictation(api, "001", queue.Queue(), type_text=typed.append, blocked=lambda: "")
+    d = dictation(api, typed)
     for seq in range(7):
         d.put("d-1", 16000, seq, seq, seq + 1.0, tone(1), False)
     wait_until(lambda: d.pending == 0)
@@ -603,10 +614,57 @@ def test_dictation_no_space_around_commands():
     d.close()
 
 
+def test_dictation_holds_sentence_end_until_next_section():
+    """Whispers Punkt am Abschnittsende: vor einem neuen Satz (gross) ja, vor
+    einer Fortsetzung (klein, Ziffer, Befehl) nein, am Ende des Diktats ja."""
+    api = FakeDictateApi([("Schmerzen im rechten Knie", "."), ("seit drei Wochen", "."),
+                          ("Sie nimmt Ibuprofen", "."), ("400 mg", "."), ("\nBefund", ""),
+                          ("unauffällig", ".")])
+    typed = []
+    d = dictation(api, typed)
+    for seq in range(6):
+        d.put("d-1", 16000, seq, seq, seq + 1.0, tone(1), False)
+    d.put("d-1", 16000, 6, 6.0, 6.0, silence(0), True)   # leerer Schlussblock: der Punkt kommt
+    wait_until(lambda: d.pending == 0)
+    assert "".join(typed) == ("Schmerzen im rechten Knie seit drei Wochen. Sie nimmt Ibuprofen 400 mg"
+                              "\nBefund unauffällig.")
+    # Kontext ohne den zurueckgehaltenen Punkt: Whisper soll weiterschreiben
+    assert api.contexts[1] == "Schmerzen im rechten Knie"
+    assert api.contexts[2] == "Schmerzen im rechten Knie seit drei Wochen"
+    d.close()
+
+
+def test_dictation_starts_over_in_another_field():
+    """Anderes Eingabefeld: kein Leerzeichen, kein Punkt vom vorigen Feld, kein Kontext."""
+    api = FakeDictateApi([("Anamnese ohne Befund", "."), ("Kniegelenk frei", ".")])
+    typed, where = [], [1]
+    d = dictation(api, typed, focus=lambda: where[0])
+    d.put("d-1", 16000, 0, 0.0, 1.0, tone(1), False)
+    wait_until(lambda: d.pending == 0)
+    where[0] = 2
+    d.put("d-1", 16000, 1, 1.0, 2.0, tone(1), True)
+    wait_until(lambda: d.pending == 0)
+    assert typed == ["Anamnese ohne Befund", "Kniegelenk frei", "."]
+    d.close()
+
+
+def test_dictation_sentence_end_dropped_after_field_change():
+    api = FakeDictateApi([("Kniegelenk frei", ".")])
+    typed, where = [], [1]
+    d = dictation(api, typed, focus=lambda: where[0])
+    d.put("d-1", 16000, 0, 0.0, 1.0, tone(1), False)
+    wait_until(lambda: d.pending == 0)
+    where[0] = 2                                         # inzwischen woanders hingeklickt
+    d.put("d-1", 16000, 1, 1.0, 1.0, silence(0), True)
+    wait_until(lambda: d.pending == 0)
+    assert typed == ["Kniegelenk frei"]
+    d.close()
+
+
 def test_dropped_dictation_types_nothing_more():
     api = FakeDictateApi(["eins"])
     typed = []
-    d = steno.Dictation(api, "001", queue.Queue(), type_text=typed.append, blocked=lambda: "")
+    d = dictation(api, typed)
     d.drop("d-1")
     d.put("d-1", 16000, 0, 0.0, 1.0, tone(1), False)
     wait_until(lambda: d.pending == 0)
@@ -620,7 +678,10 @@ def test_dictation_against_server(live, fake):
     api, _ = live
     data = io.BytesIO()
     sf.write(data, tone(1), 16000, format="FLAC")
-    assert api.dictate("001", data.getvalue(), "d-0.flac") == fake.text
+    assert api.dictate("001", data.getvalue(), "d-0.flac") == (fake.text.rstrip("."), ".")
+    fake.text = "Die Patientin stellt sich vor."
+    assert api.dictate("001", data.getvalue(), "d-1.flac", "Kontext") == ("Die Patientin stellt sich vor", ".")
+    assert b'name="prompt"\r\n\r\nKontext' in fake.requests[-1][2]
     with pytest.raises(ValueError):
         api.dictate("009", data.getvalue(), "d-0.flac")   # unbekannter Arbeitsplatz
 
@@ -793,3 +854,64 @@ def test_settings_dialog(app, monkeypatch):
     app.stop_recording()
     REAL_TICK(app)
     assert restarts == [True]
+
+
+# ---------------------------------------------------------------- Installation, Update
+
+def test_versions_compare_numerically():
+    assert installation.newer("0.41.0", "0.40.9") and installation.newer("0.100", "0.99.3")
+    assert not installation.newer("0.41.0", "0.41.0") and not installation.newer("0.40.1", "0.41.0")
+    assert not installation.newer("quatsch", "0.41.0") and not installation.newer(None, "0.41.0")
+    assert not installation.newer("1", "0.41.0")                  # unvollstaendig: kein Update
+
+
+def test_not_installed_when_run_as_script():
+    assert installation.running_exe() is None and not installation.is_installed()
+
+
+def test_update_download_checks_sha256(live, tmp_path, monkeypatch):
+    from test_steno import publish_knopf
+    api, _ = live
+    folder = tmp_path / "knopf"
+    monkeypatch.setattr(server, "STENO_KNOPF_DIR", str(folder))
+    publish_knopf(folder, data=b"MZ" + bytes(200_000))
+    release = api.config()["knopf"]
+    seen = []
+    target = tmp_path / "update" / "Steno.exe"
+    url = f"{api.base}/steno/knopf/Steno.exe"
+    installation.download(api.session, url, release, target, lambda done, total: seen.append((done, total)))
+    assert target.read_bytes() == b"MZ" + bytes(200_000) and seen[-1] == (200_002, 200_002)
+
+    target.unlink()
+    with pytest.raises(ValueError, match="Prüfsumme"):
+        installation.download(api.session, url, {**release, "sha256": "0" * 64}, target)
+    assert list(target.parent.iterdir()) == []                    # nichts Halbes liegt herum
+
+
+def test_place_exe_replaces_and_retries_while_locked(tmp_path, monkeypatch):
+    source, target = tmp_path / "neu.exe", tmp_path / "Programs" / "Steno" / "Steno.exe"
+    source.write_bytes(b"neu")
+    installation.place_exe(source, target)
+    assert target.read_bytes() == b"neu"
+
+    real_replace, calls = installation.os.replace, []
+
+    def locked_once(a, b):                                        # alte exe laeuft noch kurz
+        calls.append(a)
+        if len(calls) == 1:
+            raise PermissionError("in Benutzung")
+        real_replace(a, b)
+
+    monkeypatch.setattr(installation.os, "replace", locked_once)
+    source.write_bytes(b"neuer")
+    installation.place_exe(source, target)
+    assert target.read_bytes() == b"neuer" and len(calls) == 2
+    assert not (target.parent / "Steno.exe.neu").exists()
+
+
+def test_cleanup_removes_update_leftovers(tmp_path, monkeypatch):
+    monkeypatch.setattr(installation, "INSTALL_DIR", tmp_path / "Programs")
+    (tmp_path / "update").mkdir()
+    (tmp_path / "update" / "Steno.exe").write_bytes(b"x")
+    installation.cleanup(tmp_path)
+    assert list((tmp_path / "update").iterdir()) == []

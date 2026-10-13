@@ -33,6 +33,9 @@ services:
       - WHISPER_LANGUAGE=de
       - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
       - WHISPER_FAST_MODEL=small
+      # Diktat (Knopf, Direkt): leer = WHISPER_MEDICAL_MODEL. large-v3 schreibt
+      # genauer, braucht aber ~2 s statt ~0,7 s je Abschnitt.
+      # - WHISPER_DIKTAT_MODEL=Systran/faster-whisper-large-v3
       # Silero-VAD im Whisper-Server. Nur zum Abschalten da, falls VAD je sehr
       # leise Sprache wegschneidet — sonst anlassen, siehe CLAUDE.md.
       - WHISPER_VAD_FILTER=true
@@ -112,6 +115,10 @@ services:
       # Transkript in Abschnitten schon waehrend der Aufnahme:
       # direkt (nur Direkt-Aufnahmen) | alle (jede Knopf-Aufnahme) | aus
       - STENO_BLOECKE=direkt
+      # Knopf-Updates: client/build.ps1 -Veroeffentlichen legt Steno.exe und
+      # Steno.json nach ./knopf. Der Knopf fragt beim Start nach und
+      # aktualisiert sich nach Rueckfrage. Leer = keine Updates.
+      - STENO_KNOPF_DIR=/knopf
     # Development: Quellcode live einbinden (kein Rebuild bei Änderungen)
     volumes:
       - ./server.py:/app/server.py:ro
@@ -125,6 +132,7 @@ services:
       - ./logs:/logs
       # Der Ordner, nicht die Datei: gespeichert wird per Temp-Datei + Umbenennen
       - ./daten:/daten
+      - ./knopf:/knopf:ro
       # GDT-Austauschordner, den auch T2med erreichen muss: S:\_steno auf der
       # sono-gdt-Freigabe (Volume gdt-share unten, Zugangsdaten in .env).
       # Zum Testen ohne T2med stattdessen "./gdt:/gdt".
