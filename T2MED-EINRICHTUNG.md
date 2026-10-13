@@ -261,6 +261,7 @@ Anmelde-Token, er wird weder protokolliert noch gespeichert.
 |---|---|
 | `freitext` (Standard) | **ein** Freitext-Eintrag mit Kürzel `KI` (`FHIR_KUERZEL`, bei Psychotherapie `FHIR_PSY_KUERZEL`): die Dokumentation und darunter Hinweise wie Schleifen-Warnung oder „Nur 12 Wörter …“. Das Kürzel zeigt, dass niemand gegengelesen hat. |
 | `abpro` | eine A/B/PRO-Dokumentation als **eigene Zeilen** Anamnese, Befund und Prozedere, dazu ein Freitext-Eintrag `KI` mit „KI-generiert … Vor Übernahme prüfen“. Psychotherapie, Direkt und andere Arten bleiben Freitext. |
+| `kuerzel` (eingestellt) | eine A/B/PRO-Dokumentation als **drei Freitext-Einträge** `KAN`, `KBE`, `KPR` (`FHIR_ABPRO_KUERZEL`). Jede Zeile zeigt am K im Kürzel, dass sie von der KI stammt, ein Prüfhinweis entfällt deshalb; Warnungen (Schleife, Fortsetzung) stehen unter `KPR`. Fehlt ein Abschnitt (kein Befund), fehlt seine Zeile. Psychotherapie, Direkt und andere Arten bleiben ein Freitext `KI`. |
 
 Mit `FHIR_ANHANG=true` kommt das Transkript als Anhang dazu (nie bei Psychotherapie und Direkt). Alle
 Einträge gehen in einer Transaktion: entweder alle oder keiner.

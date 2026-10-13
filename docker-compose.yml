@@ -92,7 +92,9 @@ services:
       # T2med-Serverzertifikat (PEM) im Container, z. B. /certs/t2med.pem; leer = keine Pruefung
       - FHIR_ZERTIFIKAT=
       # freitext = ein Eintrag mit Kuerzel (Standard) | abpro = A/B/PRO als eigene Karteikarten-Zeilen
-      - FHIR_AUSGABE=freitext
+      # | kuerzel = A/B/PRO als drei Freitexte mit den Kuerzeln aus FHIR_ABPRO_KUERZEL
+      - FHIR_AUSGABE=kuerzel
+      - FHIR_ABPRO_KUERZEL=KAN,KBE,KPR
       - FHIR_KUERZEL=KI
       - FHIR_PSY_KUERZEL=KI
       # Transkript als Anhang in die Kartei (nie bei Psychotherapie)

@@ -48,7 +48,8 @@ PROFILE_ANHANG = _SD + "FhirApiDocumentReferenceAnhang|1.0.0"
 EXT_FREITEXT_KUERZEL = _SD + "FhirApiFreitextKuerzel"
 EXT_ANHANG_KUERZEL = _SD + "FhirApiAnhangKuerzel"
 
-OUTPUTS = ("freitext", "abpro")
+OUTPUTS = ("freitext", "abpro", "kuerzel")
+ABPRO_KEYS = ("A", "B", "PRO")
 _KONTEXT_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _TOKEN_MAX = 8192
 
@@ -75,7 +76,9 @@ class Settings:
     hosts: tuple = ()                  # erlaubte Hosts der fhirBasisUrl
     cert: str = ""                     # T2med-Zertifikat (PEM) im Container; leer = keine Pruefung
     output: str = "freitext"           # freitext | abpro (A/B/PRO als getrennte Karteikarten-Zeilen)
+                                       # | kuerzel (A/B/PRO als drei Freitexte mit eigenem Kuerzel)
     code: str = "KI"                   # Kuerzel des Freitext-Eintrags
+    abpro_codes: tuple = ("KAN", "KBE", "KPR")   # Kuerzel fuer A, B, PRO bei kuerzel
     psy_code: str = "KI"               # ... bei Psychotherapie
     attachment: bool = False           # Transkript als Anhang (DocumentReference)
     timeout: float = 30.0
@@ -95,9 +98,15 @@ class Settings:
         s.code = env.get("FHIR_KUERZEL", "").strip() or s.code
         s.psy_code = env.get("FHIR_PSY_KUERZEL", "").strip() or s.psy_code
         s.attachment = env.get("FHIR_ANHANG", "").strip().lower() in ("1", "true", "ja", "on")
+        codes = env.get("FHIR_ABPRO_KUERZEL", "").strip()
+        if codes:
+            s.abpro_codes = tuple(c.strip() for c in codes.split(","))
         if s.output not in OUTPUTS:
-            raise ValueError("FHIR_AUSGABE muss freitext oder abpro sein")
-        for name, code in (("FHIR_KUERZEL", s.code), ("FHIR_PSY_KUERZEL", s.psy_code)):
+            raise ValueError("FHIR_AUSGABE muss freitext, abpro oder kuerzel sein")
+        if len(s.abpro_codes) != 3 or not all(s.abpro_codes):
+            raise ValueError("FHIR_ABPRO_KUERZEL: drei Kuerzel fuer A, B, PRO, z. B. KAN,KBE,KPR")
+        for name, code in (("FHIR_KUERZEL", s.code), ("FHIR_PSY_KUERZEL", s.psy_code),
+                           *(("FHIR_ABPRO_KUERZEL", c) for c in s.abpro_codes)):
             if len(code) > 20 or not code.isprintable():
                 raise ValueError(f"{name}: hoechstens 20 druckbare Zeichen")
         if s.cert and not os.path.isfile(s.cert):
@@ -352,12 +361,24 @@ def build_entries(settings: Settings, ctx: Context, text: str, mode: str, notes:
     Hand geschrieben; deshalb geht in derselben Transaktion ein Freitext-Eintrag
     mit Kuerzel und Pruefhinweis mit. Findet sich kein A/B/PRO-Abschnitt in der
     Antwort, faellt es auf den Freitext zurueck.
+
+    FHIR_AUSGABE=kuerzel schreibt dieselben Abschnitte als drei Freitexte mit
+    eigenem Kuerzel (FHIR_ABPRO_KUERZEL, z. B. KAN/KBE/KPR): jede Zeile zeigt
+    selbst, dass sie von der KI stammt (deshalb kein Pruefhinweis). Hinweise wie
+    Schleifen-Warnung oder Fortsetzung stehen unter der letzten.
     """
     code = settings.psy_code if psycho else settings.code
     plain = gdt.plain_text(text)
     entries: list[tuple[str, dict]] = []
-    sections = abpro_sections(text) if settings.output == "abpro" and mode == "abpro" and not psycho else {}
-    if sections:
+    split = settings.output in ("abpro", "kuerzel") and mode == "abpro" and not psycho
+    sections = abpro_sections(text) if split else {}
+    if sections and settings.output == "kuerzel":
+        parts = [(c, sections[k]) for k, c in zip(ABPRO_KEYS, settings.abpro_codes) if k in sections]
+        for i, (c, body) in enumerate(parts):
+            if i == len(parts) - 1 and notes:
+                body += "\n\n" + "\n".join(notes)
+            entries.append((f"Freitext {c}", freetext(ctx, body, c, when)))
+    elif sections:
         if "A" in sections:
             entries.append(("Anamnese", observation(ctx, PROFILE_ANAMNESE, sections["A"], when)))
         if "B" in sections:

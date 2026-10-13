@@ -57,6 +57,9 @@ def test_settings_from_env():
         fhir.Settings.from_env({"FHIR_AUSGABE": "alles"})
     with pytest.raises(ValueError):
         fhir.Settings.from_env({"FHIR_KUERZEL": "x" * 21})
+    assert fhir.Settings.from_env({"FHIR_ABPRO_KUERZEL": " KA , KB,KP "}).abpro_codes == ("KA", "KB", "KP")
+    with pytest.raises(ValueError):
+        fhir.Settings.from_env({"FHIR_ABPRO_KUERZEL": "KAN,KBE"})
     with pytest.raises(ValueError):
         fhir.Settings.from_env({"FHIR_ZERTIFIKAT": "/gibt/es/nicht.pem"})
 
@@ -129,6 +132,30 @@ def test_abpro_output_writes_chart_lines_plus_hint():
     assert len(fhir.build_entries(s, fhir.Context(**CTX), "Fliesstext", "abpro", [], WHEN, False)) == 1
     [(label, _)] = fhir.build_entries(s, fhir.Context(**CTX), ABPRO, "abpro", [], WHEN, psycho=True)
     assert label == "Freitext PT"
+
+
+def test_kuerzel_output_writes_three_freetexts():
+    s = settings(output="kuerzel")
+    entries = fhir.build_entries(s, fhir.Context(**CTX), ABPRO, "abpro",
+                                 ["KI-generiert. Vor Übernahme prüfen."], WHEN, psycho=False)
+    assert [label for label, _ in entries] == ["Freitext KAN", "Freitext KBE", "Freitext KPR"]
+    assert all(r["meta"]["profile"] == [fhir.PROFILE_FREITEXT] for _, r in entries)
+    assert [r["extension"][0]["valueString"] for _, r in entries] == ["KAN", "KBE", "KPR"]
+    assert entries[0][1]["valueString"] == "Husten seit 3 Tagen"
+    assert entries[2][1]["valueString"] == \
+        "Inhalation; Kontrolle in 1 Woche\n\nKI-generiert. Vor Übernahme prüfen."
+    # fehlt B, stehen die Hinweise trotzdem unter dem letzten Eintrag
+    no_b = "A: Husten\nPRO: Tee"
+    entries = fhir.build_entries(s, fhir.Context(**CTX), no_b, "abpro", ["Hinweis"], WHEN, False)
+    assert [(label, r["valueString"]) for label, r in entries] == \
+        [("Freitext KAN", "Husten"), ("Freitext KPR", "Tee\n\nHinweis")]
+    # ohne Abschnitte, bei anderen Arten und bei Psychotherapie: ein Freitext
+    [(label, _)] = fhir.build_entries(s, fhir.Context(**CTX), "Fliesstext", "abpro", [], WHEN, False)
+    assert label == "Freitext KI"
+    [(label, _)] = fhir.build_entries(s, fhir.Context(**CTX), ABPRO, "analyze", [], WHEN, False)
+    assert label == "Freitext KI"
+    [(label, _)] = fhir.build_entries(s, fhir.Context(**CTX), ABPRO, "abpro", [], WHEN, psycho=True)
+    assert label == "Freitext KI"
 
 
 def test_attachment_entry():
@@ -254,6 +281,17 @@ def test_attachment_and_abpro_via_fhir(steno_fhir, fake, monkeypatch):
     assert types == [fhir.PROFILE_ANAMNESE, fhir.PROFILE_PROZEDERE, fhir.PROFILE_FREITEXT,
                      fhir.PROFILE_ANHANG]
     assert "Vor Übernahme prüfen" in bundle["entry"][2]["resource"]["valueString"]
+
+
+def test_kuerzel_via_fhir(steno_fhir, fake, monkeypatch):
+    monkeypatch.setattr(server, "FHIR", settings(output="kuerzel"))
+    fake.llm_tokens = ["A: Kopfschmerzen seit drei Tagen\n", "B: RR 130/80\n", "PRO: Ibuprofen"]
+    wait(steno_fhir, upload(steno_fhir, order=json.dumps(fhir_order())).json()["id"])
+    [bundle] = fake.fhir_bundles()
+    resources = [e["resource"] for e in bundle["entry"]]
+    assert [r["extension"][0]["valueString"] for r in resources] == ["KAN", "KBE", "KPR"]
+    # kein Pruefhinweis: das K im Kuerzel zeigt den Ursprung
+    assert resources[2]["valueString"] == "Ibuprofen"
 
 
 def test_job_with_foreign_fhir_host_is_rejected(steno_fhir):

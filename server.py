@@ -41,7 +41,7 @@ from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.33.7"
+VERSION = "0.40.0"
 
 
 def _flag(value: str) -> bool:
@@ -1701,7 +1701,8 @@ async def _deliver_fhir(ap: str, order: gdt.Order, text: str, transcript: str, m
     if warning:
         lines.append(f"Warnung: {warning}")
     if FHIR.output == "abpro" and mode == "abpro":
-        # Steht nur im Hinweis-Eintrag neben den A/B/P-Zeilen (fhir.build_entries)
+        # Steht nur im Hinweis-Eintrag neben den A/B/P-Zeilen (fhir.build_entries).
+        # Bei kuerzel zeigt das Kuerzel jeder Zeile (KAN/KBE/KPR) den Ursprung.
         lines.insert(0, f"KI-generiert ({_MODE_LABELS.get(mode, 'Dokumentation')}, "
                         f"Steno {VERSION}, Modell {model or OLLAMA_MODEL}). Vor Übernahme prüfen.")
     extra = ""
