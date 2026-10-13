@@ -41,7 +41,7 @@ from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.40.0"
+VERSION = "0.40.1"
 
 
 def _flag(value: str) -> bool:
