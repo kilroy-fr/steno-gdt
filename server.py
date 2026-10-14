@@ -41,7 +41,7 @@ from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.42.1"
+VERSION = "0.43.0"
 
 
 def _flag(value: str) -> bool:
@@ -2668,7 +2668,7 @@ async def steno_blocks_drop(job_id: str):
 
 
 @app.post("/steno/diktat")
-async def steno_dictation(ap: str = Form(...), audio: UploadFile = File(...),
+async def steno_dictation(ap: str = Form(""), audio: UploadFile = File(...),
                           kontext: str = Form(""), satzende: str = Form("")):
     """Diktat (Knopf, Direkt): ein Abschnitt, der Text kommt sofort zurueck und
     der Knopf gibt ihn an der Schreibmarke ein. Kein Auftrag, kein T2med, kein
@@ -2687,8 +2687,12 @@ async def steno_dictation(ap: str = Form(...), audio: UploadFile = File(...),
     getrennt als `satzende` zurueck, der Knopf haelt es zurueck, bis der
     naechste Abschnitt zeigt, ob der Satz weitergeht. Aeltere Knoepfe bekommen
     es wie bisher im Text.
+
+    Ohne `ap` (Knopf ab 0.43 an einem Rechner ohne T2med, nur Diktat) auch
+    ohne GDT-Anbindung: das Diktat beruehrt T2med nicht.
     """
-    ap = _gdt_workstation(ap)
+    ap = _gdt_workstation(ap) if ap else ""
+    where = ap or "ohne Arbeitsplatz"
     prompt = " ".join(kontext.split())[-_DICTATION_CONTEXT:]
     tmp_path = await _save_upload(audio)
     t0 = time.monotonic()
@@ -2698,7 +2702,7 @@ async def steno_dictation(ap: str = Form(...), audio: UploadFile = File(...),
     except HTTPException:
         raise
     except Exception as e:
-        logger.warning(f"Diktat ({ap}): {_exc_text(e)}")
+        logger.warning(f"Diktat ({where}): {_exc_text(e)}")
         raise HTTPException(status_code=502, detail=f"Whisper nicht erreichbar: {_exc_text(e)}")
     finally:
         Path(tmp_path).unlink(missing_ok=True)
@@ -2714,7 +2718,7 @@ async def steno_dictation(ap: str = Form(...), audio: UploadFile = File(...),
     notes = "".join([f", {unsure} Segmente unsicher" if unsure else "",
                      f", {sie}× Sie->sie" if sie else "",
                      ", leer" if result.text and not text else ""])
-    logger.info(f"Diktat ({ap}): {len(text.split())} Wörter, {commands} Befehle{notes} "
+    logger.info(f"Diktat ({where}): {len(text.split())} Wörter, {commands} Befehle{notes} "
                 f"in {time.monotonic() - t0:.1f} s")
     return {"text": text, "satzende": end, "loop_share": round(result.loop_share, 3)}
 

@@ -99,7 +99,8 @@ an, und jeder installierte Knopf fragt beim nächsten Start, ob er sich aktualis
    `%LOCALAPPDATA%\Programs\Steno`, startet ab jetzt bei jeder Anmeldung (Autostart), steht im Startmenü
    und unter **Einstellungen → Apps** als „Steno-Knopf“. Danach startet der installierte Knopf.
    „Nein“ startet Steno nur dieses eine Mal aus dem Download-Ordner.
-3. Beim ersten Start fragt der Knopf nach Server (`https://steno.hausarzt-rothenburg.de`) und Arbeitsplatz.
+3. Beim ersten Start fragt der Knopf nach dem Arbeitsplatz. Der Server `https://steno.hausarzt-rothenburg.de`
+   ist voreingestellt; nur wenn er nicht erreichbar ist, fragt der Knopf nach einer anderen Adresse.
    Oder gleich mitgeben, die Werte werden gespeichert:
    ```
    Steno.exe --server https://steno.hausarzt-rothenburg.de --arbeitsplatz 001
@@ -113,9 +114,12 @@ an, und jeder installierte Knopf fragt beim nächsten Start, ob er sich aktualis
 | 2 | `002` | `T2MDSTNO.002` / `STNOT2MD.002` |
 | 3 | `003` | `T2MDSTNO.003` / `STNOT2MD.003` |
 | Home | `004` | `T2MDSTNO.004` / `STNOT2MD.004` |
+| ohne T2med | `ohne` (beim ersten Start: `0`) | — nur Diktat |
 
 Die Arbeitsplatznummer muss zur Endung der Dateinamen passen, die T2med an diesem Rechner benutzt
-(`T2MED-EINRICHTUNG.md`). Installiert wird je Windows-Benutzer: wer sich an einem Rechner unter einem
+(`T2MED-EINRICHTUNG.md`). **Rechner ohne T2med** (oder ohne eingerichtetes Steno-Gerät): Arbeitsplatz
+`ohne` — der Knopf kann dann nur diktieren (Direkt), fragt keine Aufträge ab und nimmt keine Links aus
+T2med an. Installiert wird je Windows-Benutzer: wer sich an einem Rechner unter einem
 anderen Konto anmeldet, installiert dort noch einmal.
 
 **Umstieg von der alten Einrichtung** (exe in `C:\Program Files\Steno`, Verknüpfung in `shell:startup`):
@@ -146,10 +150,17 @@ nachgeholt.
 ## Einstellungen
 
 Rechtsklick → **„Einstellungen…“** öffnet ein Fenster mit allen Werten: Server, Arbeitsplatz (Auswahl aus
-den Arbeitsplätzen des Servers), Mikrofon (Auswahl aus den angeschlossenen Geräten oder „Windows-Standard“),
+den Arbeitsplätzen des Servers oder „ohne – kein T2med, nur Diktat“), Arten am Knopf, Mikrofon (Auswahl aus den angeschlossenen Geräten oder „Windows-Standard“),
 Stille, Höchstdauer, Fehlklick, Fortsetzen, Knopfgröße. Mikrofon und Aufnahme-Werte gelten ab der nächsten
-Aufnahme. Server, Arbeitsplatz, Knopfgröße und Abfrageintervall liest der Knopf nur beim Start. Ändert sich
+Aufnahme. Server, Arbeitsplatz, Arten, Knopfgröße und Abfrageintervall liest der Knopf nur beim Start. Ändert sich
 einer davon, startet Steno nach dem Speichern selbst neu, während einer Aufnahme erst nach ■.
+
+**Arten am Knopf:** Psychotherapie, Sprechstunde und Direkt lassen sich einzeln abschalten — wo es keine
+Psychotherapie gibt, schaltet der obere Ring dann nur zwischen S-Stunde und Direkt. Abgeschaltete Arten fehlen
+am Ring und im Menü; bleibt nur eine, schaltet der Ring nicht mehr. Ein Auftrag vom T2med-Gerät
+„Steno Psychotherapie“ wird ohne Psychotherapie zur Sprechstunde, ohne Sprechstunde wird jeder Auftrag zur
+Psychotherapie. Ist nur Direkt eingeschaltet, fragt der Knopf keine Aufträge ab und nimmt keine Links aus
+T2med an. Ohne T2med (Arbeitsplatz `ohne`) gibt es nur Direkt.
 
 Gespeichert wird in `%APPDATA%\Steno\steno.ini`. Die Datei lässt sich weiter von Hand bearbeiten
 (Steno vorher beenden, sonst überschreibt er sie beim nächsten Speichern):
@@ -157,7 +168,8 @@ Gespeichert wird in `%APPDATA%\Steno\steno.ini`. Die Datei lässt sich weiter vo
 ```ini
 [steno]
 server = https://steno.hausarzt-rothenburg.de
-arbeitsplatz = 001
+arbeitsplatz = 001         ; ohne = kein T2med, nur Diktat
+arten = psycho, sprechstunde, direkt   ; was fehlt, ist abgeschaltet
 mikrofon =                 ; Teil des Gerätenamens, leer = Windows-Standard
 stille_minuten = 20        ; so lange Stille beendet die Aufnahme
 stille_schwelle_db = -50   ; darunter gilt der Pegel als Stille
@@ -174,4 +186,5 @@ Protokoll: `%LOCALAPPDATA%\Steno\steno.log`. Es enthält Patientennummern, keine
 
 - Der Knopf spricht den Server über HTTPS an: `https://steno.hausarzt-rothenburg.de` ist eine Caddy-Route auf
   `transcribe-gdt-web:8000` (siehe CLAUDE.md, „Erreichbarkeit“) und braucht einen DNS-Eintrag auf `192.168.5.20`.
-- Die T2med-Anbindung muss eingerichtet sein (`GDT_DIR`), sonst verweigert der Knopf den Start.
+- Die T2med-Anbindung muss eingerichtet sein (`GDT_DIR`), sonst verweigert der Knopf den Start — außer am
+  Arbeitsplatz `ohne` (nur Diktat). Den braucht Server 0.43: ältere lehnen ein Diktat ohne Arbeitsplatz ab.

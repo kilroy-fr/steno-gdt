@@ -226,27 +226,44 @@ class FakeRecorder:
 
 
 @pytest.fixture
-def app(tmp_path, monkeypatch):
+def make_app(tmp_path, monkeypatch):
+    """App mit eigenen Einstellungen (arten) oder ohne Arbeitsplatz (ap="")."""
     import tkinter as tk
     try:
         root = tk.Tk()
     except tk.TclError as e:
         pytest.skip(f"keine Anzeige: {e}")
     root.withdraw()
+    watched: list = []                                   # Arbeitsplatz, fuer den Auftraege abgefragt werden
     monkeypatch.setattr(steno, "Recorder", FakeRecorder)
     monkeypatch.setattr(steno, "upload_loop", lambda *a: None)
-    monkeypatch.setattr(steno, "watch_orders", lambda *a: None)
+    monkeypatch.setattr(steno, "watch_orders", lambda *a: watched.append(a[1]))
     monkeypatch.setattr(steno, "prerender", lambda *a: None)
     monkeypatch.setattr(steno, "link_listener", lambda *a: None)
     monkeypatch.setattr(steno.App, "tick", lambda self: None)
-    a = steno.App(root, steno.Config(tmp_path / "steno.ini"), FakeApi(), steno.Spool(tmp_path / "spool"),
-                  "001", "SZ 1", blocks="alle", dictate=True)
-    yield a
+    made: list = []
+
+    def make(ap="001", arten="", dictate=True):
+        cfg = steno.Config(tmp_path / "steno.ini")
+        if arten:
+            cfg.set("arten", arten)
+        a = steno.App(root, cfg, FakeApi(), steno.Spool(tmp_path / "spool"),
+                      ap, "SZ 1", blocks="alle", dictate=dictate)
+        a.watched = watched
+        made.append(a)
+        return a
+
+    yield make
     root.destroy()
     # Tk-Reste jetzt freigeben: sonst raeumt sie der GC irgendwann in einem
     # fremden Thread (TestClient eines spaeteren Tests) auf, und Tcl stuerzt ab.
-    del a
+    made.clear()
     gc.collect()
+
+
+@pytest.fixture
+def app(make_app):
+    return make_app()
 
 
 def click(app, u, v):
@@ -353,6 +370,67 @@ def test_mode_cycle_starts_from_what_is_shown(app):
     app.pending = {**ORDER_A, "device": "psy"}            # zeigt ohne Wahl Psychotherapie
     app.cycle_mode()
     assert app.mode.get() == "sprechstunde"
+
+
+# ---------------------------------------------------------------- Arten abschalten, nur Diktat
+
+def menu_labels(app) -> list[str]:
+    return [app.menu.entrycget(i, "label") for i in range(app.menu.index("end") + 1)
+            if app.menu.type(i) != "separator"]
+
+
+def test_config_defaults_server_and_all_modes(tmp_path):
+    cfg = steno.Config(tmp_path / "steno.ini")
+    assert cfg.server == steno.DEFAULT_SERVER == "https://steno.hausarzt-rothenburg.de"
+    assert cfg.modes() == ("psycho", "sprechstunde", "direkt")
+    cfg.set("arten", "direkt,  sprechstunde")
+    assert cfg.modes() == ("sprechstunde", "direkt")                # Reihenfolge des Rings
+    cfg.set("arten", "quatsch")
+    assert cfg.modes() == ("psycho", "sprechstunde", "direkt")      # unlesbar = alle
+
+
+def test_without_psychotherapy(make_app):
+    app = make_app(arten="sprechstunde, direkt")
+    assert app.modes == ("sprechstunde", "direkt") and app.talk and app.watched == ["001"]
+    app.cycle_mode()
+    assert app.direct
+    app.cycle_mode()                                     # zurueck, Psychotherapie gibt es nicht
+    assert not app.direct and app.mode.get() == "sprechstunde"
+    app.mode.set("")
+    app.on_order(None)
+    app.on_order({**ORDER_A, "device": "psy"})           # Psychotherapie-Geraet: trotzdem Sprechstunde
+    assert app.recording and app.entry.mode == "sprechstunde"
+
+
+def test_only_psychotherapy(make_app):
+    app = make_app(arten="psycho")
+    assert app.shown_mode == "psycho" and not app.direct
+    app.cycle_mode()                                     # nichts weiterzuschalten
+    assert app.mode.get() == "" and app.shown_mode == "psycho"
+    assert "Art des Gesprächs" not in menu_labels(app)
+    app.on_order(None)
+    app.on_order(ORDER_A)
+    app.stop_recording()
+    assert app.spool.entries()[0].mode == "psycho"
+
+
+def test_only_direct_ignores_t2med(make_app):
+    app = make_app(arten="direkt")
+    assert app.direct and not app.talk and app.watched == [""]      # keine Auftraege abfragen
+    assert "Verlauf öffnen" not in menu_labels(app) and "Art des Gesprächs" not in menu_labels(app)
+    app.handle("link", LINK)                             # Klick auf "Steno" in T2med
+    assert "abgeschaltet" in app.flash and not app.recording
+    app.on_release(click(app, 120, 120))
+    assert app.dictating
+
+
+def test_workstation_without_t2med_only_dictates(make_app):
+    app = make_app(ap="")                                # Arbeitsplatz "ohne"
+    assert app.modes == ("direkt",) and app.direct and app.watched == [""]
+    app.handle("online", None)
+    assert not app.offline
+    app.on_release(click(app, 120, 120))
+    assert app.dictating and app.dictation.ap == ""
 
 
 # ---------------------------------------------------------------- Deep Link (FHIR)
@@ -854,6 +932,31 @@ def test_settings_dialog(app, monkeypatch):
     app.stop_recording()
     REAL_TICK(app)
     assert restarts == [True]
+
+
+def test_settings_modes_and_no_t2med(app, monkeypatch):
+    monkeypatch.setattr(steno, "input_devices", lambda: [])
+    errors = []
+    monkeypatch.setattr(steno.messagebox, "showerror", lambda *a, **k: errors.append(a[1]))
+    app.cfg.set("arbeitsplatz", "001")
+    app.open_settings()
+    dlg = app.settings
+    assert all(v.get() for v in dlg.mode_vars.values())
+    for var in dlg.mode_vars.values():
+        var.set(False)
+    dlg.save()
+    assert "mindestens eine" in errors[-1]
+    dlg.mode_vars["sprechstunde"].set(True)
+    dlg.vars["arbeitsplatz"].set(steno.NO_PLACE_LABEL)
+    dlg.save()
+    assert "nur Direkt" in errors[-1] and app.settings
+    dlg.mode_vars["direkt"].set(True)
+    dlg.save()
+    saved = steno.Config(app.cfg.path)
+    assert saved.get("arbeitsplatz") == "ohne" and saved.modes() == ("sprechstunde", "direkt")
+    assert app.restart_pending
+    app.open_settings()
+    assert app.settings.vars["arbeitsplatz"].get() == steno.NO_PLACE_LABEL
 
 
 # ---------------------------------------------------------------- Installation, Update

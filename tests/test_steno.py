@@ -359,6 +359,15 @@ def test_dictation_errors(steno, fake):
     assert dictate(steno).status_code == 502
 
 
+def test_dictation_without_workstation(steno, fake, monkeypatch):
+    """Knopf an einem Rechner ohne T2med (nur Diktat): ohne Arbeitsplatz,
+    auch auf einem Server ohne GDT-Anbindung (gespraech-web)."""
+    assert dictate(steno, ap="").json()["text"] == fake.text
+    monkeypatch.setattr(server, "GDT", gdt.Settings(directory=""))
+    assert dictate(steno, ap="").json()["text"] == fake.text
+    assert dictate(steno).status_code == 404                        # mit Arbeitsplatz: GDT noetig
+
+
 def test_history_page(steno):
     r = steno.get("/verlauf", params={"ap": "001"})
     assert r.status_code == 200 and "Steno – Verlauf" in r.text

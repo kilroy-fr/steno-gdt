@@ -62,7 +62,7 @@ from PIL import ImageTk
 import installation
 import knopf
 
-VERSION = "0.42.0"
+VERSION = "0.43.0"
 
 APP_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Steno"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Steno"
@@ -70,9 +70,13 @@ SPOOL_DIR = DATA_DIR / "aufnahmen"
 CONFIG_FILE = APP_DIR / "steno.ini"
 LOG_FILE = DATA_DIR / "steno.log"
 
+DEFAULT_SERVER = "https://steno.hausarzt-rothenburg.de"
+NO_PLACE = "ohne"                 # Arbeitsplatz ohne T2med: nur Diktat (Direkt)
+NO_PLACE_LABEL = "ohne – kein T2med, nur Diktat"
 DEFAULTS = {
-    "server": "",                 # z. B. https://steno.hausarzt-rothenburg.de
-    "arbeitsplatz": "",           # 001 / 002 / 003 = Endung der GDT-Dateien
+    "server": DEFAULT_SERVER,
+    "arbeitsplatz": "",           # 001 / 002 / 003 = Endung der GDT-Dateien, "ohne" = kein T2med
+    "arten": "psycho, sprechstunde, direkt",   # am oberen Ring; was fehlt, ist abgeschaltet
     "mikrofon": "",               # Teil des Geraetenamens, leer = Windows-Standard
     "stille_minuten": "20",       # so lange Stille beendet die Aufnahme
     "stille_schwelle_db": "-50",  # darunter gilt der Pegel als Stille
@@ -93,7 +97,7 @@ NUMBER_SETTINGS = (
     ("auftrag_abfrage_sekunden", "Auftrag abfragen alle", "s", 1, 60),
 )
 # Liest der Knopf nur beim Start: eine Aenderung startet ihn neu (App.apply_settings)
-RESTART_SETTINGS = {"server", "arbeitsplatz", "knopf_pixel", "auftrag_abfrage_sekunden"}
+RESTART_SETTINGS = {"server", "arbeitsplatz", "arten", "knopf_pixel", "auftrag_abfrage_sekunden"}
 DEFAULT_MIC = "Windows-Standard"
 SAMPLE_RATE = 16000              # Whisper und pyannote rechnen mit 16 kHz mono
 POLL_UPLOAD_SECONDS = 3
@@ -140,6 +144,11 @@ class Config:
     @property
     def server(self) -> str:
         return self.get("server").rstrip("/")
+
+    def modes(self) -> tuple[str, ...]:
+        """Eingeschaltete Arten in der Reihenfolge des Rings; leer oder unlesbar = alle."""
+        wanted = {m.strip() for m in self.get("arten").split(",")}
+        return tuple(m for m, _ in MODES if m in wanted) or tuple(m for m, _ in MODES)
 
 
 # ============================================================
@@ -1058,9 +1067,14 @@ def fetch_context(api: "Api", ap: str, url: str, events: queue.Queue):
 # HINTERGRUND: AUFTRAEGE ABFRAGEN, AUFNAHMEN HOCHLADEN
 # ============================================================
 def watch_orders(api: Api, ap: str, interval: float, events: queue.Queue, stop: threading.Event):
+    """Auftraege abfragen; ohne Arbeitsplatz (ap="", nur Diktat) nur, ob der Server da ist."""
     while not stop.is_set():
         try:
-            events.put(("order", api.order(ap)))
+            if ap:
+                events.put(("order", api.order(ap)))
+            else:
+                api.config()
+                events.put(("online", None))
         except Exception as e:
             events.put(("offline", f"{type(e).__name__}: {e}"))
         stop.wait(interval)
@@ -1185,7 +1199,16 @@ class App:
         self.sender = BlockSender(api, ap) if blocks == "alle" else None
         # Direkt = Diktat an die Schreibmarke; braucht /steno/diktat (Server ab 0.32)
         self.dictation = Dictation(api, ap, self.events) if dictate else None
-        self.direct = False                       # Direkt gewaehlt: bleibt, bis umgeschaltet wird
+        # Eingeschaltete Arten (Einstellungen); ohne Arbeitsplatz (kein T2med)
+        # nur Direkt, ohne Diktat beim Server kein Direkt
+        if not ap:
+            self.modes: tuple[str, ...] = ("direkt",)
+        else:
+            modes = tuple(m for m in cfg.modes() if m != "direkt" or self.dictation)
+            self.modes = modes or ("sprechstunde",)
+        # Gespraeche fuer T2med: nur dann Auftraege abfragen und steno:// annehmen
+        self.talk = any(m != "direkt" for m in self.modes)
+        self.direct = not self.talk               # Direkt gewaehlt: bleibt, bis umgeschaltet wird
         # Fortsetzen: die zuletzt beendete Aufnahme und wann (time.monotonic())
         self.last: tuple[Entry, float] | None = None
         self.continue_entry = False               # steht "Fortsetzen" gerade im Menue?
@@ -1244,13 +1267,16 @@ class App:
         self.tip_shown: tuple | None = None
 
         self.menu = tk.Menu(root, tearoff=0)
-        mode_menu = tk.Menu(self.menu, tearoff=0)
-        for value, label in MODES:
-            mode_menu.add_radiobutton(label=label, value=value, variable=self.menu_mode,
-                                      command=lambda: self.choose_mode(self.menu_mode.get()))
-        self.menu.add_cascade(label="Art des Gesprächs", menu=mode_menu)
-        self.menu.add_separator()
-        self.menu.add_command(label="Verlauf öffnen", command=self.open_history)
+        if len(self.modes) > 1:
+            mode_menu = tk.Menu(self.menu, tearoff=0)
+            for value, label in MODES:
+                if value in self.modes:
+                    mode_menu.add_radiobutton(label=label, value=value, variable=self.menu_mode,
+                                              command=lambda: self.choose_mode(self.menu_mode.get()))
+            self.menu.add_cascade(label="Art des Gesprächs", menu=mode_menu)
+            self.menu.add_separator()
+        if self.talk:                             # Diktate stehen nicht im Verlauf
+            self.menu.add_command(label="Verlauf öffnen", command=self.open_history)
         self.menu.add_command(label="Fehlgeschlagene erneut senden", command=self.retry_failed)
         self.menu.add_command(label="Fehlgeschlagene verwerfen", command=self.drop_failed)
         self.menu.add_command(label="Laufende Aufnahme verwerfen", command=self.discard_recording)
@@ -1272,7 +1298,8 @@ class App:
         windows_tweaks(self.tip)
 
         threading.Thread(target=watch_orders, daemon=True, args=(
-            api, ap, cfg.number("auftrag_abfrage_sekunden"), self.events, self.stop_event)).start()
+            api, ap if self.talk else "", cfg.number("auftrag_abfrage_sekunden"),
+            self.events, self.stop_event)).start()
         threading.Thread(target=upload_loop, daemon=True,
                          args=(api, spool, self.events, self.stop_event, self.wake)).start()
         threading.Thread(target=prerender, args=(self.bodies, self.d), daemon=True).start()
@@ -1354,8 +1381,14 @@ class App:
 
     def mode_for(self, order: dict | None) -> str:
         """Gewaehlte Art oder, ohne Wahl, die des Auftrags: vom T2med-Geraet
-        "Steno Psychotherapie" Psychotherapie, sonst Sprechstunde."""
-        return self.mode.get() or ("psycho" if order and order.get("device") == "psy" else "sprechstunde")
+        "Steno Psychotherapie" Psychotherapie, sonst Sprechstunde — soweit
+        eingeschaltet. Ist eine der beiden aus, gilt immer die andere."""
+        if self.mode.get():
+            return self.mode.get()
+        from_psy = bool(order) and order.get("device") == "psy"
+        if "psycho" in self.modes and (from_psy or "sprechstunde" not in self.modes):
+            return "psycho"
+        return "sprechstunde"
 
     @property
     def shown_mode(self) -> str:
@@ -1382,11 +1415,11 @@ class App:
     def cycle_mode(self):
         """Oberer Ring: Art des Gespraechs weiterschalten, ab der angezeigten.
         Waehrend eines Gespraechs ohne Direkt, waehrend eines Diktats gar nicht."""
-        if self.dictating:
+        if self.dictating or len(self.modes) < 2:
             return
-        order = [value for value, _ in MODES
-                 if value != "direkt" or (self.dictation and not self.recording)]
-        self.choose_mode(order[(order.index(self.shown_mode) + 1) % len(order)])
+        order = [m for m in self.modes if m != "direkt" or not self.recording]
+        shown = self.shown_mode
+        self.choose_mode(order[(order.index(shown) + 1) % len(order) if shown in order else 0])
 
     def lines(self) -> tuple[str, str, str]:
         fresh = self.flash and time.monotonic() < self.flash_until
@@ -1454,6 +1487,8 @@ class App:
         if kind == "order":
             self.offline = ""
             self.on_order(payload)
+        elif kind == "online":                    # nur Diktat: keine Auftraege, nur der Server
+            self.offline = ""
         elif kind == "offline":
             if not self.offline:
                 log.warning(f"Server nicht erreichbar: {payload}")
@@ -1465,6 +1500,10 @@ class App:
             self.failed = sum(e.state == "fehler" for e in entries)
             self.in_work = len(entries) - self.failed
         elif kind == "link":                      # Klick in T2med -> Patient beim Server holen
+            if not self.talk:
+                log.info("Link aus T2med ignoriert: an diesem Knopf nur Diktat")
+                self.show_flash("Gespräche sind an diesem Knopf abgeschaltet", 15)
+                return
             self.show_flash("T2med: Patient wird geladen…", 30)
             threading.Thread(target=fetch_context, daemon=True,
                              args=(self.api, self.ap, payload, self.events)).start()
@@ -1939,7 +1978,16 @@ class SettingsDialog:
         line("Server", ttk.Entry(frame, textvariable=self.vars["server"], width=42))
         self.vars["arbeitsplatz"] = tk.StringVar(w, self.place(cfg.get("arbeitsplatz")))
         line("Arbeitsplatz", ttk.Combobox(frame, textvariable=self.vars["arbeitsplatz"],
-                                          values=[self.place(n) for n in app.workstations]))
+                                          values=[*(self.place(n) for n in app.workstations),
+                                                  NO_PLACE_LABEL]))
+
+        heading("Arten am Knopf")
+        enabled = cfg.modes()
+        self.mode_vars = {m: tk.BooleanVar(w, m in enabled) for m, _ in MODES}
+        for value, label in MODES:
+            ttk.Checkbutton(frame, text=label, variable=self.mode_vars[value]).grid(
+                row=self.row, column=0, columnspan=3, sticky="w", **pad)
+            self.row += 1
 
         heading("Aufnahme")
         self.vars["mikrofon"] = tk.StringVar(w, cfg.get("mikrofon") or DEFAULT_MIC)
@@ -1953,10 +2001,10 @@ class SettingsDialog:
                                     increment=1, width=7), unit)
 
         ttk.Label(frame, foreground="#666666", wraplength=int(360 * s), justify="left",
-                  text="Server, Arbeitsplatz und die Knopf-Einstellungen gelten nach einem Neustart. "
-                       "Steno startet dafür nach dem Speichern selbst neu, während einer Aufnahme "
-                       "erst danach.").grid(row=self.row, column=0, columnspan=3, sticky="w",
-                                            pady=(int(12 * s), 0))
+                  text="Ohne T2med gibt es nur Direkt. Server, Arbeitsplatz, Arten und die "
+                       "Knopf-Einstellungen gelten nach einem Neustart. Steno startet dafür nach "
+                       "dem Speichern selbst neu, während einer Aufnahme erst danach.").grid(
+            row=self.row, column=0, columnspan=3, sticky="w", pady=(int(12 * s), 0))
         self.row += 1
         version = f"Steno-Knopf {VERSION}"
         if app.server_version:
@@ -1983,6 +2031,8 @@ class SettingsDialog:
         w.focus_force()
 
     def place(self, number: str) -> str:
+        if number == NO_PLACE:
+            return NO_PLACE_LABEL
         name = self.app.workstations.get(number)
         return f"{number} – {name}" if name and name != number else number
 
@@ -1993,11 +2043,19 @@ class SettingsDialog:
         if not re.match(r"https?://[^/\s]+", server):
             raise ValueError("Die Server-Adresse muss mit https:// beginnen, "
                              "z. B. https://steno.hausarzt-rothenburg.de")
-        place = re.match(r"\d+", get["arbeitsplatz"])
-        if not place:
+        if get["arbeitsplatz"].lower().startswith(NO_PLACE):
+            place = NO_PLACE
+        elif number := re.match(r"\d+", get["arbeitsplatz"]):
+            place = number.group().zfill(3)
+        else:
             raise ValueError("Arbeitsplatz: bitte eine Nummer wählen, z. B. 001.")
+        modes = [m for m, _ in MODES if self.mode_vars[m].get()]
+        if not modes:
+            raise ValueError("Bitte mindestens eine Art einschalten.")
+        if place == NO_PLACE and "direkt" not in modes:
+            raise ValueError("Ohne T2med gibt es nur Direkt (Diktat) – bitte einschalten.")
         mic = get["mikrofon"]
-        values = {"server": server, "arbeitsplatz": place.group().zfill(3),
+        values = {"server": server, "arbeitsplatz": place, "arten": ", ".join(modes),
                   "mikrofon": "" if mic == DEFAULT_MIC else mic}
         for key, label, unit, low, high in NUMBER_SETTINGS:
             try:
@@ -2040,7 +2098,7 @@ def ask_setup(root: tk.Tk, cfg: Config) -> tuple[Api, str, str, dict] | None:
     while True:
         if not cfg.server:
             server = simpledialog.askstring(
-                "Steno einrichten", "Adresse des Steno-Servers\n(z. B. https://steno.hausarzt-rothenburg.de):",
+                "Steno einrichten", "Adresse des Steno-Servers:", initialvalue=DEFAULT_SERVER,
                 parent=root)
             if not server:
                 return None
@@ -2057,6 +2115,13 @@ def ask_setup(root: tk.Tk, cfg: Config) -> tuple[Api, str, str, dict] | None:
                 cfg.set("server", "")
             continue
         workstations = info.get("workstations") or {}
+        if cfg.get("arbeitsplatz") == NO_PLACE:  # kein T2med: Diktat braucht keine GDT-Anbindung
+            if not info.get("diktat"):
+                messagebox.showerror("Steno", "Der Server kann kein Diktat (erst ab Version 0.32).",
+                                     parent=root)
+                return None
+            cfg.save()
+            return api, "", "ohne T2med", info
         if not info.get("gdt"):
             from tkinter import messagebox
             messagebox.showerror("Steno", "Auf dem Server ist keine T2med-Anbindung eingerichtet (GDT_DIR).",
@@ -2064,11 +2129,15 @@ def ask_setup(root: tk.Tk, cfg: Config) -> tuple[Api, str, str, dict] | None:
             return None
         ap = cfg.get("arbeitsplatz")
         if ap not in workstations:
-            choices = "\n".join(f"{n} = {name or n}" for n, name in workstations.items())
+            choices = "\n".join([*(f"{n} = {name or n}" for n, name in workstations.items()),
+                                 "0 = ohne T2med (nur Diktat)"])
             ap = (simpledialog.askstring("Steno einrichten",
                                          f"Arbeitsplatz dieses Rechners:\n{choices}", parent=root) or "").strip()
             if not ap:
                 return None
+            if ap.lower() in ("0", "000", NO_PLACE):
+                cfg.set("arbeitsplatz", NO_PLACE)
+                continue
             ap = ap.zfill(3)
             if ap not in workstations:
                 continue
@@ -2145,14 +2214,14 @@ def main():
             root.destroy()
             return
         check_update = False
-        if info.get("fhir"):
-            register_link_scheme()
         spool = Spool()
         spool.recover()
         root.deiconify()
         app = App(root, cfg, api, spool, ap, ap_name, blocks=info.get("bloecke") or "",
                   workstations=info.get("workstations"), dictate=bool(info.get("diktat")),
                   server_version=str(info.get("version") or ""))
+        if info.get("fhir") and app.talk:
+            register_link_scheme()
         if link:                                  # Steno lief noch nicht: T2med hat ihn gestartet
             app.events.put(("link", link))
             link = None
