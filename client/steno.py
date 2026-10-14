@@ -62,7 +62,7 @@ from PIL import ImageTk
 import installation
 import knopf
 
-VERSION = "0.43.0"
+VERSION = "0.44.0"
 
 APP_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Steno"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Steno"
@@ -1622,6 +1622,22 @@ class App:
             return
         log.info(f"Aufnahme {entry.id} " + (f"für Pat.-Nr. {order['patid']}" if order else "ohne Patient"))
 
+    def start_by_click(self):
+        """▶ fuer ein Gespraech. Ohne Auftrag erst nachfragen: die Dokumentation
+        landet dann ohne Patient in T2med, und meist wurde nur vergessen, in
+        T2med zu klicken. Waehrend der Rueckfrage laeuft tick() weiter — kam
+        derweil ein Auftrag, hat der die Aufnahme schon gestartet oder ist jetzt
+        offen."""
+        if not self.pending and not self.confirm(
+                "Kein Patient ausgewählt.\n\n"
+                "Die Dokumentation landet in T2med unter „Ext. Aufträge“ und muss dort "
+                "von Hand zugeordnet werden. Für einen Patienten zuerst in T2med "
+                "„Steno“ oder „Messung starten“ klicken.\n\n"
+                "Trotzdem ohne Patient aufnehmen?"):
+            log.info("Aufnahme ohne Patient abgelehnt")
+            return
+        self.start_recording(self.pending)
+
     def start_dictation(self):
         """Direkt: Diktat an die Schreibmarke — ohne Patient und ohne Auftrag;
         ein offener Auftrag aus T2med bleibt offen."""
@@ -1815,7 +1831,7 @@ class App:
             elif self.direct:
                 self.start_dictation()
             else:
-                self.start_recording(self.pending)
+                self.start_by_click()
         elif zone == "mode":
             self.cycle_mode()
         elif zone == "menu":

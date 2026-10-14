@@ -33,6 +33,7 @@ def steno_fhir(fake, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "steno_jobs", {})
     monkeypatch.setattr(server, "steno_streams", {})
     monkeypatch.setattr(server, "_STENO_SEND_INTERVAL", 0.02)
+    monkeypatch.setattr(server, "STENO_ABHOLUNG_MINUTEN", 0.0)      # kein T2med, das abholt
     monkeypatch.setattr(server, "STENO_MIN_WOERTER", 5)
     with TestClient(server.app) as c:
         yield c

@@ -116,6 +116,7 @@ def live(fake, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "gdt_orders", gdt.OrderBook())
     monkeypatch.setattr(server, "steno_jobs", {})
     monkeypatch.setattr(server, "steno_streams", {})
+    monkeypatch.setattr(server, "STENO_ABHOLUNG_MINUTEN", 0.0)      # kein T2med, das abholt
     monkeypatch.setattr(server, "STENO_MIN_WOERTER", 5)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -313,6 +314,24 @@ def test_misclick_keeps_order_for_next_recording(app):
     app.api.claim_result = False                         # auf dem Server laengst beansprucht
     app.start_recording(app.pending)
     assert app.entry.order == ORDER_A and len(app.api.claimed) == claims
+
+
+def test_click_without_patient_asks_first(app, monkeypatch):
+    asked: list = []
+    answer = False
+    monkeypatch.setattr(app, "confirm", lambda text: asked.append(text) or answer)
+    app.on_order(None)
+    app.on_release(click(app, 120, 120))                 # ▶ ohne Auftrag: nein
+    assert not app.recording and "Kein Patient" in asked[0] and not app.spool.entries()
+    answer = True
+    app.on_release(click(app, 120, 120))                 # ja
+    assert app.recording and app.entry.order is None
+    app.stop_recording()
+    app.on_order(ORDER_A)                                # neuer Auftrag: ohne Frage
+    app.stop_recording()
+    app.pending = ORDER_B
+    app.on_release(click(app, 120, 120))
+    assert len(asked) == 2 and app.entry.order == ORDER_B
 
 
 def test_expired_order_records_without_patient(app):

@@ -41,7 +41,7 @@ from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.43.1"
+VERSION = "0.44.0"
 
 
 def _flag(value: str) -> bool:
@@ -136,6 +136,10 @@ FHIR = fhir.Settings.from_env()
 STENO_MODUS = os.getenv("STENO_MODUS", "abpro")
 STENO_PSY_AB_MINUTEN = float(os.getenv("STENO_PSY_AB_MINUTEN", "20"))
 STENO_SENDEN_WARTEN = float(os.getenv("STENO_SENDEN_WARTEN", "60"))
+# Minuten, die eine abgelegte GDT-Datei auf die Abholung wartet; danach wird
+# sie zurueckgezogen (T2med zu oder Geraet am Arbeitsplatz nicht eingerichtet).
+# 0 = nicht pruefen, abgelegt gilt als gesendet.
+STENO_ABHOLUNG_MINUTEN = float(os.getenv("STENO_ABHOLUNG_MINUTEN", "5"))
 STENO_AUFBEWAHRUNG = float(os.getenv("STENO_AUFBEWAHRUNG", "12"))
 STENO_MIN_WOERTER = int(os.getenv("STENO_MIN_WOERTER", "15"))
 # Transkript in Bloecken schon waehrend der Aufnahme (siehe STENO-KNOPF):
@@ -2438,24 +2442,99 @@ async def _steno_send_fhir(job: StenoJob, notes: list) -> bool:
         return False
 
 
+def _file_sig(path: Path):
+    """Groesse + mtime: noch dieselbe Datei oder eine neue unter gleichem Namen?
+    None = nicht (mehr) da."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return st.st_size, st.st_mtime_ns
+
+
+def _not_collected(ap: str, name: str) -> str:
+    return (f"T2med hat {name} an Arbeitsplatz {ap} nicht abgeholt. Ist T2med dort geöffnet und "
+            "das GDT-Gerät „Steno“ eingerichtet (Dateiname Import, Annahme ohne Messauftrag)?")
+
+
 async def _steno_send_gdt(job: StenoJob, order: gdt.Order | None, notes: list):
-    """Ablegen; liegt die vorige Datei noch, wird gewartet statt ueberschrieben."""
+    """Ablegen; liegt die vorige Datei noch, wird gewartet statt ueberschrieben.
+    Liegt dieselbe Datei laenger als STENO_ABHOLUNG_MINUTEN (etwa aus der Zeit
+    vor einem Neustart), holt T2med dort nichts ab — dann nicht die ganze
+    Stunde warten."""
     deadline = time.monotonic() + STENO_SENDEN_WARTEN * 60
+    blocker, blocked_since = None, 0.0
     while True:
         _steno_check(job)
         try:
             target, record = _deliver_gdt(job.ap, order, job.text, job.transcript, job.mode,
                                           job.model, job.started, job.warning, tuple(notes))
             break
-        except FileExistsError:
-            if time.monotonic() > deadline:
-                raise StenoError(f"T2med hat die vorige Übergabe an Arbeitsplatz {job.ap} nicht "
-                                 "abgeholt. Läuft T2med dort?")
+        except FileExistsError as e:
+            path = Path(e.filename)
+            sig = _file_sig(path)
+            if sig != blocker:
+                blocker, blocked_since = sig, time.monotonic()
+            stuck = (STENO_ABHOLUNG_MINUTEN > 0
+                     and time.monotonic() - blocked_since > STENO_ABHOLUNG_MINUTEN * 60)
+            if stuck or time.monotonic() > deadline:
+                raise StenoError(f"Die vorige Übergabe liegt noch. {_not_collected(job.ap, path.name)}")
             job.detail = "wartet, bis T2med die vorige Übergabe abgeholt hat"
             await asyncio.sleep(_STENO_SEND_INTERVAL)
         except OSError as e:
             raise StenoError(f"GDT-Ordner nicht beschreibbar: {e}")
     job.file, job.patid = target.name, record.get("3000") or ""
+    await _steno_await_pickup(job, target, record)
+
+
+async def _steno_await_pickup(job: StenoJob, target: Path, record: gdt.Record):
+    """Gesendet ist erst, was T2med abgeholt hat (normal nach ~10 s). Bleibt
+    die Datei liegen, wird sie zurueckgezogen: sonst stuende "gesendet" am Knopf,
+    die Dokumentation kaeme nie an, und jede weitere Uebergabe dieses
+    Arbeitsplatzes wartete hinter ihr. Ebenso, wenn eine fortgesetzte Aufnahme
+    sie ersetzt, bevor T2med sie hatte."""
+    if STENO_ABHOLUNG_MINUTEN <= 0:
+        return
+    try:
+        written = _file_sig(target)
+    except OSError:
+        return                                     # abgelegt ist sie; mehr ist nicht zu sagen
+    deadline = time.monotonic() + STENO_ABHOLUNG_MINUTEN * 60
+    job.detail = "wartet, bis T2med die Übergabe abholt"
+    while written:
+        try:
+            if _file_sig(target) != written:
+                return                             # abgeholt
+        except OSError:
+            pass                                   # Freigabe kurz weg: weiter warten
+        if job.cancelled or time.monotonic() > deadline:
+            if not _steno_withdraw(target, record):
+                return                             # T2med war schneller
+            logger.warning(f"Steno {job.id}: {target.name} nicht abgeholt, zurückgezogen")
+            job.file = ""
+            _steno_check(job)
+            raise StenoError(f"{_not_collected(job.ap, target.name)} Die Übergabe wurde "
+                             "zurückgezogen; der Text steht im Verlauf.")
+        await asyncio.sleep(_STENO_SEND_INTERVAL)
+
+
+def _steno_withdraw(target: Path, record: gdt.Record) -> bool:
+    """Nicht abgeholte Uebergabe wegnehmen — erst umbenennen (atomar: liest
+    T2med sie gerade, scheitert eins von beiden), dann loeschen, samt Anhang.
+    False = schon weg oder gerade in Benutzung, dann gilt sie als abgeholt."""
+    hidden = target.with_name(f".steno-zurueck-{target.name}")
+    try:
+        os.replace(target, hidden)
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        logger.warning(f"{target.name} nicht zurückgezogen: {_exc_text(e)}")
+        return False
+    hidden.unlink(missing_ok=True)
+    attachment = record.get("6302")
+    if attachment:
+        (Path(GDT.directory) / "anhaenge" / f"{attachment}.txt").unlink(missing_ok=True)
+    return True
 
 
 async def _steno_send(job: StenoJob):

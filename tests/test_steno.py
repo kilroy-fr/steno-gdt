@@ -29,6 +29,8 @@ def steno(fake, monkeypatch, settings, tmp_path):
     monkeypatch.setattr(server, "steno_jobs", {})
     monkeypatch.setattr(server, "steno_streams", {})
     monkeypatch.setattr(server, "_STENO_SEND_INTERVAL", 0.02)
+    # Hier holt kein T2med ab: abgelegt = gesendet; die Abholung pruefen eigene Tests
+    monkeypatch.setattr(server, "STENO_ABHOLUNG_MINUTEN", 0.0)
     # Die Attrappe spricht 12 Woerter; die Grenze fuer "zu kurz" pruefen eigene Tests
     monkeypatch.setattr(server, "STENO_MIN_WOERTER", 5)
     with TestClient(server.app) as c:
@@ -113,6 +115,67 @@ def test_job_gives_up_when_t2med_never_picks_up(steno, tmp_path, monkeypatch):
     (tmp_path / "T2MDSTNO.001").write_bytes(b"vorige")
     job = wait(steno, upload(steno).json()["id"])
     assert job["state"] == "fehler" and "nicht abgeholt" in job["detail"]
+
+
+def wait_for_state(client, job_id, state):
+    end = time.monotonic() + 5
+    while (job := client.get(f"/steno/jobs/{job_id}").json())["state"] != state:
+        assert time.monotonic() < end, job
+        time.sleep(0.02)
+    return job
+
+
+def test_job_is_sent_once_t2med_picks_up(steno, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "STENO_ABHOLUNG_MINUTEN", 1.0)
+    job_id = upload(steno).json()["id"]
+    job = wait_for_state(steno, job_id, "sendet")
+    while not (tmp_path / "T2MDSTNO.001").exists():
+        time.sleep(0.02)
+    assert "abholt" in steno.get(f"/steno/jobs/{job_id}").json()["detail"]
+    (tmp_path / "T2MDSTNO.001").unlink()                  # T2med holt ab
+    job = wait(steno, job_id)
+    assert (job["state"], job["file"], job["detail"]) == ("gesendet", "T2MDSTNO.001", "")
+
+
+def test_job_not_picked_up_is_withdrawn(steno, tmp_path, monkeypatch):
+    """Sprechzimmer 1, 14.10.2026: T2med holte T2MDSTNO.001 ohne Auftrag nie ab,
+    der Knopf zeigte "gesendet", die naechste Aufnahme hing in "sendet"."""
+    monkeypatch.setattr(server, "STENO_ABHOLUNG_MINUTEN", 0.002)
+    monkeypatch.setattr(server.GDT, "pvs_path", "S:\\_steno")             # mit Anhang
+    job = wait(steno, upload(steno).json()["id"])
+    assert job["state"] == "fehler" and "zurückgezogen" in job["detail"] and not job["file"]
+    assert "Annahme ohne Messauftrag" in job["detail"]
+    assert steno.get("/steno/jobs", params={"ap": "001"}).json()["jobs"][0]["text"] == "Hallo Welt"
+    assert [p.name for p in tmp_path.iterdir() if p.is_file()] == []      # nichts bleibt liegen
+    assert list((tmp_path / "anhaenge").iterdir()) == []
+    assert wait(steno, upload(steno).json()["id"])["state"] == "fehler"   # haengt nicht dahinter
+
+
+def test_job_behind_stale_file_fails_early(steno, tmp_path, monkeypatch):
+    """Liegt die vorige Datei laenger als die Abholfrist (etwa von vor einem
+    Neustart), nicht die ganze STENO_SENDEN_WARTEN warten."""
+    monkeypatch.setattr(server, "STENO_ABHOLUNG_MINUTEN", 0.002)
+    (tmp_path / "T2MDSTNO.001").write_bytes(b"vorige")
+    job = wait(steno, upload(steno).json()["id"])
+    assert job["state"] == "fehler" and "vorige Übergabe liegt noch" in job["detail"]
+    assert (tmp_path / "T2MDSTNO.001").read_bytes() == b"vorige"         # fremde Datei bleibt
+
+
+def test_continuation_withdraws_file_not_yet_picked_up(steno, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "STENO_ABHOLUNG_MINUTEN", 1.0)
+    target = tmp_path / "T2MDSTNO.001"
+    first = upload(steno, order=json.dumps(order_dict())).json()["id"]
+    wait_for_state(steno, first, "sendet")
+    while not target.exists():
+        time.sleep(0.02)
+    second = upload(steno, order=json.dumps(order_dict()), replaces=first).json()["id"]
+    assert wait(steno, first)["state"] == "ersetzt"
+    wait_for_state(steno, second, "sendet")
+    while not target.exists():
+        time.sleep(0.02)
+    assert "Fortsetzung" not in " ".join(fields_of(target)["6227"])   # die erste kam nie an
+    target.unlink()
+    assert wait(steno, second)["state"] == "gesendet"
 
 
 def test_job_without_speech_fails(steno, fake, tmp_path):
