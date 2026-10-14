@@ -19,7 +19,8 @@ Steht die Maus auf dem Knopf, erscheint daneben, für wen aufgenommen wird; Meld
 
 | Text | Bedeutung |
 |---|---|
-| `Steno` · bereit | wartet. Ein Klick auf ▶ fragt „Kein Patient ausgewählt … Trotzdem ohne Patient aufnehmen?“. Mit „Ja“ landet die Dokumentation in T2med unter „Ext. Aufträge“. |
+| `Steno` · bereit | wartet. Ein Klick auf ▶ fragt „Kein Patient ausgewählt … Trotzdem ohne Patient aufnehmen?“. Mit „Ja“ wartet die Dokumentation auf die Zuordnung (mit FHIR) oder landet in T2med unter „Ext. Aufträge“ (nur GDT). |
+| 1 ohne Patient · in T2med „Steno“ klicken | Eine Dokumentation ohne Patient ist fertig. In T2med beim richtigen Patienten auf „Steno“ klicken. Der Knopf zeigt die wartenden Aufnahmen (Uhrzeit, Textanfang): „Zuordnen“ schickt sie zu diesem Patienten, „Neue Aufnahme“ nimmt stattdessen auf. Nicht mehr gebraucht: Rechtsklick → „Fehlgeschlagene verwerfen“. |
 | `▶ Müller, Hans` | Auftrag aus T2med liegt vor, Klick auf ▶ startet für diesen Patienten |
 | `Müller, Hans` · ● 12:34 (rot) | Aufnahme läuft. Ein Klick auf ■ beendet sie und schickt sie los. |
 | `Diktat` · ● 0:42 | Diktat läuft (Direkt), der Text erscheint an der Schreibmarke |

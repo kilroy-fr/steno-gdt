@@ -22,9 +22,11 @@ try:
 except (ImportError, OSError) as e:          # sounddevice ohne PortAudio wirft OSError
     pytest.skip(f"Client-Abhaengigkeiten fehlen: {e}", allow_module_level=True)
 
+import fhir
 import gdt
 import installation
 import server
+from test_fhir import fhir_order
 from test_gdt import fields_of, t2med_order
 
 
@@ -162,6 +164,44 @@ def test_button_flow_against_server(live, tmp_path):
     assert [p.name for p in (tmp_path / "spool").iterdir()] == [f"{entry.id}.zuletzt.flac"]
     f = fields_of(gdt_dir / "T2MDSTNO.001")
     assert f["3000"] == ["4711"] and f["6220"] == ["Hallo Welt"]
+
+
+def test_unassigned_recording_is_assigned_via_fhir(live, fake, tmp_path, monkeypatch):
+    """Server mit FHIR: ohne Patient wartet die Dokumentation am Knopf, bis
+    sie einem Klick auf "Steno" in T2med zugeordnet wird."""
+    api, gdt_dir = live
+    monkeypatch.setattr(server, "FHIR", fhir.Settings(api_key="geheim", hosts=("t2med.praxis",)))
+    spool, events = steno.Spool(tmp_path / "spool"), queue.Queue()
+    entry = make_entry(state="bereit")
+    write_flac(spool.audio(entry))
+    spool.save(entry)
+    end = time.monotonic() + 10
+    while (current := spool.entries()[0]).state != "zuordnen":
+        assert time.monotonic() < end, current
+        steno.upload_step(api, spool, current, events)
+        time.sleep(0.05)
+    assert current.summary == "Hallo Welt" and current.order is None
+    assert "unassigned" in [events.get_nowait()[0] for _ in range(events.qsize())]
+    assert not list(gdt_dir.glob("T2MD*"))
+    steno.assign_entry(api, spool, current, fhir_order(), events)
+    assert spool.entries()[0].state == "hochgeladen"
+    while spool.entries():
+        assert time.monotonic() < end, spool.entries()
+        steno.upload_step(api, spool, spool.entries()[0], events)
+        time.sleep(0.05)
+    assert len(fake.fhir_bundles()) == 1
+
+
+def test_assignment_after_server_restart_reuploads_with_patient(live, tmp_path, monkeypatch):
+    api, _ = live
+    monkeypatch.setattr(server, "FHIR", fhir.Settings(api_key="geheim", hosts=("t2med.praxis",)))
+    spool = steno.Spool(tmp_path / "spool")
+    entry = make_entry(state="zuordnen", summary="A: …")       # Server kennt die ID nicht mehr
+    write_flac(spool.audio(entry))
+    spool.save(entry)
+    steno.assign_entry(api, spool, entry, fhir_order(), queue.Queue())
+    [again] = spool.entries()
+    assert again.state == "bereit" and again.order["fhir"]["kontext"] == "kontext-123"
 
 
 def test_button_reuploads_after_server_restart(live, tmp_path):
@@ -332,6 +372,42 @@ def test_click_without_patient_asks_first(app, monkeypatch):
     app.pending = ORDER_B
     app.on_release(click(app, 120, 120))
     assert len(asked) == 2 and app.entry.order == ORDER_B
+
+
+def test_click_without_patient_with_fhir_says_assign_later(app, monkeypatch):
+    asked: list = []
+    monkeypatch.setattr(app, "confirm", lambda text: asked.append(text) or False)
+    app.fhir = True
+    app.on_release(click(app, 120, 120))
+    assert "zuordnen" in asked[0] and "Ext. Aufträge" not in asked[0] and not app.recording
+
+
+def buttons(widget) -> dict:
+    found = {}
+    for child in widget.winfo_children():
+        if child.winfo_class() == "Button":
+            found.setdefault(child.cget("text"), []).append(child)
+        for text, items in buttons(child).items():
+            found.setdefault(text, []).extend(items)
+    return found
+
+
+def test_link_with_unassigned_recordings_asks_instead_of_recording(app, monkeypatch):
+    assigned: list = []
+    monkeypatch.setattr(steno, "assign_entry", lambda api, spool, entry, order, events:
+                        assigned.append((entry.id, order["patid"])))
+    for i, started in enumerate(("2026-10-14T09:14:15", "2026-10-14T10:13:22")):
+        app.spool.save(make_entry(id=f"zuordnen-{i}", state="zuordnen", started=started,
+                                  summary=f"Gespräch {i}"))
+    order = {**ORDER_A, "fhir": {"kontext": "k-1"}}
+    app.on_link_order(order)
+    assert not app.recording and app.dialog is not None and app.pending == order
+    [first, second] = buttons(app.dialog)["Zuordnen"]           # juengste zuerst
+    first.invoke()
+    assert assigned == [("zuordnen-1", "4711")] and app.dialog is None and app.pending is None
+    app.on_link_order(order)
+    buttons(app.dialog)["Neue Aufnahme"][0].invoke()
+    assert app.recording and app.entry.order == order and len(assigned) == 1
 
 
 def test_expired_order_records_without_patient(app):

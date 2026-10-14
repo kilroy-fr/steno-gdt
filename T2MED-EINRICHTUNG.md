@@ -19,12 +19,15 @@ Klick auf ■ ──▶ Aufnahme geht an den Server: Transkription, Sprechertren
             ──▶ S:\_steno\T2MDSTNO.001   (6310, T2med liest + löscht, etwa 10 s später)
 ```
 
-- **Ohne „Messung starten“** fragt ein Klick auf ▶ erst nach („Kein Patient ausgewählt …“), dann startet die
-  Aufnahme „ohne Patient“. Die Dokumentation landet in T2med unter **„Ext. Aufträge“** zur manuellen
-  Zuordnung (Patientennummer `0`). Das geht immer per GDT, auch an Arbeitsplätzen, die sonst FHIR benutzen:
-  **Das GDT-Gerät „Steno“ muss deshalb an jedem Arbeitsplatz eingerichtet sein** (Abschnitt 2). Holt T2med die
-  Datei nicht binnen 5 Minuten ab (`STENO_ABHOLUNG_MINUTEN`), zieht Steno sie zurück und der Knopf meldet einen
-  Fehler. Der Text steht dann im Verlauf, nach der Korrektur geht „Fehlgeschlagene erneut senden“.
+- **Ohne Patient** (ohne „Messung starten“ bzw. „Steno“) fragt ein Klick auf ▶ erst nach („Kein Patient
+  ausgewählt …“), dann startet die Aufnahme „ohne Patient“. Wohin die Dokumentation geht:
+  - **mit FHIR (Abschnitt 4):** Sie wartet am Knopf („1 ohne Patient · in T2med „Steno“ klicken“). Beim
+    richtigen Patienten in T2med auf „Steno“ klicken. Der Knopf zeigt die wartenden Aufnahmen mit Uhrzeit und
+    Textanfang, „Zuordnen“ schickt sie per FHIR zu diesem Patienten, „Neue Aufnahme“ nimmt stattdessen auf.
+  - **ohne FHIR:** per GDT nach **„Ext. Aufträge“** zur manuellen Zuordnung (Patientennummer `0`). Holt T2med
+    die Datei nicht binnen 5 Minuten ab (`STENO_ABHOLUNG_MINUTEN`, GDT-Gerät am Arbeitsplatz fehlt oder T2med
+    ist zu), zieht Steno sie zurück und der Knopf meldet einen Fehler. Der Text steht dann im Verlauf, nach der
+    Korrektur geht „Fehlgeschlagene erneut senden“.
 - **Ein Auftrag gilt für genau eine Aufnahme.** Wer beim nächsten Patienten „Messung starten“ vergisst,
   landet ohne Patient und nicht beim vorigen. Ein Auftrag verfällt nach 60 Minuten (`GDT_AUFTRAG_GUELTIG`).
 - **Auftrag während einer laufenden Aufnahme** (anderer Patient): Der Knopf fragt, ob er die laufende Aufnahme
@@ -206,10 +209,10 @@ in T2med auf einen Knopf **„Steno“ in der Menüleiste**. Der Steno-Knopf sta
 Dokumentation geht ohne Austauschordner direkt in den Behandlungskontext des Patienten. T2med bestätigt dabei
 jede Übergabe, und dass eine vorige Datei noch nicht abgeholt ist, kann nicht vorkommen.
 
-GDT bleibt daneben unverändert: „Messung starten“ funktioniert weiter, Aufnahmen ohne Patient gehen wie
-bisher an „Ext. Aufträge“. Lehnt T2med eine FHIR-Übergabe ab (Anmeldung abgelaufen, Kontext älter als vier
-Stunden), geht die Dokumentation per GDT **ohne Patient** an „Ext. Aufträge“. Der Patientenname steht dann im
-Kommentar, verloren geht nichts.
+„Messung starten“ (GDT) funktioniert daneben weiter, wo das GDT-Gerät eingerichtet ist. Aufnahmen **ohne
+Patient** gehen mit FHIR aber nicht mehr an „Ext. Aufträge“: Sie warten am Knopf, bis man sie beim Patienten
+mit „Steno“ zuordnet (siehe oben). Ebenso, wenn T2med eine FHIR-Übergabe ablehnt (Anmeldung abgelaufen,
+Kontext älter als vier Stunden): einmal beim Patienten auf „Steno“ klicken und „Zuordnen“. Verloren geht nichts.
 
 Grundlage ist T2meds Integrationsleitfaden: [T2med/fhir-demoapplication](https://github.com/T2med/fhir-demoapplication),
 `Integrationsleitfaden-FHIR-API.md`.

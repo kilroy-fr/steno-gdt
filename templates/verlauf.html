@@ -26,6 +26,7 @@
     .state.gesendet { background: var(--ok); }
     .state.fehler { background: var(--err); }
     .state.ersetzt { background: var(--muted); }
+    .state.zuordnen { background: var(--run); }
     .detail { margin-top: 6px; color: var(--err); }
     .detail.info { color: var(--muted); }
     .warning { margin-top: 6px; color: var(--run); }
@@ -58,7 +59,7 @@
     // nichts: das hat der Server laengst getan; was fehlschlug, steht dabei.
     const STATES = { wartet: "wartet", transkribiert: "transkribiert", schreibt: "schreibt",
                      sendet: "sendet", gesendet: "an T2med", fehler: "Fehler",
-                     ersetzt: "ersetzt" };
+                     ersetzt: "ersetzt", zuordnen: "Patient zuordnen" };
     const MODES = { abpro: "A/B/PRO", analyze: "Analyse", summary: "Zusammenfassung",
                     psycho: "Psychotherapie", clean: "Bereinigung", direkt: "Direkt" };
     const select = document.getElementById("ap");
@@ -76,7 +77,7 @@
       return `<div class="job" data-id="${esc(j.id)}">
         <div class="head">
           <span class="state ${esc(j.state)}">${esc(STATES[j.state] || j.state)}</span>
-          <span class="patient">${esc(j.patient || "Ohne Patient (Ext. Aufträge)")}</span>
+          <span class="patient">${esc(j.patient || (j.state === "zuordnen" ? "Ohne Patient" : "Ohne Patient (Ext. Aufträge)"))}</span>
           <span class="meta">${esc(started)} · ${Math.round(j.duration / 60)} min · AP ${esc(j.ap)}` +
           (j.mode ? ` · ${esc(MODES[j.mode] || j.mode)}` : "") +
           (j.file === "FHIR" ? " · per FHIR" : "") + `</span>

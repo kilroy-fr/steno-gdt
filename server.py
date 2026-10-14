@@ -41,7 +41,7 @@ from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.44.0"
+VERSION = "0.45.0"
 
 
 def _flag(value: str) -> bool:
@@ -2073,15 +2073,16 @@ async def fhir_context(request: Request):
 # nicht. Alles Weitere laeuft hier ohne offenen Browser bis T2med:
 # Transkription + Sprechertrennung, Modus bestimmen, Dokumentation, Uebergabe.
 # Gesendet wird automatisch — geprueft wird in T2med; die Zuordnung kommt nur
-# aus dem Auftrag, den der Knopf beim Start beansprucht hat, ohne ihn geht
-# 3000=0 an "Ext. Aufträge".
+# aus dem Auftrag, den der Knopf beim Start beansprucht hat. Ohne ihn: mit
+# FHIR wartet die Dokumentation im Zustand "zuordnen", bis am Knopf ein Mensch
+# sie einem Klick auf "Steno" in T2med gibt; ohne FHIR geht 3000=0 an
+# "Ext. Aufträge".
 #
 # Zwei Wege nach T2med: kam der Auftrag per GDT ("Messung starten"), geht die
 # Dokumentation als GDT-Datei zurueck; kam er per FHIR (Drittanbieter-Knopf in
 # T2med, fhir.py), als FHIR-Transaktion in denselben Kontext. Lehnt T2med die
-# FHIR-Uebergabe ab (Token abgelaufen, Kontext verfallen), geht sie per GDT
-# ohne Patient an "Ext. Aufträge" — mit dem Namen im Kommentar, verloren geht
-# nichts.
+# FHIR-Uebergabe ab (Token abgelaufen, Kontext verfallen), wartet sie ebenfalls
+# auf eine neue Zuordnung — verloren geht nichts.
 #
 # Bewusst nur im Speicher: die Aufnahme bleibt auf dem Arbeitsplatz liegen,
 # bis der Auftrag hier "gesendet" meldet. Kennt der Server die Auftrags-ID
@@ -2134,7 +2135,9 @@ class StenoJob:
     replaces_started: datetime | None = None
     created: float = field(default_factory=time.time)
     finished: float = 0.0
-    state: str = "wartet"      # wartet, transkribiert, schreibt, sendet, gesendet, fehler, ersetzt
+    # wartet, transkribiert, schreibt, sendet, gesendet, fehler, ersetzt — oder
+    # zuordnen: fertig, ohne Patient, wartet auf einen T2med-Kontext (FHIR)
+    state: str = "wartet"
     detail: str = ""
     mode: str = ""
     mode_note: str = ""        # z. B. "automatisch als Psychotherapie erkannt"
@@ -2158,6 +2161,10 @@ class StenoJob:
         }
         if full:
             d.update(transcript=self.transcript, text=self.text)
+        elif self.state == "zuordnen":
+            # Der Knopf zeigt den Anfang, damit die Aufnahme beim Zuordnen
+            # wiederzuerkennen ist
+            d["summary"] = " ".join(self.text.split())[:120]
         return d
 
 
@@ -2411,18 +2418,17 @@ def _fhir_patient(order: gdt.Order) -> str:
     return name
 
 
-async def _steno_send_fhir(job: StenoJob, notes: list) -> bool:
-    """True = in T2med. False = T2med lehnt ab, weiter per GDT (der Grund steht
-    dann in `notes`). Wirft StenoError, wenn unklar ist, ob T2med uebernommen
-    hat — dann weder wiederholen noch per GDT nachschieben, sonst steht es
-    womoeglich doppelt in der Kartei."""
+async def _steno_send_fhir(job: StenoJob, notes: list) -> str:
+    """"" = in T2med, sonst der Grund, warum T2med ablehnt. Wirft StenoError,
+    wenn unklar ist, ob T2med uebernommen hat — dann weder wiederholen noch
+    neu zuordnen, sonst steht es womoeglich doppelt in der Kartei."""
     deadline = time.monotonic() + STENO_SENDEN_WARTEN * 60
     while True:
         _steno_check(job)
         try:
             await _deliver_fhir(job.ap, job.order, job.text, job.transcript, job.mode, job.model,
                                 job.started, job.warning, tuple(notes), job.id)
-            return True
+            return ""
         except fhir.FhirError as e:
             if e.unclear:
                 raise StenoError(f"{e}. Ob T2med die Dokumentation übernommen hat, ist unklar – "
@@ -2435,11 +2441,7 @@ async def _steno_send_fhir(job: StenoJob, notes: list) -> bool:
         except ValueError as e:
             reason = f"T2med-Kontext ungültig: {e}"
         logger.warning(f"Steno {job.id}: FHIR-Übergabe gescheitert ({reason})")
-        if not GDT.enabled:
-            raise StenoError(f"FHIR-Übergabe gescheitert: {reason}")
-        notes.append(f"FHIR-Übergabe gescheitert ({reason}). "
-                     f"Patient laut T2med-Kontext: {_fhir_patient(job.order)}.")
-        return False
+        return reason
 
 
 def _file_sig(path: Path):
@@ -2546,32 +2548,57 @@ async def _steno_send(job: StenoJob):
         await asyncio.wait({prev.task}, timeout=FHIR.timeout + 2 * _STENO_SEND_INTERVAL)
     notes = [n for n in (job.mode_note, _steno_replace_note(job)) if n]
     order = job.order
-    if order and order.fhir:
-        if FHIR.enabled and await _steno_send_fhir(job, notes):
-            job.file, job.patid = "FHIR", order.patid
-        else:
-            if not FHIR.enabled:
-                notes.append(f"FHIR ist auf dem Server abgeschaltet. "
-                             f"Patient laut T2med-Kontext: {_fhir_patient(order)}.")
-            # Die Objekt-ID aus FHIR ist keine Patientennummer: ohne Patient senden
-            await _steno_send_gdt(job, None, notes)
+    if FHIR.enabled and not order:
+        _steno_unassigned(job, "Ohne Patient.")
+        return
+    if FHIR.enabled and order.fhir:
+        reason = await _steno_send_fhir(job, notes)
+        if reason:
+            # Der Kontext taugt nicht mehr (Token abgelaufen, aelter als 4 h):
+            # mit einem frischen Klick in T2med neu zuordnen
+            _steno_unassigned(job, f"T2med hat die Übergabe für {order.label} abgelehnt ({reason}).")
+            return
+        job.file, job.patid = "FHIR", order.patid
+    elif order and order.fhir:
+        notes.append(f"FHIR ist auf dem Server abgeschaltet. "
+                     f"Patient laut T2med-Kontext: {_fhir_patient(order)}.")
+        # Die Objekt-ID aus FHIR ist keine Patientennummer: ohne Patient senden
+        await _steno_send_gdt(job, None, notes)
     else:
         await _steno_send_gdt(job, order, notes)
     job.detail = ""
     job.state = "gesendet"
 
 
-async def _steno_run(job: StenoJob):
+def _steno_unassigned(job: StenoJob, why: str):
+    """Mit FHIR geht nichts mehr per GDT an "Ext. Aufträge" — dort holte T2med
+    nicht ab, wo das GDT-Geraet fehlt (Sprechzimmer 1, 14.10.2026), und
+    zuordnen muesste man dort ohnehin von Hand. Stattdessen wartet die
+    Dokumentation am Knopf: Klick auf "Steno" beim Patienten in T2med, der
+    Knopf fragt, ob sie zu diesem gehoert (POST /steno/jobs/{id}/zuordnen)."""
+    job.order = None
+    job.state = "zuordnen"
+    job.detail = f"{why} In T2med beim Patienten auf „Steno“ klicken, der Knopf fragt dann nach."
+    logger.info(f"Steno {job.id}: wartet auf Zuordnung – {why}")
+
+
+async def _steno_process(job: StenoJob):
+    async with _steno_audio:
+        result, labeled = await _steno_transcribe(job)
+    _steno_check(job)
+    if job.request_mode == "direkt":
+        _steno_direct(job, result, labeled)
+    elif not _steno_short(job, result, labeled):
+        async with _steno_llm:
+            await _steno_write(job, result, labeled)
+    await _steno_send(job)
+
+
+async def _steno_run(job: StenoJob, work=_steno_process):
+    """Ein Auftrag im Hintergrund — die ganze Aufnahme oder, nach dem
+    Zuordnen, nur noch das Senden (work=_steno_send)."""
     try:
-        async with _steno_audio:
-            result, labeled = await _steno_transcribe(job)
-        _steno_check(job)
-        if job.request_mode == "direkt":
-            _steno_direct(job, result, labeled)
-        elif not _steno_short(job, result, labeled):
-            async with _steno_llm:
-                await _steno_write(job, result, labeled)
-        await _steno_send(job)
+        await work(job)
     except StenoReplaced:
         job.state, job.detail = "ersetzt", "durch die fortgesetzte Aufnahme ersetzt"
     except asyncio.CancelledError:
@@ -2597,6 +2624,10 @@ def _steno_replace(job_id: str):
     wird dann gar nicht erst abgelegt, eine FHIR-Anfrage unterwegs laeuft zu
     Ende — das klaert _steno_replace_note()."""
     prev = steno_jobs.get(job_id)
+    if prev and prev.state == "zuordnen":       # stand nie in T2med
+        prev.state, prev.detail = "ersetzt", "durch die fortgesetzte Aufnahme ersetzt"
+        logger.info(f"Steno {job_id}: wird durch eine fortgesetzte Aufnahme ersetzt")
+        return
     if not prev or prev.finished:
         return
     prev.cancelled = True
@@ -2807,6 +2838,40 @@ async def steno_job_status(job_id: str):
     job = steno_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Auftrag unbekannt.")
+    return job.to_dict()
+
+
+@app.post("/steno/jobs/{job_id}/zuordnen")
+async def steno_job_assign(job_id: str, request: Request):
+    """Dokumentation ohne Patient (Zustand "zuordnen") einem Patienten geben.
+    Body: ap, order — der T2med-Kontext vom Klick auf "Steno" (FHIR). Dass sie
+    zu diesem Patienten gehoert, hat am Knopf ein Mensch bestaetigt; ein
+    GDT-Auftrag kommt dafuer nicht in Frage, der gilt fuer eine neue Aufnahme.
+    Noch einmal mit demselben Kontext (Netzfehler beim Knopf) = dieselbe
+    Zuordnung."""
+    if not FHIR.enabled:
+        raise HTTPException(status_code=404, detail="FHIR-Anbindung ist nicht eingerichtet.")
+    job = steno_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Auftrag unbekannt.")
+    body = await request.json()
+    if _gdt_workstation(body.get("ap")) != job.ap:
+        raise HTTPException(status_code=400, detail="Auftrag gehört zu einem anderen Arbeitsplatz.")
+    order = _parse_order(body.get("order"))
+    if not order or not order.fhir:
+        raise HTTPException(status_code=400, detail="Zuordnen geht nur mit einem T2med-Kontext (FHIR).")
+    try:
+        fhir.Context.from_dict(order.fhir, FHIR)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Ungültiger T2med-Kontext: {e}")
+    if job.state != "zuordnen":
+        if job.order and job.order.fhir == order.fhir:
+            return job.to_dict()
+        raise HTTPException(status_code=409, detail=f"Auftrag ist nicht zuzuordnen ({job.state}).")
+    job.order, job.finished, job.detail = order, 0.0, ""
+    job.state = "sendet"
+    logger.info(f"Steno {job_id} ({job.ap}): zugeordnet zu {order.label}")
+    job.task = _spawn(_steno_run(job, _steno_send))
     return job.to_dict()
 
 

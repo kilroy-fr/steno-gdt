@@ -14,7 +14,7 @@ import fhir
 import gdt
 import server
 from test_gdt import fields_of
-from test_steno import upload, wait
+from test_steno import upload, wait, wait_for_state
 
 BASE = "https://t2med.praxis:16567/aps/fhir/api/r4"
 CTX = {"kontext": "kontext-123", "base": BASE, "token": "tok.en-1"}
@@ -234,15 +234,63 @@ def test_job_goes_to_t2med_via_fhir(steno_fhir, fake, tmp_path):
     assert not list(tmp_path.glob("T2MD*"))                         # keine GDT-Datei
 
 
-def test_rejected_fhir_falls_back_to_gdt_without_patient(steno_fhir, fake, tmp_path):
+def assign(client, job_id, order, ap="001"):
+    return client.post(f"/steno/jobs/{job_id}/zuordnen", json={"ap": ap, "order": order})
+
+
+def test_job_without_patient_waits_for_assignment(steno_fhir, fake, tmp_path):
+    """Mit FHIR geht ohne Patient nichts per GDT an "Ext. Aufträge" (dort holte
+    T2med in Sprechzimmer 1 nie ab): die Dokumentation wartet, bis sie am Knopf
+    einem T2med-Kontext gegeben wird."""
+    job_id = upload(steno_fhir).json()["id"]
+    job = wait_for_state(steno_fhir, job_id, "zuordnen")
+    assert job["summary"] == "Hallo Welt" and "„Steno“ klicken" in job["detail"] and not job["patient"]
+    assert not list(tmp_path.glob("T2MD*")) and not fake.fhir_requests
+    r = assign(steno_fhir, job_id, fhir_order())
+    assert r.status_code == 200 and r.json()["patient"] == "Müller, Hans (T2med-Kontext)"
+    job = wait(steno_fhir, job_id)
+    assert (job["state"], job["file"], job["patid"], job["detail"]) == ("gesendet", "FHIR", "pat-obj-1", "")
+    [bundle] = fake.fhir_bundles()
+    assert bundle["entry"][0]["resource"]["valueString"] == "Hallo Welt"
+    assert assign(steno_fhir, job_id, fhir_order()).status_code == 200    # Wiederholung: dieselbe
+    assert len(fake.fhir_bundles()) == 1
+    other = {**fhir_order(), "fhir": {**CTX, "kontext": "kontext-999"}}
+    assert assign(steno_fhir, job_id, other).status_code == 409
+
+
+def test_assignment_is_checked(steno_fhir, fake, monkeypatch):
+    job_id = upload(steno_fhir).json()["id"]
+    wait_for_state(steno_fhir, job_id, "zuordnen")
+    assert assign(steno_fhir, "unbekannt-1234", fhir_order()).status_code == 404
+    gdt_order = {**fhir_order(), "fhir": None, "patid": "4711"}
+    assert assign(steno_fhir, job_id, gdt_order).status_code == 400          # nur mit T2med-Kontext
+    foreign = {**fhir_order(), "fhir": {**CTX, "base": "https://boese.example/aps/fhir/api/r4"}}
+    assert assign(steno_fhir, job_id, foreign).status_code == 400
+    assert steno_fhir.get(f"/steno/jobs/{job_id}").json()["state"] == "zuordnen"
+    monkeypatch.setattr(server, "FHIR", fhir.Settings())
+    assert assign(steno_fhir, job_id, fhir_order()).status_code == 404
+
+
+def test_rejected_fhir_waits_for_new_context(steno_fhir, fake, tmp_path):
     fake.fhir_status = 422
     fake.fhir_outcome = {"resourceType": "OperationOutcome",
                          "issue": [{"severity": "error", "diagnostics": "Kontext unbekannt"}]}
-    job = wait(steno_fhir, upload(steno_fhir, order=json.dumps(fhir_order())).json()["id"])
-    assert (job["state"], job["file"], job["patid"]) == ("gesendet", "T2MDSTNO.001", "0")
-    comments = " ".join(fields_of(tmp_path / "T2MDSTNO.001")["6227"])
-    assert "FHIR-Übergabe gescheitert" in comments and "Kontext unbekannt" in comments
-    assert "Müller, Hans, geb. 01.02.1960" in comments and "Ohne Messauftrag" in comments
+    job_id = upload(steno_fhir, order=json.dumps(fhir_order())).json()["id"]
+    job = wait_for_state(steno_fhir, job_id, "zuordnen")
+    assert "Müller, Hans" in job["detail"] and "Kontext unbekannt" in job["detail"]
+    assert not job["patient"] and not list(tmp_path.glob("T2MD*"))       # nicht per GDT
+    fake.fhir_status, fake.fhir_outcome = 200, None
+    assert assign(steno_fhir, job_id, fhir_order()).status_code == 200    # frischer Klick
+    assert wait(steno_fhir, job_id)["state"] == "gesendet"
+
+
+def test_continuation_replaces_unassigned_job(steno_fhir):
+    first = upload(steno_fhir).json()["id"]
+    wait_for_state(steno_fhir, first, "zuordnen")
+    second = upload(steno_fhir, replaces=first).json()["id"]
+    assert steno_fhir.get(f"/steno/jobs/{first}").json()["state"] == "ersetzt"
+    wait_for_state(steno_fhir, second, "zuordnen")
+    assert assign(steno_fhir, first, fhir_order()).status_code == 409
 
 
 def test_unclear_fhir_result_is_neither_repeated_nor_sent_via_gdt(steno_fhir, fake, tmp_path):

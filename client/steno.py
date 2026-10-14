@@ -62,7 +62,7 @@ from PIL import ImageTk
 import installation
 import knopf
 
-VERSION = "0.44.0"
+VERSION = "0.45.0"
 
 APP_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Steno"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Steno"
@@ -156,7 +156,8 @@ class Config:
 # ============================================================
 @dataclass
 class Entry:
-    """Eine Aufnahme im Ausgang. state: aufnahme -> bereit -> hochgeladen -> (geloescht) | fehler."""
+    """Eine Aufnahme im Ausgang. state: aufnahme -> bereit -> hochgeladen -> (geloescht) | fehler,
+    mit FHIR ohne Patient: hochgeladen -> zuordnen -> (Klick auf "Steno" in T2med) -> hochgeladen."""
     id: str
     ap: str
     order: dict | None
@@ -165,6 +166,7 @@ class Entry:
     duration: float = 0.0
     state: str = "aufnahme"
     detail: str = ""
+    summary: str = ""         # zuordnen: Anfang der Dokumentation, zum Wiedererkennen
     # Fortsetzen: `continues` nennt die vorige Aufnahme, solange aufgenommen
     # wird; `replaces` erst, wenn beide zu einer Datei verbunden sind — nach
     # einem Absturz mittendrin geht der zweite Teil allein hoch und ersetzt nichts.
@@ -924,6 +926,18 @@ class Api:
             raise ValueError(_detail(r))
         return r.json()["order"]
 
+    def assign(self, job_id: str, ap: str, order: dict) -> dict | None:
+        """Dokumentation ohne Patient dem T2med-Kontext geben. None = der Server
+        kennt den Auftrag nicht (mehr), ValueError bei anderen 4xx."""
+        r = self.session.post(self._url(f"/steno/jobs/{job_id}/zuordnen"),
+                              json={"ap": ap, "order": order}, timeout=(CONNECT_TIMEOUT, 30))
+        if r.status_code == 404 and "unbekannt" in _detail(r):
+            return None
+        if 400 <= r.status_code < 500:
+            raise ValueError(_detail(r))
+        r.raise_for_status()
+        return r.json()
+
     def status(self, job_id: str) -> dict | None:
         r = self.session.get(self._url(f"/steno/jobs/{job_id}"), timeout=CONNECT_TIMEOUT)
         if r.status_code == 404:
@@ -1130,6 +1144,32 @@ def upload_step(api: Api, spool: Spool, entry: Entry, events: queue.Queue):
             entry.state, entry.detail = "fehler", job["detail"]
             spool.save(entry)
             log.error(f"{entry.id}: {job['detail']}")
+        elif job["state"] == "zuordnen":           # FHIR, ohne Patient: wartet auf Klick in T2med
+            entry.state, entry.detail = "zuordnen", job["detail"]
+            entry.summary, entry.order = job.get("summary") or "", None
+            spool.save(entry)
+            log.info(f"{entry.id}: fertig ohne Patient, wartet auf Zuordnung")
+            events.put(("unassigned", entry))
+
+
+def assign_entry(api: Api, spool: Spool, entry: Entry, order: dict, events: queue.Queue):
+    """Im Hintergrund: Aufnahme ohne Patient dem Kontext aus T2med geben. Kennt
+    der Server sie nicht mehr (Neustart), geht sie mit Patient neu hoch."""
+    try:
+        job = api.assign(entry.id, entry.ap, order)
+    except ValueError as e:
+        log.error(f"{entry.id}: Zuordnung abgelehnt: {e}")
+        events.put(("flash", (f"Zuordnung abgelehnt: {e}", 15)))
+        return
+    except requests.RequestException as e:
+        log.warning(f"{entry.id}: Zuordnung nicht gesendet ({type(e).__name__})")
+        events.put(("flash", ("Server nicht erreichbar – bitte erneut in T2med klicken", 15)))
+        return
+    entry.order, entry.detail, entry.summary = order, "", ""
+    entry.state = "hochgeladen" if job else "bereit"
+    spool.save(entry)
+    log.info(f"{entry.id}: zugeordnet" + ("" if job else ", dem Server unbekannt, lade neu hoch"))
+    events.put(("spool", None))
 
 
 # ============================================================
@@ -1230,6 +1270,8 @@ class App:
         self.flash_until = 0.0
         self.in_work = 0
         self.failed = 0
+        self.unassigned = 0                       # fertig ohne Patient, warten auf Klick in T2med
+        self.fhir = False                         # Server mit FHIR: ohne Patient wird zugeordnet, nicht per GDT
         self.dialog: tk.Toplevel | None = None
         self.settings: SettingsDialog | None = None
         self.restart_pending = False              # Einstellungen geaendert, die erst ein Neustart liest
@@ -1366,7 +1408,7 @@ class App:
         self.tip_shown = shown
 
     def button_image(self) -> ImageTk.PhotoImage:
-        state = (self.shown_mode, self.recording, not self.offline, bool(self.failed))
+        state = (self.shown_mode, self.recording, not self.offline, bool(self.failed or self.unassigned))
         key = (*state, self.hover, self.pressed)
         if key not in self.images:
             if len(self.images) > 64:
@@ -1445,6 +1487,8 @@ class App:
             return name, "Server nicht erreichbar", COLORS["warn"]
         if self.failed:
             return name, f"{self.failed} Fehler · Rechtsklick", COLORS["warn"]
+        if self.unassigned:
+            return name, f"{self.unassigned} ohne Patient · in T2med „Steno“ klicken", COLORS["warn"]
         if self.in_work:
             return name, f"{self.in_work} in Arbeit…", COLORS["muted"]
         return name, f"bereit · {self.ap_name}", COLORS["muted"]
@@ -1498,7 +1542,10 @@ class App:
         elif kind == "spool":
             entries = [e for e in self.spool.entries() if e.state != "aufnahme"]
             self.failed = sum(e.state == "fehler" for e in entries)
-            self.in_work = len(entries) - self.failed
+            self.unassigned = sum(e.state == "zuordnen" for e in entries)
+            self.in_work = len(entries) - self.failed - self.unassigned
+        elif kind == "unassigned":
+            self.show_flash("Fertig, ohne Patient: in T2med beim Patienten „Steno“ klicken", 20)
         elif kind == "link":                      # Klick in T2med -> Patient beim Server holen
             if not self.talk:
                 log.info("Link aus T2med ignoriert: an diesem Knopf nur Diktat")
@@ -1558,8 +1605,60 @@ class App:
                 return                            # derselbe Patient noch einmal
             self.hold(order)
             self.ask_switch(order)
+        elif unassigned := [e for e in self.spool.entries() if e.state == "zuordnen"]:
+            self.ask_assign(order, unassigned)
         else:
             self.start_recording(order)
+
+    def ask_assign(self, order: dict, entries: list[Entry]):
+        """Klick auf "Steno" in T2med, waehrend Aufnahmen ohne Patient warten:
+        eine davon diesem Patienten geben — oder fuer ihn neu aufnehmen. Ohne
+        Antwort passiert nichts von selbst; der Kontext bleibt fuer ▶ offen."""
+        if self.dialog:
+            self.dialog.destroy()
+        self.hold(order)
+        s = self.scale
+        d = self.dialog = tk.Toplevel(self.root)
+        d.overrideredirect(True)
+        d.attributes("-topmost", True)
+        d.configure(bg=COLORS["bg"], padx=int(12 * s), pady=int(10 * s))
+        tk.Label(d, text=f"T2med: {order_name(order)}\nGehört eine dieser Aufnahmen ohne Patient dazu?",
+                 bg=COLORS["bg"], fg=COLORS["text"], font=self.font1, justify="left").pack(anchor="w")
+
+        def close():
+            d.destroy()
+            self.dialog = None
+
+        def assign(entry: Entry):
+            close()
+            self.pending = self.held = None
+            self.show_flash(f"Wird {order_name(order)} zugeordnet…", 10)
+            threading.Thread(target=assign_entry, daemon=True,
+                             args=(self.api, self.spool, entry, order, self.events)).start()
+
+        def record():
+            close()
+            self.start_recording(order)
+
+        for entry in sorted(entries, key=lambda e: e.started, reverse=True)[:5]:
+            row = tk.Frame(d, bg=COLORS["bg"])
+            row.pack(fill="x", pady=(int(6 * s), 0))
+            when = entry.started[11:16] if len(entry.started) >= 16 else entry.started
+            text = f"{when} Uhr, {max(1, round(entry.duration / 60))} min"
+            if entry.summary:
+                text += f"\n{entry.summary[:120]}…"
+            tk.Button(row, text="Zuordnen", command=lambda e=entry: assign(e)).pack(side="right")
+            tk.Label(row, text=text, bg=COLORS["bg"], fg=COLORS["text"], font=self.font2,
+                     justify="left", wraplength=int(360 * s)).pack(side="left", anchor="w",
+                                                                  padx=(0, int(10 * s)))
+        row = tk.Frame(d, bg=COLORS["bg"])
+        row.pack(anchor="e", pady=(int(10 * s), 0))
+        tk.Button(row, text="Abbrechen", command=close).pack(side="right")
+        tk.Button(row, text="Neue Aufnahme", command=record).pack(side="right", padx=int(6 * s))
+        d.update_idletasks()
+        x = max(0, self.root.winfo_x() + self.w - d.winfo_reqwidth())
+        y = max(0, self.root.winfo_y() - d.winfo_reqheight() - int(8 * s))
+        d.geometry(f"+{x}+{y}")
 
     def claim(self, order: dict) -> bool:
         if order.get("fhir"):
@@ -1628,12 +1727,16 @@ class App:
         T2med zu klicken. Waehrend der Rueckfrage laeuft tick() weiter — kam
         derweil ein Auftrag, hat der die Aufnahme schon gestartet oder ist jetzt
         offen."""
+        if self.fhir:
+            later = ("Die Dokumentation wartet dann hier, bis Sie in T2med beim Patienten auf "
+                     "„Steno“ klicken und sie zuordnen. Für einen Patienten zuerst in T2med "
+                     "„Steno“ klicken.")
+        else:
+            later = ("Die Dokumentation landet in T2med unter „Ext. Aufträge“ und muss dort "
+                     "von Hand zugeordnet werden. Für einen Patienten zuerst in T2med "
+                     "„Messung starten“ klicken.")
         if not self.pending and not self.confirm(
-                "Kein Patient ausgewählt.\n\n"
-                "Die Dokumentation landet in T2med unter „Ext. Aufträge“ und muss dort "
-                "von Hand zugeordnet werden. Für einen Patienten zuerst in T2med "
-                "„Steno“ oder „Messung starten“ klicken.\n\n"
-                "Trotzdem ohne Patient aufnehmen?"):
+                f"Kein Patient ausgewählt.\n\n{later}\n\nTrotzdem ohne Patient aufnehmen?"):
             log.info("Aufnahme ohne Patient abgelehnt")
             return
         self.start_recording(self.pending)
@@ -1793,8 +1896,8 @@ class App:
         finally:
             part.unlink(missing_ok=True)
         prev = next((e for e in self.spool.entries() if e.id == entry.continues), None)
-        if prev and prev.state in ("bereit", "fehler"):
-            self.spool.delete(prev)                # noch nicht beim Server bzw. gescheitert
+        if prev and prev.state in ("bereit", "fehler", "zuordnen"):
+            self.spool.delete(prev)                # noch nicht beim Server, gescheitert oder nie in T2med
         self.spool.kept(entry.continues).unlink(missing_ok=True)
         entry.replaces, entry.replaces_started = entry.continues, entry.started
         entry.continues = ""
@@ -1857,9 +1960,10 @@ class App:
         self.menu_mode.set(self.shown_mode)
         state = "normal" if self.recording else "disabled"
         self.menu.entryconfigure("Laufende Aufnahme verwerfen", state=state)
-        failed = "normal" if self.failed else "disabled"
-        self.menu.entryconfigure("Fehlgeschlagene erneut senden", state=failed)
-        self.menu.entryconfigure("Fehlgeschlagene verwerfen", state=failed)
+        self.menu.entryconfigure("Fehlgeschlagene erneut senden",
+                                 state="normal" if self.failed else "disabled")
+        self.menu.entryconfigure("Fehlgeschlagene verwerfen",
+                                 state="normal" if self.failed or self.unassigned else "disabled")
         self.update_continue_entry()
         # Ueber den Knopf, rechtsbuendig, nicht an den Mauszeiger: dort laege es
         # auf dem Knopf, und tick() holt den Knopf auch waehrend des Menues nach
@@ -1918,12 +2022,14 @@ class App:
                 self.spool.renew(entry)
 
     def drop_failed(self):
-        failed = [e for e in self.spool.entries() if e.state == "fehler"]
-        if failed and self.confirm(f"{len(failed)} fehlgeschlagene Aufnahme(n) endgültig löschen?"):
+        """Auch Aufnahmen ohne Patient, die niemand zuordnen will (Test, Versehen)."""
+        failed = [e for e in self.spool.entries() if e.state in ("fehler", "zuordnen")]
+        if failed and self.confirm(f"{len(failed)} fehlgeschlagene oder nicht zugeordnete "
+                                   "Aufnahme(n) endgültig löschen?"):
             for entry in failed:
                 self.spool.delete(entry)
                 log.info(f"Aufnahme {entry.id} verworfen ({entry.detail})")
-            self.failed = 0
+            self.failed = self.unassigned = 0
 
     def confirm(self, text: str) -> bool:
         from tkinter import messagebox
@@ -2236,7 +2342,8 @@ def main():
         app = App(root, cfg, api, spool, ap, ap_name, blocks=info.get("bloecke") or "",
                   workstations=info.get("workstations"), dictate=bool(info.get("diktat")),
                   server_version=str(info.get("version") or ""))
-        if info.get("fhir") and app.talk:
+        app.fhir = bool(info.get("fhir"))
+        if app.fhir and app.talk:
             register_link_scheme()
         if link:                                  # Steno lief noch nicht: T2med hat ihn gestartet
             app.events.put(("link", link))
