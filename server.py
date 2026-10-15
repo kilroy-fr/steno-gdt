@@ -41,7 +41,7 @@ from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.45.0"
+VERSION = "0.45.1"
 
 
 def _flag(value: str) -> bool:
@@ -430,16 +430,33 @@ def collapse_repeated_text(text: str) -> str:
 _TERM_WORD_RE = re.compile(r"[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\-]*")
 _TERM_MIN_LEN = 7           # kuerzere Woerter: zu viele echte Nachbarn
 _TERM_CUTOFF = 0.86         # difflib-Aehnlichkeit; bei 7 Buchstaben genuegt kein Tausch
+_TERM_PHONETIC_MIN = 0.8    # ... ausser er klingt gleich (_phonetic()); 7 Buchstaben, ein Tausch: 0,857
 _TERM_INFLECTION = {"e", "n", "en", "s", "es", "er", "ern", "ns", "nen"}
-# Beide werden mit dem eigenen Woerterbuch neu gebaut (_set_words())
+# Alle drei werden mit dem eigenen Woerterbuch neu gebaut (_set_words())
 _TERM_KNOWN: set = set()
 _TERM_POOL: dict = {}
+_TERM_PHONETIC: dict = {}   # Lautschrift -> Begriff, nur eindeutige
+
+
+def _phonetic(key: str) -> str:
+    """Grobe Lautschrift: Whisper schreibt Praeparate, wie sie klingen
+    ("Ozempik"). Bei 7 Buchstaben liegt ein Tausch k/c unter _TERM_CUTOFF,
+    gleich klingend ist er trotzdem eindeutig. Mehr als ein Tausch zaehlt
+    nicht (_TERM_PHONETIC_MIN): "Kalzium" ist richtig, nicht "Calcium" verhoert."""
+    key = key.replace("ph", "f").replace("th", "t").replace("ck", "k").replace("ß", "ss")
+    key = re.sub(r"c(?=[eiy])", "z", key)
+    key = re.sub(r"c(?!h)", "k", key)
+    key = re.sub(r"g$", "k", key)                 # Auslaut: "Ozempig"
+    return key.replace("y", "i")
 
 
 @functools.lru_cache(maxsize=4096)
 def _correct_term(word: str) -> str | None:
     """Bekannter Begriff, den `word` meint — oder None."""
     key = word.lower().replace("-", "")
+    term = _TERM_PHONETIC.get(_phonetic(key))
+    if term and difflib.SequenceMatcher(None, key, term.lower().replace("-", "")).ratio() >= _TERM_PHONETIC_MIN:
+        return term
     hit = difflib.get_close_matches(key, _TERM_POOL, n=1, cutoff=_TERM_CUTOFF)
     if not hit:
         return None
@@ -455,9 +472,36 @@ def _correct_term(word: str) -> str | None:
     return _TERM_POOL[term]
 
 
+# Whisper trennt die Vorsilbe ab: "Escitalopram" -> "es Citalopram" (gemessen
+# 14.10.2026 mit TTS mitten im Satz, gemeldet aus dem Diktat). Gefaehrlich,
+# weil Citalopram selbst ein Praeparat ist und deshalb nie korrigiert wuerde.
+# Nicht hinter "gibt/gab es" ("gibt es Omeprazol auch als Saft").
+_ES_PREFIX_RE = re.compile(r"(?<![\w-])(?:es|Es|S)[\s-]+([A-ZÄÖÜ][a-zäöüß]{4,})(?![\w-])")
+_ES_NOT_AFTER_RE = re.compile(r"(?<!\w)(?:gibt|gab|gäbe|geben|gebe)\s*$", re.IGNORECASE)
+
+
+def _es_term(word: str) -> str | None:
+    """Begriff, wenn "Es" + `word` einer ist ("Citalopram" -> "Escitalopram"),
+    auch verhoert ("es Cetalopram", gemessen) — aber nur ein Es-Begriff: sonst
+    traefe "Esmetformin" einfach Metformin."""
+    key = "es" + word.lower()
+    term = _TERM_POOL.get(key) or _correct_term("Es" + word.lower())
+    return term if term and term.lower().startswith("es") else None
+
+
 def correct_terms(text: str) -> tuple[str, int]:
     """Verhoerte Fachbegriffe ersetzen; liefert den Text und die Zahl der Ersetzungen."""
     count = 0
+
+    def merge(m: re.Match) -> str:
+        nonlocal count
+        term = _es_term(m.group(1))
+        if term is None or _ES_NOT_AFTER_RE.search(text[:m.start()]):
+            return m.group(0)
+        count += 1
+        return term
+
+    text = _ES_PREFIX_RE.sub(merge, text)
 
     def fix(m: re.Match) -> str:
         nonlocal count
@@ -512,7 +556,7 @@ def normalize_word(raw: str) -> str:
 
 def _set_words(words: list) -> None:
     """Woerterbuch uebernehmen: Korrektur-Index, hotwords."""
-    global _custom_words, _hotwords, _TERM_KNOWN, _TERM_POOL
+    global _custom_words, _hotwords, _TERM_KNOWN, _TERM_POOL, _TERM_PHONETIC
     _custom_words = list(words)
     parts = [p for w in words for p in w.split()]
     _TERM_KNOWN = {t.lower() for t in CORRECTION_TERMS + words + parts}
@@ -523,6 +567,10 @@ def _set_words(words: list) -> None:
         t.lower().replace("-", ""): t for t in CORRECTION_TERMS + targets
         if len(t) >= _TERM_MIN_LEN and " " not in t
     }
+    _TERM_PHONETIC = {}
+    for key, term in _TERM_POOL.items():               # gleich klingende Begriffe: keiner
+        phon = _phonetic(key)
+        _TERM_PHONETIC[phon] = None if _TERM_PHONETIC.get(phon, term) != term else term
     _correct_term.cache_clear()
     hot = []
     for w in reversed(words):
@@ -586,8 +634,20 @@ _DICTATION_COMMANDS = {
 _DICTATION_RE = re.compile(
     r"(?<!\w)(" + "|".join(k.replace(" ", r"\s+") for k in _DICTATION_COMMANDS) + r")(?!\w)",
     re.IGNORECASE)
-# "Absatz", "Punkt" und "Komma" sind auch Woerter: "im letzten Absatz", "ein wunder Punkt"
-_DICTATION_NOUN = {"absatz", "punkt", "komma"}
+# Verhoerte Befehle (gemeldet 14.10.2026: "Komma" als "Commer"/"Comer",
+# "Doppelpunkt" und "Klammer auf/zu" nicht erkannt). Whisper setzt eigene
+# Satzzeichen oder Bindestriche hinein ("Klammer, auf", "Doppel-Punkt",
+# "Milligramm-Klammer zu") oder klebt zusammen ("Klammerauf"). "Koma" ist ein
+# Wort und bleibt, "Comer See" kommt im Diktat nicht vor.
+_COMMAND_VARIANTS = [
+    (re.compile(r"(?<!\w)(?:commer|comer|comma|kommer)(?!\w)", re.IGNORECASE), "Komma"),
+    (re.compile(r"(?<!\w)doppel[\s.,-]*punkt(?!\w)", re.IGNORECASE), "Doppelpunkt"),
+    (re.compile(r"(?<!\w)klammer[\s.,-]*(?:auf|öffnen)(?!\w)", re.IGNORECASE), "Klammer auf"),
+    (re.compile(r"(?<!\w)klammer[\s.,-]*(?:zu|schließen)(?!\w)", re.IGNORECASE), "Klammer zu"),
+]
+# "Absatz", "Punkt", "Komma", "Klammer" sind auch Woerter: "im letzten Absatz",
+# "ein wunder Punkt", "eine Klammer auf der Wunde"
+_DICTATION_NOUN = {"absatz", "punkt", "komma", "klammer auf", "klammer zu"}
 _DICTATION_ARTICLE = {
     "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "eines", "einer",
     "kein", "keinen", "keinem", "im", "am", "vom", "zum", "beim", "diesen", "diesem", "dieser",
@@ -598,10 +658,10 @@ _NUMBER_WORDS = {
     "zehn", "elf", "zwölf", "zwanzig", "dreißig", "vierzig", "fünfzig", "hundert", "tausend",
 }
 _ATTACH_LEFT = {",", ".", ":", ";", "?", "!", ")", "\n", "\n\n"}
-_GLUED_COMMA_RE = re.compile(r"(?<!\w)(\w{3,}?)komma(?!\w)", re.IGNORECASE)
+_GLUED_COMMA_RE = re.compile(r"(?<!\w)(\w{3,}?)(?:komma|kommer|commer|comma)(?!\w)", re.IGNORECASE)
 _REAL_COMMA_WORDS = {"dezimal", "gleit", "fließ", "fliess"}
 _SPOKEN_DOT_RE = re.compile(r"(\w{2,})\.(?=(?:neuer?\s+(?:zeile|absatz)|absatz)(?!\w))", re.IGNORECASE)
-_WHISPER_PUNCT = " ,.;:!?"
+_WHISPER_PUNCT = " ,.;:!?-"           # "-": Whisper bindet Befehle an ("Milligramm-Klammer zu")
 
 
 def apply_dictation_commands(text: str) -> tuple[str, int]:
@@ -620,7 +680,9 @@ def apply_dictation_commands(text: str) -> tuple[str, int]:
     # naechsten Befehl ("Kopfschmerzen.neue Zeile") — der zaehlt, anders als
     # Whispers eigener Punkt mit Leerzeichen ("ebenfalls. Neue Zeile")
     text = _SPOKEN_DOT_RE.sub(r"\1 Punkt ", text)
-    parts: list = []                              # Text oder (Zeichen,) fuer einen Befehl
+    for pattern, command in _COMMAND_VARIANTS:
+        text = pattern.sub(command, text)
+    parts: list = []                             # Text oder (Zeichen,) fuer einen Befehl
     pos = count = 0
     for m in _DICTATION_RE.finditer(text):
         key = " ".join(m.group(1).lower().split())
@@ -1250,6 +1312,22 @@ def fix_sharp_s(text: str) -> tuple[str, int]:
     return _WORD_RE.sub(word, text), count
 
 
+def _merge_es_units(units: list) -> list:
+    """"es" + "Citalopram" als Einheiten (Wort-Zeitstempel) -> eine Einheit
+    "Escitalopram"; im Fliesstext macht das correct_terms()."""
+    out: list = []
+    for u in units:
+        prev = out[-1] if out else None
+        m = re.fullmatch(r"\s*([A-ZÄÖÜ][a-zäöüß]{4,})(\W*)", u["text"])
+        if (m and prev and prev["text"].strip() in ("es", "Es", "S") and _es_term(m.group(1))
+                and not (len(out) > 1 and _ES_NOT_AFTER_RE.search(out[-2]["text"]))):
+            lead = prev["text"][:len(prev["text"]) - len(prev["text"].lstrip())]
+            out[-1] = {**prev, "end": u["end"], "text": lead + _es_term(m.group(1)) + m.group(2)}
+            continue
+        out.append(u)
+    return out
+
+
 def _fix_terms(text: str, units: list = ()) -> str:
     """correct_terms() und fix_sharp_s() auf Fliesstext und Einheiten; nur fuer
     deutsche Aufnahmen.
@@ -1259,6 +1337,8 @@ def _fix_terms(text: str, units: list = ()) -> str:
     """
     text, count = correct_terms(text)
     text, sharp = fix_sharp_s(text)
+    if units:
+        units[:] = _merge_es_units(units)
     for u in units:
         u["text"], _ = correct_terms(u["text"])
         u["text"], _ = fix_sharp_s(u["text"])

@@ -29,9 +29,37 @@ AUDIO = {"audio": ("aufnahme.webm", b"\x1aE\xdf\xa3 fake webm", "audio/webm")}
     ("Mutilium", "Motilium"),
     ("Pernterbol", "Perenterol"),
     ("Repanthen", "Bepanthen"),
+    # gemeldet 14.10.2026 aus dem Diktat, nachgestellt mit TTS
+    ("Ozempik", "Ozempic"),                     # 7 Buchstaben, ein gleich klingender Tausch
+    ("Ozempig", "Ozempic"),
+    ("Eszitalopram", "Escitalopram"),
+    ("nimmt es Citalopram 10 mg", "nimmt Escitalopram 10 mg"),   # Citalopram ist ein anderes!
+    ("nimmt es Cetalopram 10 mg", "nimmt Escitalopram 10 mg"),   # nicht erst zu Citalopram
+    ("Es Citalopram", "Escitalopram"),
+    ("weiter es Omeprazol", "weiter Esomeprazol"),
 ])
 def test_corrects_misheard_terms(heard, meant):
     assert correct_terms(heard) == (meant, 1)
+
+
+@pytest.mark.parametrize("text", [
+    "Kalzium",                                  # zwei Tausche: eigene Schreibweise, nicht verhoert
+    "Gibt es Citalopram auch als Tropfen?",
+    "nimmt es Ibuprofen",                       # "Esibuprofen" gibt es nicht
+    "nimmt es Metformin",                       # "Esmetformin" aehnelt Metformin, kein Es-Begriff
+])
+def test_leaves_phrases_alone(text):
+    assert correct_terms(text) == (text, 0)
+
+
+def test_merges_es_prefix_in_units():
+    import server
+    units = [{"start": 0.0, "end": 0.5, "text": " nimmt"}, {"start": 0.5, "end": 0.7, "text": " es"},
+             {"start": 0.7, "end": 1.4, "text": " Citalopram."}, {"start": 1.5, "end": 1.9, "text": " Gut"}]
+    server._fix_terms("nimmt es Citalopram. Gut", units)
+    assert units == [{"start": 0.0, "end": 0.5, "text": " nimmt"},
+                     {"start": 0.5, "end": 1.4, "text": " Escitalopram."},
+                     {"start": 1.5, "end": 1.9, "text": " Gut"}]
 
 
 @pytest.mark.parametrize("word", [

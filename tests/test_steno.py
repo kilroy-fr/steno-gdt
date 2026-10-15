@@ -293,6 +293,19 @@ def test_dictation_applies_commands(steno, fake):
     ("Die Patientin klagt über Schwindelkomma vor allem morgens", "Die Patientin klagt über Schwindel, vor allem morgens"),
     ("das Dezimalkomma fehlt", "das Dezimalkomma fehlt"),
     ("seit gestern Kopfschmerzen.neue Zeile. Blutdruck", "seit gestern Kopfschmerzen.\nBlutdruck"),
+    # verhoerte Befehle (14.10.2026), Whisper-Bindestriche
+    ("Kopfschmerzen Commer Schwindel, Comer, Übelkeit", "Kopfschmerzen, Schwindel, Übelkeit"),
+    ("Commer.", ","),
+    ("Schwindelcommer vor allem morgens", "Schwindel, vor allem morgens"),
+    ("Befund Doppel-Punkt unauffällig", "Befund: unauffällig"),
+    ("Befund Doppel Punkt unauffällig", "Befund: unauffällig"),
+    ("Ramipril-Klammer auf fünf Milligramm-Klammer zu einmal täglich",
+     "Ramipril (fünf Milligramm) einmal täglich"),
+    ("Ramipril Klammer, auf 5 mg Klammer. Zu.", "Ramipril (5 mg)"),
+    ("Ramipril Klammerauf 5 mg Klammer-zu", "Ramipril (5 mg)"),
+    ("Ramipril Klammer öffnen 5 mg Klammer schließen", "Ramipril (5 mg)"),
+    ("eine Klammer auf der Wunde, die Klammer zu entfernen", "eine Klammer auf der Wunde, die Klammer zu entfernen"),
+    ("Patient im Koma, Typ-2-Diabetes", "Patient im Koma, Typ-2-Diabetes"),
 ])
 def test_dictation_commands(spoken, written):
     assert server.apply_dictation_commands(spoken)[0] == written
