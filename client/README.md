@@ -109,8 +109,14 @@ an, und jeder installierte Knopf fragt beim nächsten Start, ob er sich aktualis
    ```
    Steno.exe --server https://steno.hausarzt-rothenburg.de --arbeitsplatz 001
    ```
-4. Mikrofon: die EPOS Expand 40 per **USB** (nicht Bluetooth) und in Windows als Standard-Aufnahmegerät.
-   Oder in den Einstellungen (Rechtsklick → „Einstellungen…“) unter Mikrofon die EPOS auswählen.
+4. Mikrofon: die EPOS Expand 40 per **USB** (nicht Bluetooth). Am besten in den Einstellungen
+   (Rechtsklick → „Einstellungen…“) unter Mikrofon fest auswählen — „Freisprechtelefon mit
+   Echoausschaltung (EPOS EXPAND 40)“, oder einfach `EPOS EXPAND 40` eintippen. Ein dort
+   eingestelltes Mikrofon überwacht der Knopf: fehlt es (USB-Gerät nach dem Hochfahren noch nicht
+   bereit, abgezogen), leuchtet die Warnlampe, der Hinweis sagt „Mikrofon fehlt: EPOS EXPAND 40“,
+   und eine Aufnahme startet erst nach einer Rückfrage: anstecken und „Erneut suchen“ — oder ein
+   anderes wählen, das gilt dann, bis die EPOS wieder da ist. Mit „Windows-Standard“ gibt es
+   keine Warnung.
 
 | Raum | `--arbeitsplatz` | T2med-Dateien |
 |---|---|---|

@@ -225,6 +225,31 @@ def test_button_marks_rejected_upload_as_failed(live, tmp_path):
     assert failed.state == "fehler" and "Unbekannter Arbeitsplatz" in failed.detail
 
 
+def test_upload_send_timeout_grows_with_file(tmp_path, monkeypatch):
+    # urllib3 sendet den Body unter der Verbindungs-Zeitgrenze (ueber TLS fuer das
+    # ganze Senden): mit festen 5 s kam eine 50-min-Aufnahme nie an.
+    api = steno.Api("https://steno.test")
+    seen = []
+
+    class Done(Exception):
+        pass
+
+    def post(url, timeout, **kw):
+        seen.append(timeout)
+        raise Done
+
+    monkeypatch.setattr(api.session, "post", post)
+    audio = tmp_path / "a.flac"
+    audio.write_bytes(b"\0" * 49_098_219)
+    with pytest.raises(Done):
+        api.upload(make_entry(), audio)
+    with pytest.raises(Done):
+        api.block("x", "001", 0, 0.0, 1.0, True, None)
+    connect, read = seen[0]
+    assert connect >= 49_098_219 / steno.UPLOAD_MIN_BYTES_PER_SECOND and read == 600
+    assert seen[1][0] == steno.CONNECT_TIMEOUT       # ohne Audio wie bisher
+
+
 # ---------------------------------------------------------------- Auftragsregeln am Knopf
 
 class FakeApi:
@@ -258,7 +283,8 @@ class FakeRecorder:
         self.elapsed = 0.0
         self.silent_for = 0.0
 
-    def start(self, path):
+    def start(self, path, mic=None):
+        self.mic = mic
         if path:                                         # Diktat: keine Datei
             write_flac(Path(path), 0.5)
 
@@ -277,6 +303,8 @@ def make_app(tmp_path, monkeypatch):
     root.withdraw()
     watched: list = []                                   # Arbeitsplatz, fuer den Auftraege abgefragt werden
     monkeypatch.setattr(steno, "Recorder", FakeRecorder)
+    monkeypatch.setattr(steno, "refresh_devices", lambda: True)
+    monkeypatch.setattr(steno, "watch_microphone", lambda *a: None)
     monkeypatch.setattr(steno, "upload_loop", lambda *a: None)
     monkeypatch.setattr(steno, "watch_orders", lambda *a: watched.append(a[1]))
     monkeypatch.setattr(steno, "prerender", lambda *a: None)
@@ -1020,7 +1048,98 @@ def test_input_devices_once_each(monkeypatch):
                {"name": "Mikrofon (EPOS EXPAND 40)", "max_input_channels": 1},
                {"name": "Mikrofon (EPOS EXPAND 40)", "max_input_channels": 1}]
     monkeypatch.setattr(steno.sd, "query_devices", lambda: devices)
-    assert steno.input_devices() == ["Mikrofonarray (Realtek(R) Audi", "Mikrofon (EPOS EXPAND 40)"]
+    # der volle Name, nicht der von MME gekuerzte: nur er nennt das Geraet
+    assert steno.input_devices() == ["Mikrofonarray (Realtek(R) Audio)", "Mikrofon (EPOS EXPAND 40)"]
+
+
+def test_mic_label():
+    assert steno.mic_label("Freisprechtelefon mit Echoausschaltung (EPOS EXPAND 40)") == "EPOS EXPAND 40"
+    assert steno.mic_label("Freisprechtelefon mit Echoaussc") == "Freisprechtelefon mit Echoaussc"
+    assert steno.mic_label("") == steno.DEFAULT_MIC
+
+
+EPOS = "Freisprechtelefon mit Echoausschaltung (EPOS EXPAND 40)"
+
+
+def fake_devices(monkeypatch, *names):
+    devices = [{"name": n, "max_input_channels": 1} for n in names]
+    monkeypatch.setattr(steno.sd, "query_devices", lambda: devices)
+    return devices
+
+
+def test_missing_mic_asks_and_remembers_choice(app, monkeypatch):
+    """Eingestelltes Mikrofon fehlt: Rueckfrage, die Wahl gilt, bis es wieder da ist."""
+    app.cfg.set("mikrofon", "EPOS EXPAND 40")
+    devices = fake_devices(monkeypatch, "Mikrofonarray (Realtek(R) Audio)")
+    asked = []
+    monkeypatch.setattr(app, "ask_microphone",
+                        lambda wanted: asked.append(wanted) or "Mikrofonarray (Realtek(R) Audio)")
+    app.start_recording(None)
+    assert asked == ["EPOS EXPAND 40"] and app.recording
+    assert app.recorder.mic == "Mikrofonarray (Realtek(R) Audio)"
+    assert app.mic_missing == "EPOS EXPAND 40"
+    assert app.lines()[1].startswith("●")                # waehrend der Aufnahme die Laufzeit
+    app.stop_recording()
+    app.flash_until = 0
+    assert app.lines()[1] == "Mikrofon fehlt: EPOS EXPAND 40"
+
+    app.start_recording(None)                             # zweite Aufnahme: nicht noch einmal fragen
+    assert len(asked) == 1 and app.recorder.mic == "Mikrofonarray (Realtek(R) Audio)"
+    app.stop_recording()
+
+    devices.append({"name": EPOS, "max_input_channels": 1})   # angesteckt
+    app.start_recording(None)
+    assert len(asked) == 1 and app.recorder.mic == "EPOS EXPAND 40"
+    assert app.mic_missing == "" and app.mic_instead is None
+    app.stop_recording()
+
+
+def test_missing_mic_cancel_keeps_order(app, monkeypatch):
+    app.cfg.set("mikrofon", "EPOS EXPAND 40")
+    fake_devices(monkeypatch, "Mikrofonarray (Realtek(R) Audio)")
+    monkeypatch.setattr(app, "ask_microphone", lambda wanted: None)
+    order = {"id": "o1", "patid": "42", "name": "Muster"}
+    app.start_recording(order)
+    assert not app.recording and app.held is order       # gilt fuer die naechste Aufnahme
+
+
+def test_mic_watch_event(app, monkeypatch):
+    app.cfg.set("mikrofon", "EPOS EXPAND 40")
+    app.handle("mic", False)
+    assert app.mic_missing == "EPOS EXPAND 40" and "EPOS EXPAND 40" in app.flash
+    app.handle("mic", True)
+    assert app.mic_missing == "" and "bereit" in app.flash
+
+
+def test_ask_microphone_dialog(app, monkeypatch):
+    """Der Dialog selbst: Liste mit Windows-Standard zuerst, Auswahl, Erneut suchen."""
+    devices = fake_devices(monkeypatch, "Mikrofonarray (Realtek(R) Audio)")
+    monkeypatch.setattr(app.root, "bell", lambda: None)
+
+    def answer(*clicks):
+        def run():
+            d = app.dialog
+            listbox = next(w for w in d.winfo_children() if isinstance(w, steno.tk.Listbox))
+            buttons = {b.cget("text"): b for f in d.winfo_children() if isinstance(f, steno.tk.Frame)
+                       for b in f.winfo_children()}
+            for click in clicks:
+                if isinstance(click, int):
+                    listbox.selection_clear(0, "end")
+                    listbox.selection_set(click)
+                else:
+                    buttons[click].invoke()
+        app.root.after(50, run)
+
+    answer(1, "Mit diesem aufnehmen")
+    assert app.ask_microphone("EPOS EXPAND 40") == "Mikrofonarray (Realtek(R) Audio)"
+    assert app.dialog is None and not app.asking_mic
+    answer("Mit diesem aufnehmen")                        # vorgewaehlt: Windows-Standard
+    assert app.ask_microphone("EPOS EXPAND 40") == ""
+    answer("Abbrechen")
+    assert app.ask_microphone("EPOS EXPAND 40") is None
+    devices.append({"name": EPOS, "max_input_channels": 1})
+    answer("Erneut suchen")
+    assert app.ask_microphone("EPOS EXPAND 40") == "EPOS EXPAND 40"
 
 
 REAL_TICK = steno.App.tick
@@ -1028,6 +1147,7 @@ REAL_TICK = steno.App.tick
 
 def test_settings_dialog(app, monkeypatch):
     monkeypatch.setattr(steno, "input_devices", lambda: ["Mikrofon (EPOS EXPAND 40)"])
+    fake_devices(monkeypatch, "Mikrofon (EPOS EXPAND 40)")   # sonst fragte der Start nach dem Mikrofon
     errors = []
     monkeypatch.setattr(steno.messagebox, "showerror", lambda *a, **k: errors.append(a))
     app.workstations = {"001": "SZ 1", "002": "SZ 2"}

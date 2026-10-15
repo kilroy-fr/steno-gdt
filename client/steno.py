@@ -62,7 +62,7 @@ from PIL import ImageTk
 import installation
 import knopf
 
-VERSION = "0.45.0"
+VERSION = "0.46.0"
 
 APP_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Steno"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Steno"
@@ -103,6 +103,11 @@ SAMPLE_RATE = 16000              # Whisper und pyannote rechnen mit 16 kHz mono
 POLL_UPLOAD_SECONDS = 3
 ORDER_VALID_SECONDS = 60 * 60    # wie GDT_AUFTRAG_GUELTIG auf dem Server
 CONNECT_TIMEOUT = 5
+# urllib3 sendet den Body noch unter der Verbindungs-Zeitgrenze, und ueber TLS gilt
+# sie fuer das ganze Senden: eine 50-min-Aufnahme (49 MB) scheiterte am 15.10.2026
+# drei Stunden lang nach jeweils genau 5 s ("Server nicht erreichbar"), und die
+# Aufnahmen dahinter kamen nie dran. Deshalb nach Groesse bemessen (send_timeout()).
+UPLOAD_MIN_BYTES_PER_SECOND = 500_000
 
 log = logging.getLogger("steno")
 
@@ -295,30 +300,100 @@ def merge_audio(first: Path, second: Path) -> float:
 # ============================================================
 # AUFNAHME
 # ============================================================
+# PortAudio liest die Geraete — und welches Windows-Standard ist — nur beim
+# Start. Ein USB-Mikrofon, das beim Hochfahren noch nicht bereit war (die EPOS
+# Expand 40 an den Praxisrechnern), saehe der Knopf sonst bis zum Neustart nie.
+# Neu einlesen geht nur ohne offenen Stream; der Lock haelt den Waechter-Thread
+# und den Aufnahmestart auseinander.
+_audio_lock = threading.RLock()
+_open_streams = 0
+MIC_CHECK_SECONDS = 15
+
+
+def refresh_devices() -> bool:
+    """Geraeteliste neu einlesen; False, solange aufgenommen wird."""
+    with _audio_lock:
+        if _open_streams:
+            return False
+        try:
+            sd._terminate()
+        except Exception:
+            pass                                  # nach einem gescheiterten Neustart nicht offen
+        try:
+            sd._initialize()
+        except Exception as e:
+            log.warning(f"Audiogeraete nicht neu eingelesen: {e}")
+            return False
+        return True
+
+
 def find_input_device(name_part: str):
     """Index des ersten Eingabegeraets, dessen Name name_part enthaelt; None = Standard."""
     if not name_part:
         return None
-    for index, device in enumerate(sd.query_devices()):
-        if device["max_input_channels"] > 0 and name_part.lower() in device["name"].lower():
-            return index
+    with _audio_lock:
+        for index, device in enumerate(sd.query_devices()):
+            if device["max_input_channels"] > 0 and name_part.lower() in device["name"].lower():
+                return index
     log.warning(f"Mikrofon '{name_part}' nicht gefunden, nehme Windows-Standard")
     return None
+
+
+def mic_present(name_part: str) -> bool:
+    """Ist das Mikrofon da? Leer = Windows-Standard, das gibt es immer."""
+    if not name_part:
+        return True
+    try:
+        with _audio_lock:
+            return any(d["max_input_channels"] > 0 and name_part.lower() in d["name"].lower()
+                       for d in sd.query_devices())
+    except Exception as e:
+        log.warning(f"Mikrofone nicht abgefragt: {e}")
+        return False
+
+
+def mic_label(name: str) -> str:
+    """Kurzname fuer Meldungen: "Freisprechtelefon mit Echoausschaltung (EPOS
+    EXPAND 40)" -> "EPOS EXPAND 40". Windows setzt das Geraet in Klammern hinter
+    die Art des Eingangs, und die Art sagt am Knopf niemandem etwas."""
+    name = name.strip()
+    if name.endswith(")") and "(" in name:
+        inner = name[name.rindex("(") + 1:-1].strip()
+        if inner:
+            return inner
+    return name or DEFAULT_MIC
 
 
 def input_devices() -> list[str]:
     """Eingabegeraete fuer die Auswahl im Dialog, jedes nur einmal. Windows fuehrt
     jedes Geraet je Schnittstelle (MME, DirectSound, WASAPI) auf, unter MME mit
-    auf 31 Zeichen gekuerztem Namen. Stehen bleibt der kuerzeste: er steckt in
-    den anderen, find_input_device() trifft damit wie bisher das erste Geraet."""
+    auf 31 Zeichen gekuerztem Namen. Stehen bleibt der volle: nur er nennt das
+    Geraet ("Freisprechtelefon mit Echoaussc" sagte niemandem, dass das die
+    EPOS ist), und er trifft in find_input_device() ein Geraet unter DirectSound
+    oder WASAPI. Der gekuerzte waere obendrein mehrdeutig, wenn zwei Geraete
+    gleich anfangen."""
     try:
-        names = [d["name"].strip() for d in sd.query_devices() if d["max_input_channels"] > 0]
+        with _audio_lock:
+            names = [d["name"].strip() for d in sd.query_devices() if d["max_input_channels"] > 0]
     except Exception as e:
         log.warning(f"Mikrofone nicht abgefragt: {e}")
         return []
     names = [n for n in dict.fromkeys(names)
              if "Soundmapper" not in n and "Soundaufnahmetreiber" not in n and "Soundtreiber" not in n]
-    return [n for n in names if not any(o != n and n.startswith(o) for o in names)]
+    return [n for n in names if not any(o != n and o.startswith(n) for o in names)]
+
+
+def watch_microphone(cfg: Config, events: queue.Queue, stop: threading.Event):
+    """Ist das eingestellte Mikrofon da? Gleich beim Start und dann alle 15 s:
+    der Knopf warnt schon vor ▶, und die Warnung verschwindet, sobald es
+    angesteckt ist. Waehrend einer Aufnahme wird nicht nachgesehen."""
+    while not stop.is_set():
+        name = cfg.get("mikrofon")
+        if not name:
+            events.put(("mic", True))
+        elif refresh_devices():
+            events.put(("mic", mic_present(name)))
+        stop.wait(MIC_CHECK_SECONDS)
 
 
 def rms(block) -> float:
@@ -768,23 +843,27 @@ class Recorder:
         self.last_sound = 0.0
         self.threshold = 10 ** (cfg.number("stille_schwelle_db") / 20)
 
-    def start(self, path: Path | None):
-        device = find_input_device(self.cfg.get("mikrofon"))
-        try:
-            self.stream = self._open(device, SAMPLE_RATE)
-        except sd.PortAudioError:
-            # Nicht jede Host-API rechnet selbst um (WASAPI exklusiv); dann die
-            # Rate des Geraets, der Server dekodiert per ffmpeg ohnehin neu.
-            rate = int(sd.query_devices(device, "input")["default_samplerate"])
-            log.warning(f"16 kHz nicht moeglich, nehme {rate} Hz")
-            self.stream = self._open(device, rate)
-        self.rate = int(self.stream.samplerate)
-        try:
-            self.file = sf.SoundFile(path, "w", self.rate, 1, "PCM_16", format="FLAC") if path else None
-        except Exception:
-            self.stream.close()
-            self.stream = None
-            raise
+    def start(self, path: Path | None, mic: str | None = None):
+        """mic: Teil des Geraetenamens, "" = Windows-Standard, None = aus den Einstellungen."""
+        global _open_streams
+        with _audio_lock:
+            device = find_input_device(self.cfg.get("mikrofon") if mic is None else mic)
+            try:
+                self.stream = self._open(device, SAMPLE_RATE)
+            except sd.PortAudioError:
+                # Nicht jede Host-API rechnet selbst um (WASAPI exklusiv); dann die
+                # Rate des Geraets, der Server dekodiert per ffmpeg ohnehin neu.
+                rate = int(sd.query_devices(device, "input")["default_samplerate"])
+                log.warning(f"16 kHz nicht moeglich, nehme {rate} Hz")
+                self.stream = self._open(device, rate)
+            self.rate = int(self.stream.samplerate)
+            try:
+                self.file = sf.SoundFile(path, "w", self.rate, 1, "PCM_16", format="FLAC") if path else None
+            except Exception:
+                self.stream.close()
+                self.stream = None
+                raise
+            _open_streams += 1
         if self.on_block:
             rate = self.rate
             self.segmenter = Segmenter(rate, lambda *block: self.on_block(rate, *block))
@@ -819,10 +898,15 @@ class Recorder:
 
     def stop(self) -> float:
         """Beendet die Aufnahme; liefert die Dauer in Sekunden."""
+        global _open_streams
         try:
             if self.stream:
-                self.stream.stop()
-                self.stream.close()
+                try:
+                    self.stream.stop()
+                    self.stream.close()
+                finally:
+                    with _audio_lock:
+                        _open_streams -= 1
         finally:
             self.queue.put(None)
             if self.writer:
@@ -846,6 +930,12 @@ class Recorder:
 # ============================================================
 # SERVER
 # ============================================================
+def send_timeout(size: int) -> float:
+    """Verbindungs-Zeitgrenze fuer einen Upload von `size` Bytes (siehe
+    UPLOAD_MIN_BYTES_PER_SECOND)."""
+    return CONNECT_TIMEOUT + size / UPLOAD_MIN_BYTES_PER_SECOND
+
+
 class Api:
     def __init__(self, base: str):
         self.base = base
@@ -879,7 +969,7 @@ class Api:
                       "order": json.dumps(entry.order) if entry.order else "",
                       "replaces": entry.replaces, "replaces_started": entry.replaces_started},
                 files={"audio": (audio.name, f, "audio/flac")},
-                timeout=(CONNECT_TIMEOUT, 600),
+                timeout=(send_timeout(audio.stat().st_size), 600),
             )
         if 400 <= r.status_code < 500:
             raise ValueError(_detail(r))
@@ -893,7 +983,7 @@ class Api:
             data={"ap": ap, "seq": str(seq), "start": f"{start:.3f}", "end": f"{end:.3f}",
                   "final": "true" if final else "false"},
             files={"audio": (f"{entry_id}-{seq}.flac", data, "audio/flac")} if data else None,
-            timeout=(CONNECT_TIMEOUT, 60),
+            timeout=(send_timeout(len(data or b"")), 60),
         )
         if 400 <= r.status_code < 500:
             raise ValueError(_detail(r))
@@ -910,7 +1000,7 @@ class Api:
         r = self.session.post(self._url("/steno/diktat"),
                               data={"ap": ap, "kontext": context, "satzende": "offen"},
                               files={"audio": (name, data, "audio/flac")},
-                              timeout=(CONNECT_TIMEOUT, 120))
+                              timeout=(send_timeout(len(data)), 120))
         if 400 <= r.status_code < 500:
             raise ValueError(_detail(r))
         r.raise_for_status()
@@ -1272,6 +1362,11 @@ class App:
         self.failed = 0
         self.unassigned = 0                       # fertig ohne Patient, warten auf Klick in T2med
         self.fhir = False                         # Server mit FHIR: ohne Patient wird zugeordnet, nicht per GDT
+        self.mic_missing = ""                     # eingestelltes Mikrofon, solange es fehlt
+        # Statt des fehlenden gewaehlt: (eingestelltes, gewaehltes) — gilt, bis
+        # das eingestellte wieder da ist; "" = Windows-Standard
+        self.mic_instead: tuple[str, str] | None = None
+        self.asking_mic = False
         self.dialog: tk.Toplevel | None = None
         self.settings: SettingsDialog | None = None
         self.restart_pending = False              # Einstellungen geaendert, die erst ein Neustart liest
@@ -1344,6 +1439,8 @@ class App:
             self.events, self.stop_event)).start()
         threading.Thread(target=upload_loop, daemon=True,
                          args=(api, spool, self.events, self.stop_event, self.wake)).start()
+        threading.Thread(target=watch_microphone, daemon=True,
+                         args=(cfg, self.events, self.stop_event)).start()
         threading.Thread(target=prerender, args=(self.bodies, self.d), daemon=True).start()
         self.listener = threading.Thread(target=link_listener, args=(self.events, self.stop_event),
                                          daemon=True)
@@ -1408,7 +1505,8 @@ class App:
         self.tip_shown = shown
 
     def button_image(self) -> ImageTk.PhotoImage:
-        state = (self.shown_mode, self.recording, not self.offline, bool(self.failed or self.unassigned))
+        state = (self.shown_mode, self.recording, not self.offline,
+                 bool(self.failed or self.unassigned or self.mic_missing))
         key = (*state, self.hover, self.pressed)
         if key not in self.images:
             if len(self.images) > 64:
@@ -1486,6 +1584,8 @@ class App:
             return name, "Diktat wird geschrieben…", COLORS["muted"]
         if self.offline:
             return name, "Server nicht erreichbar", COLORS["warn"]
+        if self.mic_missing:
+            return name, f"Mikrofon fehlt: {mic_label(self.mic_missing)}", COLORS["warn"]
         if self.failed:
             return name, f"{self.failed} Fehler · Rechtsklick", COLORS["warn"]
         if self.unassigned:
@@ -1562,6 +1662,19 @@ class App:
             self.show_flash(f"T2med: {payload}", 15)
         elif kind == "flash":                     # vom Diktat
             self.show_flash(*payload)
+        elif kind == "mic":
+            self.set_mic_present(payload)
+
+    def set_mic_present(self, present: bool):
+        wanted = self.cfg.get("mikrofon")
+        missing = "" if present or not wanted else wanted
+        if missing and not self.mic_missing:
+            log.warning(f"Mikrofon '{missing}' nicht gefunden")
+            self.show_flash(f"Mikrofon fehlt: {mic_label(missing)} – bitte anschließen", 20)
+        elif self.mic_missing and not missing and wanted == self.mic_missing:
+            log.info(f"Mikrofon '{wanted}' wieder da")
+            self.show_flash(f"Mikrofon bereit: {mic_label(wanted)}", 8)
+        self.mic_missing = missing
 
     def show_flash(self, text: str, seconds: float = 8):
         self.flash, self.flash_until = text, time.monotonic() + seconds
@@ -1758,17 +1871,127 @@ class App:
         elif streamed and self.sender:
             sender, entry_id = self.sender, entry.id
             on_block = lambda rate, *block: sender.put(entry_id, rate, *block)   # noqa: E731
+        mic = self.pick_microphone()
+        if mic is None or self.recording:
+            return False                          # abgebrochen, oder ein Auftrag kam waehrend der Rueckfrage
         recorder = Recorder(self.cfg, on_block=on_block)
         try:
-            recorder.start(None if dictating else self.spool.audio(entry))
+            recorder.start(None if dictating else self.spool.audio(entry), mic)
         except Exception as e:
             log.exception("Aufnahme nicht gestartet")
             self.show_flash(f"Mikrofon-Fehler: {e}", 15)
             return False
+        if mic != self.cfg.get("mikrofon"):
+            self.show_flash(f"Mikrofon: {mic_label(mic)}", 10)
         if not dictating:
             self.spool.save(entry)
         self.entry, self.recorder = entry, recorder
         return True
+
+    # ---------------------------------------------------------- Mikrofon
+    def pick_microphone(self) -> str | None:
+        """Das eingestellte Mikrofon — fehlt es, das statt dessen gewaehlte oder
+        nachfragen. Vorher die Geraete neu einlesen: ein eben angestecktes
+        Mikrofon (oder ein neuer Windows-Standard) zaehlt sofort. None = abgebrochen."""
+        wanted = self.cfg.get("mikrofon")
+        refresh_devices()
+        if mic_present(wanted):
+            self.set_mic_present(True)
+            self.mic_instead = None               # ab jetzt wieder das eingestellte
+            return wanted
+        self.set_mic_present(False)
+        if self.mic_instead and self.mic_instead[0] == wanted and mic_present(self.mic_instead[1]):
+            return self.mic_instead[1]
+        if self.asking_mic:
+            return None                           # die Rueckfrage steht schon
+        choice = self.ask_microphone(wanted)
+        if choice is not None and choice != wanted:
+            self.mic_instead = (wanted, choice)
+            log.info(f"Statt Mikrofon '{wanted}': '{choice or DEFAULT_MIC}'")
+        return choice
+
+    def ask_microphone(self, wanted: str) -> str | None:
+        """Fehlermeldung mit Auswahl, bevor ohne das eingestellte Mikrofon
+        aufgenommen wird — ein Laptop-Mikrofon statt der Konferenzspinne
+        verschlechtert Transkript und Sprechertrennung, das soll niemand erst
+        in der Kartei merken. "Erneut suchen" liest die Geraete neu ein, nach
+        dem Anstecken genuegt das. Die Wahl gilt, bis das eingestellte wieder
+        da ist. Waehrend der Rueckfrage laeuft tick() weiter."""
+        if self.dialog:
+            self.dialog.destroy()
+            self.dialog = None
+        self.asking_mic = True
+        s = self.scale
+        result: list[str | None] = [None]
+        done = tk.BooleanVar(self.root, False)
+        d = self.dialog = tk.Toplevel(self.root)
+        d.overrideredirect(True)
+        d.attributes("-topmost", True)
+        d.configure(bg=COLORS["bg"], padx=int(12 * s), pady=int(10 * s))
+        # Wird der Dialog von anderer Stelle geschlossen (Klick in T2med), nicht ewig warten
+        d.bind("<Destroy>", lambda e: done.set(True) if e.widget is d else None)
+        tk.Label(d, text=f"Mikrofon nicht gefunden: {mic_label(wanted)}", bg=COLORS["bg"],
+                 fg=COLORS["warn"], font=self.font1, justify="left").pack(anchor="w")
+        tk.Label(d, text=(f"„{wanted}“ ist nicht angeschlossen oder noch nicht bereit.\n"
+                          "Anschließen und „Erneut suchen“ – oder ein anderes wählen. "
+                          "Die Wahl gilt, bis es wieder da ist."),
+                 bg=COLORS["bg"], fg=COLORS["text"], font=self.font2, justify="left",
+                 wraplength=int(380 * s)).pack(anchor="w", pady=(int(4 * s), int(6 * s)))
+        status = tk.Label(d, text="", bg=COLORS["bg"], fg=COLORS["muted"], font=self.font2)
+        listbox = tk.Listbox(d, font=self.font2, activestyle="none", exportselection=False,
+                             width=48, height=1)
+        listbox.pack(fill="x")
+        status.pack(anchor="w")
+
+        def fill():
+            listbox.delete(0, "end")
+            for name in (DEFAULT_MIC, *input_devices()):
+                listbox.insert("end", name)
+            listbox.configure(height=min(8, listbox.size()))
+            listbox.selection_set(0)
+
+        def finish(value: str | None):
+            result[0] = value
+            done.set(True)
+
+        def search():
+            if refresh_devices() and mic_present(wanted):
+                self.show_flash(f"Mikrofon bereit: {mic_label(wanted)}", 8)
+                finish(wanted)
+                return
+            fill()
+            status.configure(text=f"Noch nicht da ({datetime.now():%H:%M:%S})")
+
+        def record():
+            picked = listbox.curselection()
+            name = listbox.get(picked[0]) if picked else DEFAULT_MIC
+            finish("" if name == DEFAULT_MIC else name)
+
+        fill()
+        listbox.bind("<Double-Button-1>", lambda e: record())
+        row = tk.Frame(d, bg=COLORS["bg"])
+        row.pack(anchor="e", pady=(int(10 * s), 0))
+        tk.Button(row, text="Abbrechen", command=lambda: finish(None)).pack(side="right")
+        tk.Button(row, text="Mit diesem aufnehmen", command=record).pack(side="right", padx=int(6 * s))
+        tk.Button(row, text="Erneut suchen", command=search).pack(side="right")
+        d.update_idletasks()
+        x = max(0, self.root.winfo_x() + self.w - d.winfo_reqwidth())
+        y = self.root.winfo_y() - d.winfo_reqheight() - int(8 * s)
+        if y < 0:
+            y = self.root.winfo_y() + self.h + int(8 * s)
+        d.geometry(f"+{x}+{y}")
+        self.root.bell()
+        try:
+            self.root.wait_variable(done)
+        finally:
+            self.asking_mic = False
+            if self.dialog is d:
+                self.dialog = None
+            if d.winfo_exists():
+                d.destroy()
+        if result[0] is None:
+            log.info("Aufnahme abgebrochen: Mikrofon fehlt")
+        return result[0]
 
     def stop_recording(self):
         if not self.recording:
@@ -2013,6 +2236,9 @@ class App:
                             else "Steno startet neu…", 10)
         else:
             self.show_flash("Einstellungen gespeichert", 4)
+        if "mikrofon" in changed:
+            self.mic_missing = ""                 # die Warnung galt dem alten
+            self.set_mic_present(mic_present(values["mikrofon"]))
 
     def retry_failed(self):
         for entry in self.spool.entries():
@@ -2111,8 +2337,13 @@ class SettingsDialog:
 
         heading("Aufnahme")
         self.vars["mikrofon"] = tk.StringVar(w, cfg.get("mikrofon") or DEFAULT_MIC)
-        line("Mikrofon", ttk.Combobox(frame, textvariable=self.vars["mikrofon"],
-                                      values=[DEFAULT_MIC, *input_devices()]))
+        refresh_devices()                         # eben angesteckte mit
+        mics = ttk.Combobox(frame, textvariable=self.vars["mikrofon"], width=44,
+                            values=[DEFAULT_MIC, *input_devices()])
+        # Beim Aufklappen neu einlesen: erst jetzt angesteckt, waehrend der Dialog offen ist
+        mics.configure(postcommand=lambda: refresh_devices()
+                       and mics.configure(values=[DEFAULT_MIC, *input_devices()]))
+        line("Mikrofon", mics)
         for key, label, unit, low, high in NUMBER_SETTINGS:
             if key == "knopf_pixel":
                 heading("Knopf")
