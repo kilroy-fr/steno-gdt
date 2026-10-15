@@ -1473,7 +1473,8 @@ class App:
         if self.recording:
             minutes, seconds = divmod(int(self.recorder.elapsed), 60)
             name = self.entry.patient if self.entry.order else "Ohne Patient"
-            extra = f" · nächster: {order_name(self.pending)}" if self.pending else ""
+            extra = (f" · {self.flash}" if fresh
+                     else f" · nächster: {order_name(self.pending)}" if self.pending else "")
             return name, f"● {minutes}:{seconds:02d}{extra}", COLORS["rec"]
         if fresh:
             return (order_name(self.pending) if self.pending else "Steno"), self.flash, COLORS["ok"]
@@ -1583,7 +1584,7 @@ class App:
                 self.claim(order)                 # doppelt geklickt: nichts zu tun
                 return
             self.pending = order
-            self.ask_switch(order)
+            self.switch_to(order)
         elif first:
             # Lag schon da, als der Knopf startete — nicht ungefragt aufnehmen.
             self.pending = order
@@ -1597,14 +1598,14 @@ class App:
     def on_link_order(self, order: dict):
         """Klick auf "Steno" in T2med (FHIR): wie ein neuer Auftrag — nur kann er
         nie vom Start uebrig sein, jemand hat eben geklickt. Also auch direkt
-        nach dem Start sofort aufnehmen; waehrend einer Aufnahme fragen."""
+        nach dem Start sofort aufnehmen; waehrend einer Aufnahme wechseln."""
         log.info("T2med-Kontext (FHIR)" + (" (Psychotherapie)" if order.get("device") == "psy" else ""))
         if self.recording:
             current = self.entry.order
             if current and current.get("patid") == order["patid"]:
                 return                            # derselbe Patient noch einmal
             self.hold(order)
-            self.ask_switch(order)
+            self.switch_to(order)
         elif unassigned := [e for e in self.spool.entries() if e.state == "zuordnen"]:
             self.ask_assign(order, unassigned)
         else:
@@ -1671,36 +1672,28 @@ class App:
             log.warning(f"Auftrag nicht beansprucht ({type(e).__name__}), verwende ihn trotzdem")
             return True
 
-    def ask_switch(self, order: dict):
-        if self.dialog:
-            self.dialog.destroy()
-        s = self.scale
-        d = self.dialog = tk.Toplevel(self.root)
-        d.overrideredirect(True)
-        d.attributes("-topmost", True)
-        d.configure(bg=COLORS["bg"], padx=int(12 * s), pady=int(10 * s))
-        current = ("Diktat" if self.dictating
-                   else self.entry.patient if self.entry and self.entry.order else "ohne Patient")
-        tk.Label(d, text=f"Neuer Auftrag aus T2med: {order_name(order)}\n"
-                         f"Laufende Aufnahme ({current}) beenden und\n"
-                         f"für {order_name(order)} neu starten?",
-                 bg=COLORS["bg"], fg=COLORS["text"], font=self.font2, justify="left").pack(anchor="w")
-        row = tk.Frame(d, bg=COLORS["bg"])
-        row.pack(anchor="e", pady=(int(8 * s), 0))
-
-        def answer(switch: bool):
-            d.destroy()
-            self.dialog = None
-            if switch and self.pending and self.pending["id"] == order["id"]:
-                self.stop_recording()
-                self.start_recording(order)
-
-        tk.Button(row, text="Weiter aufnehmen", command=lambda: answer(False)).pack(side="right")
-        tk.Button(row, text="Wechseln", command=lambda: answer(True)).pack(side="right", padx=int(6 * s))
-        d.update_idletasks()
-        x = max(0, self.root.winfo_x() + self.w - d.winfo_reqwidth())
-        y = max(0, self.root.winfo_y() - d.winfo_reqheight() - int(8 * s))
-        d.geometry(f"+{x}+{y}")
+    def switch_to(self, order: dict):
+        """Neuer Patient aus T2med, waehrend noch aufgenommen wird: meist wurde
+        nur vergessen, ■ zu druecken. Die laufende Aufnahme endet und geht wie
+        nach ■ an ihren Patienten, die neue beginnt sofort. Ein Diktat endet
+        ohne seinen Rest: die Schreibmarke steht jetzt beim neuen Patienten."""
+        if self.dictating:
+            entry, recorder = self.entry, self.recorder
+            self.entry = self.recorder = None
+            self.dictation.drop(entry.id)
+            try:
+                recorder.stop()
+            except Exception:
+                log.exception("Diktat nicht sauber beendet")
+            log.info(f"Diktat {entry.id} beendet: neuer Auftrag aus T2med")
+            previous = "Diktat"
+        else:
+            previous = self.entry.patient if self.entry.order else "Aufnahme ohne Patient"
+            log.info(f"Aufnahme {self.entry.id} beendet: neuer Auftrag aus T2med")
+            self.stop_recording()
+        self.start_recording(order)
+        if self.recording:
+            self.show_flash(f"{previous} beendet · jetzt {order_name(order)}", 15)
 
     # ---------------------------------------------------------- Aufnahme
     def start_recording(self, order: dict | None):
@@ -1815,8 +1808,12 @@ class App:
     def discard_recording(self):
         if not self.recording:
             return
+        # Waehrend der Rueckfrage laeuft tick() weiter: ein Auftrag aus T2med
+        # kann die Aufnahme derweil gewechselt haben — die neue nicht verwerfen.
+        asked = self.entry
         if self.dictating:
-            if not self.confirm("Laufendes Diktat verwerfen? Schon eingegebener Text bleibt stehen."):
+            if (not self.confirm("Laufendes Diktat verwerfen? Schon eingegebener Text bleibt stehen.")
+                    or self.entry is not asked):
                 return
             entry, recorder = self.entry, self.recorder
             self.entry = self.recorder = None
@@ -1824,7 +1821,8 @@ class App:
             recorder.stop()
             log.info(f"Diktat {entry.id} verworfen")
             return
-        if not self.confirm("Laufende Aufnahme verwerfen? Sie wird gelöscht und nicht an T2med gesendet."):
+        if (not self.confirm("Laufende Aufnahme verwerfen? Sie wird gelöscht und nicht an T2med gesendet.")
+                or self.entry is not asked):
             return
         entry, recorder = self.entry, self.recorder
         self.entry = self.recorder = None

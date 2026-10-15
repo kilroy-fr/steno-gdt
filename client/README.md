@@ -68,7 +68,10 @@ Knopf steht kurz „T2med: Patient wird geladen…“, dann der Name.
 - Aufnahmen unter 5 s gelten als Fehlklick und werden verworfen. Der Auftrag bleibt dann für die nächste.
   Ein Diktat nicht: der Text steht schon da, und ein kurzes Diktat ist eben kurz.
 - Eine Aufnahme endet von selbst nach 20 min Stille oder spätestens nach 120 min.
-- Kommt während einer Aufnahme ein Auftrag für einen anderen Patienten, fragt der Knopf, bevor er wechselt.
+- Kommt während einer Aufnahme ein Auftrag für einen anderen Patienten („Messung starten“ oder „Steno“ in
+  T2med), beendet der Knopf die laufende Aufnahme und nimmt für den neuen Patienten auf — wer ■ vergessen hat,
+  muss nichts weiter tun. Die beendete geht wie nach ■ an ihren Patienten. Ein laufendes Diktat endet dabei;
+  was davon noch nicht eingegeben war, fällt weg.
 - Lag beim Start des Knopfs schon ein Auftrag vor, startet er nicht von selbst. Der Name steht dann im Hinweis
   neben dem Knopf, ein Klick nimmt für diesen Patienten auf.
 

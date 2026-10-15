@@ -30,8 +30,10 @@ Klick auf ■ ──▶ Aufnahme geht an den Server: Transkription, Sprechertren
     Korrektur geht „Fehlgeschlagene erneut senden“.
 - **Ein Auftrag gilt für genau eine Aufnahme.** Wer beim nächsten Patienten „Messung starten“ vergisst,
   landet ohne Patient und nicht beim vorigen. Ein Auftrag verfällt nach 60 Minuten (`GDT_AUFTRAG_GUELTIG`).
-- **Auftrag während einer laufenden Aufnahme** (anderer Patient): Der Knopf fragt, ob er die laufende Aufnahme
-  beenden und für den neuen Patienten neu starten soll. Er wechselt nie ungefragt.
+- **Auftrag während einer laufenden Aufnahme** (anderer Patient, per „Messung starten“ oder „Steno“): Der Knopf
+  beendet die laufende Aufnahme — sie geht wie nach ■ an ihren Patienten — und nimmt sofort für den neuen auf.
+  Ein laufendes Diktat endet dabei ohne seinen noch nicht eingegebenen Rest. Derselbe Patient noch einmal
+  ändert nichts.
 - **Gesendet wird automatisch**, sobald die Dokumentation fertig ist (1–3 Minuten nach dem Stopp). Geprüft wird
   in T2med, der Kommentar (6227) sagt „KI-generiert … Vor Übernahme prüfen“.
 - Liegt `T2MDSTNO.00x` noch im Ordner (T2med an diesem Arbeitsplatz nicht gestartet), wartet die nächste
@@ -348,7 +350,7 @@ Ablauf:
    - Steht die ganze Dokumentation im Kurzeintrag oder nur die ersten Zeilen („Anzahl der Zeilen“)?
 7. Gegenprobe ohne „Messung starten“: ▶ klicken, sprechen, ■. Die Dokumentation muss unter **Ext. Aufträge**
    erscheinen und darf **nicht** automatisch beim zuletzt geöffneten Patienten landen.
-8. Patientenwechsel: „Messung starten“ für Patient A, dann während der Aufnahme für Patient B. Der Knopf muss
-   fragen. „Wechseln“ → A bekommt die erste, B die zweite Dokumentation.
+8. Patientenwechsel: „Messung starten“ für Patient A, dann während der Aufnahme für Patient B. Der Knopf
+   wechselt ohne Rückfrage („… beendet · jetzt …“) → A bekommt die erste, B die zweite Dokumentation.
 9. Mit Psychotherapie-Gerät: „Messung starten“ bei „Steno Psychotherapie“, Ψ am Knopf, Ergebnis kommt als
    Sitzungszusammenfassung über `T2MDSTNP.001` an.

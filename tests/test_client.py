@@ -333,13 +333,42 @@ def test_new_order_starts_recording(app):
     assert (entry.state, entry.duration, entry.order["patid"]) == ("bereit", 60.0, "4711")
 
 
-def test_order_during_recording_asks_and_never_switches_alone(app):
+def test_order_during_recording_switches_to_new_patient(app):
+    """■ vergessen: der neue Patient aus T2med beendet die laufende Aufnahme,
+    die geht wie nach ■ an den vorigen, die neue beginnt sofort."""
     app.on_order(None)
     app.on_order(ORDER_A)
-    app.on_order(ORDER_B)
-    assert app.entry.order == ORDER_A and app.pending == ORDER_B and app.dialog is not None
+    first = app.entry.id
     app.on_order({**ORDER_A, "id": "001-3"})            # derselbe Patient noch einmal: nur abraeumen
-    assert app.entry.order == ORDER_A and "001-3" in app.api.claimed
+    assert app.entry.id == first and "001-3" in app.api.claimed
+    app.on_order(ORDER_B)
+    assert app.recording and app.entry.order == ORDER_B and app.entry.id != first
+    assert app.pending is None and app.dialog is None and app.api.claimed[-1] == "001-2"
+    assert "Müller" in app.lines()[1] and "Schmidt" in app.lines()[1]
+    [done] = [e for e in app.spool.entries() if e.state == "bereit"]
+    assert (done.id, done.order["patid"]) == (first, "4711") and app.wake.is_set()
+    assert app.last[0].id == first                       # zur Not fortsetzbar
+
+
+def test_switch_after_misclick_length_drops_old_order(app):
+    app.on_order(None)
+    app.on_order(ORDER_A)
+    app.recorder.seconds = 1.0                           # kaum begonnen: verworfen wie ein Fehlklick
+    app.on_order(ORDER_B)
+    assert app.entry.order == ORDER_B and app.pending is None and app.held is None
+    assert [e.order["patid"] for e in app.spool.entries()] == ["815"]   # nur die laufende
+
+
+def test_discard_question_does_not_hit_switched_recording(app, monkeypatch):
+    app.on_order(None)
+    app.on_order(ORDER_A)
+
+    def confirm(text):                                   # waehrend der Rueckfrage kommt der naechste
+        app.on_order(ORDER_B)
+        return True
+    monkeypatch.setattr(app, "confirm", confirm)
+    app.discard_recording()
+    assert app.recording and app.entry.order == ORDER_B
 
 
 def test_misclick_keeps_order_for_next_recording(app):
@@ -568,10 +597,12 @@ def test_link_from_t2med_starts_recording_even_right_after_start(app):
     app.handle("fhir", {**FHIR_ORDER, "id": "fhir-001-2"})   # derselbe Patient noch einmal: nichts
     assert app.dialog is None
     other = {**FHIR_ORDER, "id": "fhir-001-3", "patid": "pat-obj-2", "last_name": "Schmidt"}
-    app.handle("fhir", other)
-    assert app.entry.order == FHIR_ORDER and app.dialog is not None
-    app.on_order(None)                                    # GDT-Abfrage: der Kontext bleibt vorgemerkt
-    assert app.pending == other
+    app.handle("fhir", other)                             # anderer Patient: wechseln
+    assert app.entry.order == other and app.dialog is None and app.api.claimed == []
+    assert app.pending is None and app.held is None
+    app.on_order(None)                                    # GDT-Abfrage: nichts mehr vorgemerkt
+    assert app.pending is None
+    assert [e.order["patid"] for e in app.spool.entries() if e.state == "bereit"] == ["pat-obj-1"]
 
 
 # ---------------------------------------------------------------- Abschnitte
@@ -721,12 +752,19 @@ def test_no_switch_between_dictation_and_consultation(app):
     assert app.dictating and app.direct
 
 
-def test_order_during_dictation_asks(app):
+def test_order_during_dictation_ends_it_and_records(app):
+    """Der Rest des Diktats wird nicht mehr eingegeben: die Schreibmarke steht
+    inzwischen beim neuen Patienten."""
     app.on_order(None)
     app.choose_mode("direkt")
     app.start_dictation()
+    dictation = app.entry.id
     app.on_order(ORDER_A)
-    assert app.dictating and app.dialog is not None and app.pending == ORDER_A
+    assert app.recording and not app.dictating and app.entry.order == ORDER_A
+    assert dictation in app.dictation.dropped and app.dialog is None
+    assert "Diktat beendet" in app.lines()[1]
+    app.stop_recording()
+    assert app.direct                                     # Direkt bleibt gewaehlt
 
 
 class FakeDictateApi:
