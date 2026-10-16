@@ -1236,6 +1236,8 @@ function showAbproCards(raw) {
     } catch {
       el.textContent = text || "—";
     }
+    // B schreibt der Prompt nicht mehr, nur aeltere Verlaufseintraege haben es
+    if (key === "B") el.closest(".abpro-card").style.display = text ? "" : "none";
   }
   document.getElementById("analysisText").style.display = "none";
   document.getElementById("abproCards").style.display = "flex";

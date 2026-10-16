@@ -29,12 +29,18 @@ Die Sprechertrennung ist fehleranfällig, vor allem an Sprecherwechseln und bei 
 # eines von mehreren Anliegen uebrig blieb. Die Hauptursache war zwar ein zu
 # kleines Kontextfenster (siehe OLLAMA_NUM_CTX in server.py), aber auch der
 # alte Prompt lud dazu ein: "extrem kompakt", "nur das Wesentliche".
-COMPLETENESS_RULES = """VOLLSTÄNDIGKEIT – die wichtigste Regel:
+# A/B/PRO bekommt eine eigene Check-up-Zeile: ohne Befund-Abschnitt und ohne
+# Listen von Vorerkrankungen/Dauermedikation (siehe ABPRO_PROMPT).
+_COMPLETENESS_RULES = """VOLLSTÄNDIGKEIT – die wichtigste Regel:
 - Geh das Transkript von Anfang bis Ende durch. Gespräche springen zwischen Themen; was am Anfang besprochen wurde, ist genauso wichtig wie das Ende.
 - Patienten kommen oft mit mehreren, voneinander unabhängigen Anliegen. Jede angesprochene Beschwerde und jedes Thema gehört in die Dokumentation – auch wenn es nur kurz oder nebenbei erwähnt wurde. Fasse unabhängige Beschwerden nicht zusammen und lass keine weg, weil eine andere wichtiger erscheint.
-- Bei Gesundheitsuntersuchung, Check-up oder Vorsorge ist der Anlass nicht das einzige Thema: dokumentiere zusätzlich jede dabei genannte Beschwerde, Vorerkrankung, Dauermedikation, Risikofaktoren (z. B. Rauchen, Gewicht, Blutdruck, familiäre Belastung), Impf- und Vorsorgestatus und jeden Befund – soweit im Gespräch vorkommend.
+{checkup}
 - Übernimm Zahlen wörtlich: Messwerte, Laborwerte, Dosierungen, Zeitangaben.
 - Bewerte Befunde nur so, wie sie im Gespräch bewertet wurden – nichts als „unauffällig“ oder „gut“ zusammenfassen, was dort nicht so genannt wurde."""
+
+COMPLETENESS_RULES = _COMPLETENESS_RULES.replace("{checkup}", "- Bei Gesundheitsuntersuchung, Check-up oder Vorsorge ist der Anlass nicht das einzige Thema: dokumentiere zusätzlich jede dabei genannte Beschwerde, Vorerkrankung, Dauermedikation, Risikofaktoren (z. B. Rauchen, Gewicht, Blutdruck, familiäre Belastung), Impf- und Vorsorgestatus und jeden Befund – soweit im Gespräch vorkommend.")
+
+ABPRO_COMPLETENESS_RULES = _COMPLETENESS_RULES.replace("{checkup}", "- Bei Gesundheitsuntersuchung, Check-up oder Vorsorge ist der Anlass nicht das einzige Thema: dokumentiere zusätzlich jede dabei genannte Beschwerde, Risikofaktoren (z. B. Rauchen, Gewicht, familiäre Belastung) und den Impf- und Vorsorgestatus – soweit im Gespräch vorkommend.")
 
 ANALYZE_PROMPT = """Du bist ein KI-Assistent für medizinische Dokumentation in einer Hausarztpraxis.
 {gender_instruction}
@@ -87,16 +93,16 @@ Nutze das folgende Glossar ausschließlich, um bereits im Transkript angedeutete
 {transcript}
 </transkript>
 
-""" + COMPLETENESS_RULES + """
+""" + ABPRO_COMPLETENESS_RULES + """
 
 FORM:
 - Telegrammstil: knappe Stichworte statt ganzer Sätze, keine Einleitung, keine Erläuterungen. Knapp heißt kurz formuliert – nicht weniger Themen.
 - Mehrere Anliegen innerhalb eines Abschnitts durch Semikolon trennen, jedes mit eigenem Stichwort.
-- Verwende exakt diese drei Abschnitte, ohne die Klammertexte zu wiederholen:
+- Kein Befund-Abschnitt: körperliche Untersuchung und Befunde dokumentiert der Arzt selbst. Schreib keinen Abschnitt "B:" und keine Untersuchungsbefunde.
+- Keine Unterpunkte oder Überschriften wie "Vorerkrankungen:", "Vormedikation:" oder "Dauermedikation:" – die stehen in der Kartei. Eine Vorerkrankung oder ein Medikament nur erwähnen, wenn es zu einem Anliegen gehört (z. B. als Auslöser, Nebenwirkung oder Anlass einer Änderung), und dann beim Anliegen selbst.
+- Verwende exakt diese zwei Abschnitte, ohne die Klammertexte zu wiederholen:
 
-A: (Anlass des Besuchs, dann jede Beschwerde bzw. jedes Anliegen einzeln mit Dauer und Verlauf; relevante Vorerkrankungen und Dauermedikation)
-
-B: (Messwerte, Laborwerte, körperlicher Befund, Untersuchungsergebnisse – mit Zahlen; Abschnitt weglassen, falls nichts davon vorkommt)
+A: (Anlass des Besuchs, dann jede Beschwerde bzw. jedes Anliegen einzeln mit Dauer und Verlauf)
 
 PRO: (Für jedes Anliegen aus A die besprochenen Maßnahmen: Medikation mit Dosierung, Untersuchungen, Überweisungen, Impfungen, Beratung, Kontrolltermine)
 
