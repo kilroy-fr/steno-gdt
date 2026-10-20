@@ -31,12 +31,32 @@ Die Sprechertrennung ist fehleranfällig, vor allem an Sprecherwechseln und bei 
 # alte Prompt lud dazu ein: "extrem kompakt", "nur das Wesentliche".
 # A/B/PRO bekommt eine eigene Check-up-Zeile: ohne Befund-Abschnitt und ohne
 # Listen von Vorerkrankungen/Dauermedikation (siehe ABPRO_PROMPT).
+#
+# "Wessen Daten" (20.10.2026, durchgesehen: 18 Knopf-Gespraeche vom 20.10.):
+# Gesundheitsdaten Dritter landeten in der Kartei (HbA1c und Demenzverdacht
+# des Ehemanns, Fieber des Sohnes, Trauer des Nachbarn), einmal falsch
+# zugeordnet (Berufswahl des Enkels -> Ehemann), und in einer Aufnahme, in der
+# im Anschluss eine zweite Person (wohl der Ehemann) untersucht wurde, standen
+# deren Kieferschmerzen bei der Patientin, das auffaellige EKG fehlte ganz.
+# Dazu Smalltalk als Anliegen ("politisches Gespraech am Ende des Termins").
+# Im PRO von A/B/PRO fehlten dagegen Taten (Grippeimpfung neben Corona, eine
+# erwogene L-Thyroxin-Reduktion), waehrend Erklaerungen des Arztes seitenlang
+# nacherzaehlt wurden; ein Termin wurde aus mehreren genannten Daten erraten,
+# eine angebotene AU stand als geplant da. Verhoerte Praeparate standen wie
+# echte in der Kartei ("Cardians 10", obwohl Jardiance im Glossar steht).
 _COMPLETENESS_RULES = """VOLLSTÄNDIGKEIT – die wichtigste Regel:
 - Geh das Transkript von Anfang bis Ende durch. Gespräche springen zwischen Themen; was am Anfang besprochen wurde, ist genauso wichtig wie das Ende.
-- Patienten kommen oft mit mehreren, voneinander unabhängigen Anliegen. Jede angesprochene Beschwerde und jedes Thema gehört in die Dokumentation – auch wenn es nur kurz oder nebenbei erwähnt wurde. Fasse unabhängige Beschwerden nicht zusammen und lass keine weg, weil eine andere wichtiger erscheint.
+- Patienten kommen oft mit mehreren, voneinander unabhängigen Anliegen. Jede angesprochene Beschwerde und jedes gesundheitliche Thema der behandelten Person gehört in die Dokumentation – auch wenn es nur kurz oder nebenbei erwähnt wurde. Fasse unabhängige Beschwerden nicht zusammen und lass keine weg, weil eine andere wichtiger erscheint.
 {checkup}
-- Übernimm Zahlen wörtlich: Messwerte, Laborwerte, Dosierungen, Zeitangaben.
-- Bewerte Befunde nur so, wie sie im Gespräch bewertet wurden – nichts als „unauffällig“ oder „gut“ zusammenfassen, was dort nicht so genannt wurde."""
+- Übernimm Zahlen wörtlich: Messwerte, Laborwerte, Dosierungen, Zeitangaben. Eine Richtung (Zunahme/Abnahme, gestiegen/gesunken) nur, wenn sie aus dem Gespräch eindeutig hervorgeht.
+- Bewerte Befunde nur so, wie sie im Gespräch bewertet wurden – nichts als „unauffällig“ oder „gut“ zusammenfassen, was dort nicht so genannt wurde.
+
+WESSEN DATEN – die Dokumentation steht in der Kartei der behandelten Person:
+- Beschwerden, Werte, Befunde, Diagnosen und Termine anderer Personen (Ehepartner, Kinder, Eltern, Nachbarn, Kollegen, auch was der Arzt über sich selbst erzählt) gehören nicht dazu. Schreib sie nie der behandelten Person zu und übernimm ihre Gesundheitsdaten nicht.
+- Eine andere Person nur, soweit es die behandelte Person selbst betrifft, und ohne deren Gesundheitsdetails: als Belastung („Belastung durch Pflege des Ehemanns“), als Familienanamnese bei Blutsverwandten („Mutter: Schilddrüsenerkrankung“) oder als bloßes Stichwort („Frage zum Ehemann besprochen“).
+- Was für eine andere Person veranlasst wird, steht nur mit dieser Person da („für Ehemann: Befund Neurologe anfordern“) – nie ohne, sonst liest es sich als Maßnahme für die behandelte Person.
+- Wird in derselben Aufnahme eine weitere Person untersucht oder behandelt (z. B. der Ehepartner im Anschluss – erkennbar etwa an einer Verabschiedung, nach der ein anderer Sprecher eigene Beschwerden schildert oder einen eigenen Befund besprochen bekommt), dokumentiere nur die Person, um die es zu Beginn geht, übernimm nichts von der weiteren, und schreib als letzten Punkt von A: „Achtung: Aufnahme enthält auch die Behandlung einer weiteren Person – nicht übernommen“.
+- Smalltalk gehört nicht hinein: Urlaub, Hobbys, Familie, Beruf, Politik, Wetter, Praxis-EDV – außer es wird als Ursache, Belastung oder Risikofaktor besprochen (Stress am Arbeitsplatz, Gartenarbeit bei der Frage nach FSME)."""
 
 COMPLETENESS_RULES = _COMPLETENESS_RULES.replace("{checkup}", "- Bei Gesundheitsuntersuchung, Check-up oder Vorsorge ist der Anlass nicht das einzige Thema: dokumentiere zusätzlich jede dabei genannte Beschwerde, Vorerkrankung, Dauermedikation, Risikofaktoren (z. B. Rauchen, Gewicht, Blutdruck, familiäre Belastung), Impf- und Vorsorgestatus und jeden Befund – soweit im Gespräch vorkommend.")
 
@@ -98,8 +118,13 @@ Nutze das folgende Glossar ausschließlich, um bereits im Transkript angedeutete
 FORM:
 - Telegrammstil: knappe Stichworte statt ganzer Sätze, keine Einleitung, keine Erläuterungen. Knapp heißt kurz formuliert – nicht weniger Themen.
 - Mehrere Anliegen innerhalb eines Abschnitts durch Semikolon trennen, jedes mit eigenem Stichwort.
-- Kein Befund-Abschnitt: körperliche Untersuchung und Befunde dokumentiert der Arzt selbst. Schreib keinen Abschnitt "B:" und keine Untersuchungsbefunde.
+- Kein Befund-Abschnitt: die körperliche Untersuchung dokumentiert der Arzt selbst. Schreib keinen Abschnitt "B:" und keine Untersuchungsbefunde (abgehört, getastet, Ultraschall, EKG am Gerät) – auch nicht in A oder PRO und auch nicht als „Untersuchung durchgeführt“. Im Gespräch genannte Labor- und Messwerte und mitgebrachte Befunde (CT, Arztbrief) stehen in A beim Anlass, mit Zahlen („Laborbesprechung: HbA1c 5,7 (vorher 6,0)“).
 - Keine Unterpunkte oder Überschriften wie "Vorerkrankungen:", "Vormedikation:" oder "Dauermedikation:" – die stehen in der Kartei. Eine Vorerkrankung oder ein Medikament nur erwähnen, wenn es zu einem Anliegen gehört (z. B. als Auslöser, Nebenwirkung oder Anlass einer Änderung), und dann beim Anliegen selbst.
+- PRO enthält, was beschlossen oder getan wurde – nicht, was erklärt wurde. Fehlen darf nichts davon, wenn es vorkommt: heute durchgeführte Impfungen (jede einzeln; abgelehnte oder verschobene als solche), Rezepte, Überweisungen, Krankschreibung mit Dauer, Medikamente mit Dosis (neu, geändert, abgesetzt, oder eine erwogene Dosisänderung), angeordnete Untersuchungen und Laborwerte, Wiedervorstellung.
+- Beratung als kurzes Stichwort mit der Empfehlung („progressive Muskelrelaxation empfohlen“), ohne die Erklärungen des Arztes nachzuerzählen.
+- Angebotenes oder Erwogenes als solches kennzeichnen („AU bei Bedarf angeboten“, „ggf. Überweisung Lymphologie“), nicht als beschlossen.
+- Einen Termin mit Datum und Uhrzeit nur, wenn beides eindeutig vereinbart wurde. Werden mehrere Daten genannt und bleibt offen, welches gilt, schreib nur „Termin vereinbart“ – rate kein Datum.
+- Medikamentennamen: Klingt ein Name im Transkript eindeutig nach einem Präparat aus dem Glossar und passt zum Zusammenhang, schreib das Präparat aus dem Glossar; sonst schreib ihn wie im Transkript und setze „(?)“ dahinter.
 - Verwende exakt diese zwei Abschnitte, ohne die Klammertexte zu wiederholen:
 
 A: (Anlass des Besuchs, dann jede Beschwerde bzw. jedes Anliegen einzeln mit Dauer und Verlauf)
