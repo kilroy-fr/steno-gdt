@@ -10,9 +10,9 @@ Aufgenommen wird nur auf Anforderung (Auftrag aus T2med oder Klick), nie dauerha
 
 Container und Ordner heißen weiter `transcribe-gdt(-web)`; umbenannt ist das Programm (Titel, GDT-Kennungen `STENO`/`STNO`).
 
-**Eine Codebasis für zwei Web-Apps.** Abgezweigt von `../ki-transcribe` bei `f6f5aa1`; seitdem wird nur noch hier entwickelt. `gespraech-web` (KI-Gesprächsanalyse, `transcribe.…`, Port 8010) ist in `../ki-transcribe/docker-compose.yml` definiert, baut aber aus **diesem** Ordner — ohne `GDT_DIR` (Anbindung aus, Steno-Endpunkte antworten 404) und mit eigenem `APP_TITLE`/`APP_SUBTITLE`. Dort gibt es keine Live-Mounts: eine Änderung hier erreicht gespraech-web erst mit `docker compose up -d --build gespraech-web` in `../ki-transcribe` — gebaut wird der Arbeitsstand dieses Ordners, auch Uncommittetes. Was in gespraech-web anders sein soll, gehört deshalb in Umgebungsvariablen, nicht in eine Kopie des Codes. Die `.dockerignore` hält `gdt/`, `logs/` und die Knopf-Build-Umgebung aus dem Build-Kontext. **Git:** `origin` = privates GitHub-Repo `kilroy-fr/steno-gdt` (Branch `master`). Das Remote `ki-transcribe` zeigt auf den lokalen Ordner und ist nur noch Historie — dort liegen nur Whisper-Patch, Diarisation und die Compose-Datei, App-Code kommt von dort nicht mehr.
+**Eine Codebasis für zwei Web-Apps.** Abgezweigt von `../ki-transcribe` bei `f6f5aa1`; seitdem wird nur noch hier entwickelt. `gespraech-web` (KI-Gesprächsanalyse, `transcribe.…`, Port 8010) ist in `../ki-transcribe/docker-compose.yml` definiert, baut aber aus **diesem** Ordner — ohne `GDT_DIR` (Anbindung aus, Steno-Endpunkte antworten 404) und mit eigenem `APP_TITLE`/`APP_SUBTITLE`. Dort gibt es keine Live-Mounts: eine Änderung hier erreicht gespraech-web erst mit `docker compose up -d --build gespraech-web` in `../ki-transcribe` — gebaut wird der Arbeitsstand dieses Ordners, auch Uncommittetes. Was in gespraech-web anders sein soll, gehört deshalb in Umgebungsvariablen, nicht in eine Kopie des Codes. Die `.dockerignore` hält `gdt/`, `logs/` und die Knopf-Build-Umgebung aus dem Build-Kontext. **Git:** `origin` = öffentliches GitHub-Repo `kilroy-fr/steno-gdt` (Branch `master`, kein GitHub-Fork) — keine Patientendaten, Zugangsdaten oder Schlüssel einchecken (`.env`, `.hf_token`, `gdt/`, `logs/`, `daten/` sind gitignored). Das Remote `ki-transcribe` zeigt auf den lokalen Ordner und ist nur noch Historie (auch für `whisper-patch/` und `diarize/`, übernommen am 20.10.2026); App-Code kommt von dort nicht mehr.
 
-**Eigener Web-Container, die Dienste dahinter sind geteilt.** `docker-compose.yml` definiert nur `transcribe-gdt-web` (Port 8011). Whisper (`diktat-whisper`) und Sprechertrennung (`diktat-diarize`) kommen aus `../ki-transcribe/docker-compose.yml`, ollama aus seinem eigenen Container — dasselbe Muster wie `ki-atteste`. `whisper-patch/` und `diarize/` gibt es deshalb hier nicht mehr; wo dieses Dokument sie erwähnt, sind die Dateien in `../ki-transcribe` gemeint, und Änderungen daran gehören dorthin. Kein `depends_on`: `docker compose up/down/build` in diesem Ordner fasst nur den eigenen Container an.
+**Eigenständig für andere, geteilt in der Praxis (seit 20.10.2026).** Damit das Repo sich verlinken lässt, bringt `docker-compose.yml` Whisper (`faster-whisper`, Container `steno-whisper`, Image auf festem Digest) und Sprechertrennung (`diarize`, `steno-diarize`) selbst mit; von außen kommen nur ollama (`ollama-net`) und Caddy (`caddy-proxy-network`). `whisper-patch/` und `diarize/` liegen deshalb wieder hier, das ist die Quelle. **In der Praxis** schaltet `docker-compose.praxis.yml` die beiden Dienste ab (`profiles: [eigene-dienste]`), biegt `WHISPER_HOST`/`DIARIZE_HOST` auf `diktat-whisper`/`diktat-diarize` aus `../ki-transcribe` um (geteilt mit gespraech-web und ki-atteste), macht `diktat-network` extern, mountet die GDT-Freigabe und setzt Arbeitsplätze und `GDT_DEBUG_DIR`. Eingeschaltet über `COMPOSE_FILE` in `.env` (gitignored) — fehlt das, startet `docker compose up` eigene Whisper/Diarisation daneben und schreibt GDT nach `./gdt` statt auf die Freigabe. Prüfen: `docker compose config --services` muss nur `transcribe-gdt-web` nennen. Die Aufteilung ist so gewählt, dass die aufgelöste Konfiguration des Web-Containers in der Praxis identisch blieb (gleicher Config-Hash, kein Neuanlegen) — deshalb heißt das interne Netz auch in der eigenständigen Variante `diktat-network`. Die laufenden `diktat-*`-Container bauen und mounten (Stand 20.10.2026) noch aus ihrer Kopie in `../ki-transcribe`; Änderungen an Patch oder Diarisation hier dorthin nachziehen, bis dessen Compose auf diesen Ordner zeigt. Kein `depends_on`.
 
 ---
 
@@ -21,8 +21,8 @@ Container und Ordner heißen weiter `transcribe-gdt(-web)`; umbenannt ist das Pr
 ```
 Steno-Knopf (Zimmer 1–3, Home) ─┐
 Browser (volle UI, /verlauf) ───┴► Caddy (Reverse Proxy) ──► transcribe-gdt-web (FastAPI, Port 8000, Host 127.0.0.1:8011)
-                                                                ├── diktat-whisper  (Transkription, GPU)    ┐ aus ../ki-transcribe,
-                                                                ├── diktat-diarize  (Sprechertrennung, GPU) ┘ geteilt
+                                                                ├── faster-whisper  (Transkription, GPU)    ┐ eigene Dienste; in der Praxis
+                                                                ├── diarize         (Sprechertrennung, GPU) ┘ diktat-* aus ../ki-transcribe
                                                                 ├── ollama (LLM, externer Container, geteilt)
                                                                 ├── GDT-Austauschordner ◄──► T2med (Praxisverwaltung)
                                                                 └── T2med-Server, FHIR-API (optional, HTTPS)
@@ -30,12 +30,12 @@ Browser (volle UI, /verlauf) ───┴► Caddy (Reverse Proxy) ──► tra
 
 Der Knopf spricht nur mit dem Server, nie direkt mit dem GDT-Ordner oder der FHIR-API: Aufträge holt er über `/gdt/order`, einen Deep Link aus T2med reicht er an `/fhir/context` weiter, Aufnahmen gibt er über `/steno/jobs` ab. Damit liegt die ganze T2med-Logik an einer Stelle, auf den Arbeitsplätzen braucht der Knopf keinen Zugriff auf die Freigabe (T2med selbst schon), und der FHIR-API-Schlüssel liegt nur auf dem Server.
 
-**Netzwerke (Docker, alle extern):**
-- `diktat-network` — angelegt von `ki-transcribe`: transcribe-gdt-web ↔ diktat-whisper ↔ diktat-diarize (auch gespraech-web und ki-atteste-web hängen darin)
+**Netzwerke (Docker):**
+- `diktat-network` — transcribe-gdt-web ↔ Whisper ↔ Sprechertrennung. Eigenständig von Compose angelegt (`transcribe-gdt_diktat-network`); in der Praxis extern, angelegt von `ki-transcribe` (auch gespraech-web und ki-atteste-web hängen darin)
 - `ollama-net` — transcribe-gdt-web ↔ ollama
 - `caddy-proxy-network` — Caddy ↔ transcribe-gdt-web (Route `steno.hausarzt-rothenburg.de`, siehe Wichtige Hinweise)
 
-Angesprochen werden die Dienste über ihre **Containernamen** (`diktat-whisper`, `diktat-diarize`), nicht über die Compose-Dienstnamen `faster-whisper`/`diarize` — die sind Aliase des ki-transcribe-Projekts.
+In der Praxis werden die geteilten Dienste über ihre **Containernamen** angesprochen (`diktat-whisper`, `diktat-diarize`), nicht über die Compose-Dienstnamen `faster-whisper`/`diarize` — die sind dort Aliase des ki-transcribe-Projekts. Eigenständig gelten die Dienstnamen (zugleich die Defaults in `server.py`).
 
 ---
 
@@ -52,7 +52,11 @@ transcribe-gdt/
 ├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, FHIR-Drittanbieter, Testplan
 ├── Dockerfile                 # Docker-Image für server.py (auch für gespraech-web)
 ├── .dockerignore              # Build-Kontext nur aus dem, was das Dockerfile kopiert (kein gdt/, logs/, client/)
-├── docker-compose.yml         # nur transcribe-gdt-web; Whisper/Diarisation/ollama extern
+├── docker-compose.yml         # transcribe-gdt-web + faster-whisper + diarize; ollama und Caddy extern
+├── docker-compose.praxis.yml  # Praxis: Whisper/Diarisation aus ki-transcribe, GDT-Freigabe (via COMPOSE_FILE in .env)
+├── whisper-patch/             # stt.py: gepatchter Whisper-Router (Bind-Mount), stt.py.upstream, README.md
+├── diarize/                   # Sprechertrennung: app.py (FastAPI + pyannote), Dockerfile, download_model.py, README.md
+├── THIRD-PARTY-NOTICES.md     # übernommener Code (asklaion, faster-whisper-server)
 ├── requirements-server.txt    # Server-Python-Dependencies
 ├── requirements-dev.txt       # + pytest
 ├── tests/                     # pytest: reine Funktionen + Endpoints gegen Dienst-Attrappen
@@ -68,7 +72,6 @@ transcribe-gdt/
 └── README.md                  # Hauptdokumentation
 ```
 
-`whisper-patch/` und `diarize/` liegen in `../ki-transcribe` (geteilte Container).
 
 ---
 
@@ -135,7 +138,7 @@ transcribe-gdt/
 
 Die Bereinigung läuft auf den **Einheiten vor der Sprecherzuordnung**: Schleifenwörter tragen über die Stille verteilte Zeitstempel und würden sonst reihum beiden Sprechern zugeschlagen — das zerhackt auch die echten Turns drumherum.
 
-**Ursachenbehebung: `whisper-patch/stt.py` (Bind-Mount in den Whisper-Container).** Über HTTP ist an die entscheidenden Decoder-Optionen nicht heranzukommen — der Server reicht nur `task`, `language`, `initial_prompt`, `word_timestamps`, `temperature`, `vad_filter` und `hotwords` durch (`routers/stt.py`). Er läuft aber aus einem Quellbaum (`uv run uvicorn --factory faster_whisper_server.main:create_app`), und der Dienst ist in *dieser* `docker-compose.yml` definiert: ein Read-only-Mount einer gepatchten `stt.py` über `/root/faster-whisper-server/faster_whisper_server/routers/stt.py` genügt, es braucht kein eigenes Image. Drei Optionen werden gesetzt:
+**Ursachenbehebung: `whisper-patch/stt.py` (Bind-Mount in den Whisper-Container).** Über HTTP ist an die entscheidenden Decoder-Optionen nicht heranzukommen — der Server reicht nur `task`, `language`, `initial_prompt`, `word_timestamps`, `temperature`, `vad_filter` und `hotwords` durch (`routers/stt.py`). Er läuft aber aus einem Quellbaum (`uv run uvicorn --factory faster_whisper_server.main:create_app`), und der Dienst ist in `docker-compose.yml` definiert: ein Read-only-Mount einer gepatchten `stt.py` über `/root/faster-whisper-server/faster_whisper_server/routers/stt.py` genügt, es braucht kein eigenes Image. Drei Optionen werden gesetzt:
 
 | Option | vorher | jetzt | Wirkung |
 |--------|--------|-------|---------|
@@ -145,7 +148,7 @@ Die Bereinigung läuft auf den **Einheiten vor der Sprecherzuordnung**: Schleife
 
 Dass upstream den Parameter kennt, zeigt der WebSocket-Pfad derselben Datei: dort steht `condition_on_previous_text: False` bereits im Original. Nur in die Datei-Endpunkte ist er nie durchgereicht worden.
 
-**Der Whisper-Dienst trägt deshalb kein Watchtower-Label mehr.** Der Mount legt sich über *jede* Version der Datei — ein automatisches Image-Update würde den alten Patch gegen einen neuen Rest des Pakets laufen lassen. Updates von Hand, Diff-Rezept in `whisper-patch/README.md`. Der Patch wirkt auch auf `ki-atteste` (geteilter Container); das ist beabsichtigt, Diktatschleifen sind dieselbe Fehlerart.
+**Der Whisper-Dienst trägt deshalb kein Watchtower-Label mehr.** Der Mount legt sich über *jede* Version der Datei — ein automatisches Image-Update würde den alten Patch gegen einen neuen Rest des Pakets laufen lassen. Updates von Hand, Diff-Rezept in `whisper-patch/README.md`. Das Image steht auf festem Digest (der, gegen den `stt.py.upstream` gezogen ist). Der Patch wirkt in der Praxis auch auf `ki-atteste` (geteilter Container); das ist beabsichtigt, Diktatschleifen sind dieselbe Fehlerart.
 
 **`ThinkingFilter`** in `server.py`: Filtert `<think>…</think>`-Blöcke aus dem SSE-Stream (für Reasoning-Modelle wie qwen3).
 
@@ -325,7 +328,7 @@ Ablauf mit dem **Knopf** (Normalfall): In T2med „Messung starten“ → T2med 
 | `FHIR_KUERZEL` / `FHIR_PSY_KUERZEL` | `KI` / `KI` | Kürzel des Freitext-Eintrags (max. 20 Zeichen) |
 | `FHIR_ANHANG` | `false` | Transkript als Anhang (DocumentReference); nie Psychotherapie/Direkt |
 
-Die Variablen der geteilten Container (Whisper: `WHISPER__*`; Diarisation: `PYANNOTE_MODEL`, `DIARIZE_DEVICE`, `TORCH_THREADS`, Build-Argument `TORCH_INDEX_URL`) stehen in `../ki-transcribe/docker-compose.yml` und dessen CLAUDE.md. `WHISPER__ALLOW_DOWNLOADS=true` dort ist Voraussetzung dafür, dass `WHISPER_MEDICAL_MODEL` und `WHISPER_FAST_MODEL` geladen werden.
+Die Variablen der geteilten Container (Whisper: `WHISPER__*`; Diarisation: `PYANNOTE_MODEL`, `DIARIZE_DEVICE`, `TORCH_THREADS`, Build-Argument `TORCH_INDEX_URL`) stehen bei den Diensten `faster-whisper` und `diarize` in `docker-compose.yml` (in der Praxis gelten die in `../ki-transcribe/docker-compose.yml`). `WHISPER__ALLOW_DOWNLOADS=true` ist Voraussetzung dafür, dass `WHISPER_MEDICAL_MODEL` und `WHISPER_FAST_MODEL` geladen werden.
 
 ---
 
@@ -339,7 +342,7 @@ pip install -r requirements-server.txt
 uvicorn server:app --reload --port 8000
 ```
 
-Mit Docker (fasst nur den eigenen Container an; `diktat-whisper`, `diktat-diarize` und `ollama` müssen laufen):
+Mit Docker (in der Praxis fasst das nur den eigenen Container an; `diktat-whisper`, `diktat-diarize` und `ollama` müssen laufen):
 ```bash
 docker compose up -d --build
 docker compose logs -f transcribe-gdt-web
@@ -363,8 +366,8 @@ Die Browser-UI hat keine Tests, am Knopf nur die Regeln, nicht Aussehen und Fens
 
 ## Wichtige Hinweise
 
-- **Alle Dienste hinter der Web-App sind geteilt und extern:** `diktat-whisper` und `diktat-diarize` (aus `../ki-transcribe`), `ollama` (eigener Container). Sie müssen laufen, und `diktat-network`, `ollama-net` und `caddy-proxy-network` müssen existieren — sonst bricht `docker compose up` hier mit „network … not found“ ab. Neustarts, Updates und Änderungen an Whisper-Patch oder Diarisation passieren in `../ki-transcribe` und wirken auf gespraech-web, ki-atteste und diesen Container zugleich.
+- **In der Praxis sind alle Dienste hinter der Web-App geteilt und extern** (`docker-compose.praxis.yml`): `diktat-whisper` und `diktat-diarize` (aus `../ki-transcribe`), `ollama` (eigener Container). Sie müssen laufen, und `diktat-network`, `ollama-net` und `caddy-proxy-network` müssen existieren — sonst bricht `docker compose up` hier mit „network … not found“ ab. Neustarts, Updates und Änderungen an Whisper-Patch oder Diarisation passieren in `../ki-transcribe` und wirken auf gespraech-web, ki-atteste und diesen Container zugleich.
 - **Geteilte Last:** Analysen aus gespraech-web und transcribe-gdt-web laufen auf derselben GPU, demselben Whisper und demselben ollama. Gleichzeitige Analysen warten aufeinander. `OLLAMA_NUM_CTX` und `OLLAMA_MODEL` bewusst gleich lassen wie in ki-transcribe: ein abweichendes `num_ctx` lässt ollama das Modell bei jedem Wechsel zwischen den Apps neu laden.
 - **Live-Mount im Dev-Betrieb:** `docker-compose.yml` bindet `server.py`, `prompts.py`, `medical_vocab.py`, `medikamente_wortliste.json`, `gdt.py`, `fhir.py`, `templates/` und `static/` read-only in den Container — Änderungen wirken ohne Rebuild, nur `docker compose restart transcribe-gdt-web` ist nötig. **Ein neues Modul** braucht dagegen `docker compose up -d --build`: `restart` übernimmt keinen neuen Mount, und das alte Image kennt die Datei nicht — der Server startet dann nicht (`ModuleNotFoundError`). Neue Dateien außerdem in `Dockerfile` (`COPY`) und `.dockerignore` (Positivliste!) eintragen, sonst fehlen sie auch in gespraech-web. Rebuild (`docker compose up -d --build`) braucht es nur bei `requirements-server.txt` oder `Dockerfile`. Ein Neustart verwirft laufende Knopf-Aufträge (nur im Speicher) — harmlos, die Knöpfe laden nach dem 404 erneut hoch, aber eine Analyse beginnt dann von vorn. `client/` gehört nicht in den Container; `./knopf` ist nur read-only gemountet (Knopf-Updates), eine neu bereitgelegte Version braucht keinen Neustart.
 - **Erreichbarkeit:** direkt nur `127.0.0.1:8011` auf dem Docker-Rechner; für die Arbeitsplätze `https://steno.hausarzt-rothenburg.de` — Caddy-Route in `../caddy-proxy/Caddyfile` → `transcribe-gdt-web:8000`, Let's-Encrypt-Zertifikat per IONOS DNS-01 wie die übrigen `hausarzt-rothenburg.de`-Routen, `request_body` 500 MB. Der DNS-Eintrag gehört zu IONOS (A → `192.168.5.20`, wie `transcribe.…`). Das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`. Auch der Steno-Knopf braucht diese Route: er lädt Gesprächsaudio hoch, das gehört nicht unverschlüsselt ins Praxisnetz. Eine Anmeldung gibt es nicht — wer `/steno/jobs` erreicht, kann Einträge nach T2med schicken; die Route antwortet deshalb außerhalb privater Adressen (`remote_ip private_ranges`) mit 403.
-- **`depends_on` nicht wieder einführen** — weder hier noch bei gespraech-web in ki-transcribe: dort stoppte `docker compose up -d --build gespraech-web` über `depends_on` den geteilten Whisper mit (seit der Umstellung auf diese Codebasis entfernt). Ein `up`/`down` hier fasst nur `transcribe-gdt-web` an.
+- **`depends_on` nicht wieder einführen** — weder hier noch bei gespraech-web in ki-transcribe: dort stoppte `docker compose up -d --build gespraech-web` über `depends_on` den geteilten Whisper mit (seit der Umstellung auf diese Codebasis entfernt). Ein `up`/`down` hier fasst in der Praxis nur `transcribe-gdt-web` an; eigenständig auch `faster-whisper` und `diarize`.

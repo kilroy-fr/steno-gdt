@@ -2,7 +2,7 @@
 
 Schreibt Arzt-Patienten-Gespräche und Psychotherapie-Sitzungen mit, fasst sie zusammen und übergibt die Dokumentation per GDT (optional per FHIR) an T2med. Lokal: faster-whisper für die Transkription, pyannote für die Sprechertrennung, ollama für die Zusammenfassung.
 
-Abzweig von [`ki-transcribe`](../ki-transcribe) — und inzwischen auch dessen Codebasis: `gespraech-web` (KI-Gesprächsanalyse) wird aus diesem Ordner gebaut, nur ohne T2med-Anbindung. Dieser Ordner bringt den Server mit (`transcribe-gdt-web`, Port 8011) und den Steno-Knopf für die Arbeitsplätze ([`client/`](client/README.md)). Whisper, Sprechertrennung und ollama werden mitbenutzt: `diktat-whisper` und `diktat-diarize` aus `ki-transcribe`, `ollama` aus seinem eigenen Container.
+Dieses Repo bringt alles mit, was auf dem Server läuft: die Web-App (`transcribe-gdt-web`, Port 8011), Whisper mit dem Patch gegen Wiederholschleifen ([`whisper-patch/`](whisper-patch/README.md)) und die Sprechertrennung ([`diarize/`](diarize/README.md)), dazu den Steno-Knopf für die Arbeitsplätze ([`client/`](client/README.md)). Von außen kommen nur ollama und ein Reverse Proxy für HTTPS. Ohne T2med-Anbindung (`GDT_DIR` leer) ist es eine reine Gesprächsanalyse im Browser.
 
 ## 🔴 Steno-Knopf
 
@@ -30,7 +30,7 @@ Einrichtung: [`client/README.md`](client/README.md) (Knopf) und [`T2MED-EINRICHT
 - **Sprechertrennung (Diarisation)** via pyannote.audio: trennt Arzt, Patient und weitere Anwesende im Transkript (`SPRECHER A:` / `SPRECHER B:` …). Läuft auf der GPU in einem eigenen Container, parallel zur Transkription. Jeder Satz wird geschlossen einem Sprecher zugeordnet, damit Wechsel nicht mitten im Satz liegen
 - Sprecherzuordnung: das LLM erschließt aus dem Gesprächsverlauf, welcher Marker der Arzt ist – so werden Arzt-Überlegungen nicht als gesicherte Diagnosen und Patienten-Rückfragen nicht als Verordnungen dokumentiert. Ohne Diarisation greift weiterhin die reine Kontext-Heuristik
 - **Vollständige Dokumentation auch langer Gespräche:** das Kontextfenster des LLM wird an die Transkriptlänge angepasst (`OLLAMA_NUM_CTX`), und die Prompts verlangen jedes Anliegen einzeln – gerade bei Vorsorgeuntersuchungen mit mehreren unabhängigen Beschwerden
-- **Schutz vor Whisper-Wiederholschleifen:** gepatchter Whisper-Router (`whisper-patch/` in `ki-transcribe`), VAD, automatisches Kürzen verbliebener Schleifen und eine Warnung, wenn dem Transkript dadurch Gespräch fehlt
+- **Schutz vor Whisper-Wiederholschleifen:** gepatchter Whisper-Router ([`whisper-patch/`](whisper-patch/README.md)), VAD, automatisches Kürzen verbliebener Schleifen und eine Warnung, wenn dem Transkript dadurch Gespräch fehlt
 - Modi: Vollanalyse, Kompaktdokumentation (A/B/PRO, Standard), Psychotherapie-Sitzung, Zusammenfassung, Bereinigung
 - A/B/PRO-Modus zeigt zusätzlich drei separat kopierbare Karten (Anamnese / Befund / Procedere)
 - Geschlechterauswahl (Patient / Patientin / neutral) für LLM-Ausgabe, auch nachträglich per Rerun auf der Analyse-Karte
@@ -56,20 +56,33 @@ Einrichtung: [`client/README.md`](client/README.md) (Knopf) und [`T2MED-EINRICHT
 
 ## 📋 Voraussetzungen
 
-- Docker & Docker Compose
-- Laufendes **`ki-transcribe`** mit `diktat-whisper` und `diktat-diarize` im Netzwerk `diktat-network` (GPU, Hugging-Face-Token usw. siehe dort)
+- Docker & Docker Compose, NVIDIA-Karte mit Container-Unterstützung (Docker Desktop mit WSL2 oder NVIDIA Container Toolkit; gemessen auf einer RTX 5080 mit 16 GB, die sich Whisper, Sprechertrennung und ollama teilen)
 - Laufender **ollama-Container** mit Modell (z. B. `gemma4:12b`) im Netzwerk `ollama-net`
-- Netzwerk `caddy-proxy-network` (Caddy-Reverse-Proxy)
+- **Caddy** (oder ein anderer Reverse Proxy) im Netzwerk `caddy-proxy-network` — das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`
+- **Hugging-Face-Token** für die Sprechertrennung (kostenlos, einmalig für den Build, siehe unten)
 
 ---
 
 ## 🚀 Installation
 
 ```bash
-# Nur die Web-App bauen und starten. Whisper, Sprechertrennung und ollama
-# werden dabei weder gestartet noch gestoppt (kein depends_on).
+# Netze, falls ollama und Caddy sie nicht schon angelegt haben
+docker network create ollama-net
+docker network create caddy-proxy-network
+docker network connect ollama-net <ollama-container>
+
+# Hugging-Face-Token: Bedingungen auf
+# https://huggingface.co/pyannote/speaker-diarization-community-1 akzeptieren,
+# Token (Rolle "read") unter https://huggingface.co/settings/tokens erzeugen
+echo "hf_xxxxxxxxxxxxxxxxxxxx" > .hf_token
+
+# Web-App, Whisper und Sprechertrennung bauen und starten
 docker compose up -d --build
 ```
+
+Der erste Build der Sprechertrennung lädt ~3 GB, der erste Aufruf von Whisper die Modelle (`WHISPER_MEDICAL_MODEL`, `WHISPER_FAST_MODEL`) — beides dauert einige Minuten. Der Token wird nur beim Build gebraucht und landet nicht im Image. Ohne GPU: in `docker-compose.yml` die `deploy`-Blöcke löschen, Whisper auf das `latest-cpu`-Image und `WHISPER__INFERENCE_DEVICE=cpu`, die Sprechertrennung auf `TORCH_INDEX_URL` `…/whl/cpu` stellen — funktioniert, ist aber um ein Vielfaches langsamer (Sprechertrennung ~0,6× Echtzeit). Intel Arc: [`diarize/README.md`](diarize/README.md).
+
+Teilt sich der Server Whisper und Sprechertrennung schon mit anderen Apps, schaltet eine Zusatzdatei die beiden Dienste hier ab und biegt die Web-App auf die vorhandenen Container um — so läuft es in der Praxis, für die Steno entstanden ist: [`docker-compose.praxis.yml`](docker-compose.praxis.yml).
 
 ### Test
 
@@ -81,7 +94,18 @@ curl http://localhost:8011/
 curl http://localhost:8011/health
 ```
 
-`docker-compose.yml` bindet Port `8011` auf `localhost` (8010 gehört gespraech-web aus `ki-transcribe`). Für die Arbeitsplätze braucht es eine Route im Caddy-Reverse-Proxy (`caddy-proxy-network`), denn das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`.
+`docker-compose.yml` bindet Port `8011` auf `localhost`. Für die Arbeitsplätze braucht es eine Route im Caddy-Reverse-Proxy (`caddy-proxy-network`), denn das Mikrofon funktioniert im Browser nur über HTTPS oder auf `localhost`. Eine Anmeldung hat Steno nicht — die Route gehört deshalb auf das Praxisnetz beschränkt, etwa so:
+
+```
+steno.example.de {
+    @extern not remote_ip private_ranges
+    respond @extern 403
+    request_body {
+        max_size 500MB
+    }
+    reverse_proxy transcribe-gdt-web:8000
+}
+```
 
 ---
 
@@ -111,7 +135,7 @@ Bearbeite `docker-compose.yml` (Service `transcribe-gdt-web`):
 
 ```yaml
 environment:
-  - WHISPER_HOST=diktat-whisper      # geteilter Container aus ki-transcribe
+  - WHISPER_HOST=faster-whisper      # Dienst in docker-compose.yml
   - WHISPER_PORT=8000
   - OLLAMA_HOST=ollama
   - OLLAMA_PORT=11434
@@ -119,7 +143,7 @@ environment:
   - OLLAMA_NUM_CTX=16384           # Kontextfenster (Untergrenze, wächst bei langen Gesprächen)
   - WHISPER_LANGUAGE=de
   - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
-  - DIARIZE_HOST=diktat-diarize      # geteilter Container aus ki-transcribe
+  - DIARIZE_HOST=diarize             # Dienst in docker-compose.yml
   - DIARIZE_PORT=8000
   - DIARIZE_MIN_SPEAKERS=0         # 0 = pyannote schätzt die Sprecherzahl selbst
   - DIARIZE_MAX_SPEAKERS=0         # 0 = ohne Obergrenze (Begleitperson, MFA)
@@ -129,17 +153,22 @@ environment:
   - WOERTERBUCH=/daten/woerterbuch.json  # eigenes Wörterbuch der Praxis (leer = aus)
   - TZ=Europe/Berlin               # Ortszeit für T2med und Log-Dateinamen
   - GDT_DIR=/gdt                   # GDT-Austauschordner mit T2med (leer = Anbindung aus)
-  - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3;004=Home
-  - GDT_DEBUG_DIR=/logs/gdt-debug  # Kopie jeder Übergabe an T2med (nur zum Einrichten, leer = aus)
+  - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3
+  - GDT_DEBUG_DIR=                 # /logs/gdt-debug = Kopie jeder Übergabe an T2med (nur zum Einrichten)
 ```
 
-Alle `GDT_*`-Variablen und die Einrichtung in T2med: [`T2MED-EINRICHTUNG.md`](T2MED-EINRICHTUNG.md).
+Alle `GDT_*`-Variablen und die Einrichtung in T2med: [`T2MED-EINRICHTUNG.md`](T2MED-EINRICHTUNG.md). Der GDT-Austauschordner ist zunächst `./gdt`; damit T2med ihn erreicht, gehört dort eine Freigabe hin, die auch die Arbeitsplätze sehen (Beispiel als CIFS-Volume: [`docker-compose.praxis.yml`](docker-compose.praxis.yml)).
 
-### Whisper und Sprechertrennung (geteilt)
+### Whisper und Sprechertrennung
 
-`diktat-whisper` und `diktat-diarize` sind in `../ki-transcribe/docker-compose.yml` definiert und
-werden dort gebaut, konfiguriert und neu gestartet. Sie dienen zugleich `ki-transcribe` und
-`ki-atteste`. Einrichtung (Hugging-Face-Token, GPU, Whisper-Patch) siehe README von `ki-transcribe`.
+`faster-whisper` (Container `steno-whisper`) läuft aus dem Image `fedirz/faster-whisper-server`, fest auf
+den Stand, für den [`whisper-patch/stt.py`](whisper-patch/README.md) gemacht ist; der Patch wird per
+Bind-Mount über den Router gelegt. `diarize` (Container `steno-diarize`) wird aus [`diarize/`](diarize/README.md)
+gebaut (pyannote.audio 4, `pyannote/speaker-diarization-community-1`) und läuft zur Laufzeit offline.
+
+Wer beide schon für andere Apps betreibt, legt sie nicht doppelt an: `docker-compose.praxis.yml` zeigt, wie
+eine Zusatzdatei sie abschaltet (`profiles`) und `WHISPER_HOST`/`DIARIZE_HOST` auf vorhandene Container
+umbiegt. Eingeschaltet wird so eine Datei über `COMPOSE_FILE` in `.env`.
 
 Im Frontend schaltet der Toggle „Sprechertrennung" die Funktion pro Analyse ab. Fällt der
 Diarisations-Container aus, läuft die Analyse ohne Sprecherkennzeichnung weiter. Die Transkription
@@ -213,8 +242,8 @@ docker logs transcribe-gdt-web
 ### Problem: „faster-whisper nicht erreichbar"
 
 ```bash
-docker logs diktat-whisper
-docker restart diktat-whisper
+docker logs steno-whisper
+docker compose restart faster-whisper
 ```
 
 ### Problem: „ollama nicht gefunden"
@@ -266,11 +295,12 @@ halluziniert.
 Die Analyse läuft dann bewusst ohne Sprecherkennzeichnung weiter. Ursache prüfen:
 
 ```bash
-curl http://127.0.0.1:8002/health      # {"status": "ok"} erwartet
-docker logs --tail 50 diktat-diarize
+docker exec steno-diarize python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/health').read())"
+docker logs --tail 50 steno-diarize
 ```
 
-Behoben wird es in `ki-transcribe` (siehe dort, „Sprechertrennung nicht verfügbar“).
+`{"status": "ok", …}` erwartet; `device` nennt die Karte. Meist fehlte beim Build der
+Hugging-Face-Token oder die Freigabe des Modells (siehe [`diarize/README.md`](diarize/README.md)).
 Der Health-Punkt „Sprecher" im Header bleibt rot, solange der Container startet.
 
 ### Problem: „Sprecher werden falsch zugeordnet"
@@ -286,11 +316,11 @@ perfekt; Fehler sitzen vor allem an Sprecherwechseln und bei kurzen Einwürfen.
    Personenzahl wirklich feststeht — eine harte Vorgabe von 2 ordnet Aussagen
    von Begleitpersonen falsch zu
 
-### Problem: „network diktat-network declared as external, but could not be found"
+### Problem: „network … declared as external, but could not be found"
 
-`ki-transcribe` legt das Netzwerk an. Dort einmal `docker compose up -d` laufen lassen (oder
-`docker network create diktat-network`), danach hier erneut starten. Dasselbe gilt für
-`ollama-net` (ollama) und `caddy-proxy-network` (Caddy).
+`ollama-net` und `caddy-proxy-network` legen ollama bzw. Caddy an — oder einmal von Hand
+`docker network create ollama-net` / `docker network create caddy-proxy-network`, danach erneut
+starten. Das Netz zwischen Web-App, Whisper und Sprechertrennung legt Compose selbst an.
 
 ### Problem: „Text-Säuberung / Analyse zu aggressiv/schwach"
 
@@ -323,7 +353,10 @@ transcribe-gdt/
 ├── T2MED-EINRICHTUNG.md       # T2med-Geräteeinrichtung, Austauschordner, erster Test
 ├── Dockerfile                 # Docker-Build für server.py (auch für gespraech-web)
 ├── .dockerignore              # hält gdt/, logs/ und client/ aus dem Build-Kontext
-├── docker-compose.yml         # nur transcribe-gdt-web; Whisper/Diarisation/ollama extern
+├── docker-compose.yml         # Web-App, Whisper, Sprechertrennung; ollama und Caddy extern
+├── docker-compose.praxis.yml  # Beispiel: geteilte Whisper/Diarisation, GDT-Freigabe per CIFS
+├── whisper-patch/             # gepatchter Whisper-Router gegen Wiederholschleifen
+├── diarize/                   # Sprechertrennung (pyannote.audio, eigener Container)
 ├── requirements-server.txt    # Server-Python-Dependencies
 ├── requirements-dev.txt       # + pytest
 ├── tests/                     # pytest (kein Docker nötig)
@@ -343,7 +376,8 @@ transcribe-gdt/
 
 ## 🤝 Nützliche Kommandos
 
-Alle Befehle betreffen nur `transcribe-gdt-web`. Whisper, Sprechertrennung und ollama bleiben unberührt.
+`restart transcribe-gdt-web` betrifft nur die Web-App; `up`/`down` ohne Dienstnamen auch Whisper und
+Sprechertrennung (mit `docker-compose.praxis.yml` nur die Web-App). ollama bleibt immer unberührt.
 
 ```bash
 # Container-Status
@@ -364,11 +398,11 @@ docker compose down
 # Ins Container-Terminal
 docker exec -it transcribe-gdt-web bash
 
-# KI-Gesprächsanalyse (gespraech-web) auf diesen Stand bringen
+# Nur Praxis: KI-Gesprächsanalyse (gespraech-web) auf diesen Stand bringen
 cd ../ki-transcribe && docker compose up -d --build gespraech-web
 ```
 
-Der Code liegt auf GitHub im privaten Repo [`kilroy-fr/steno-gdt`](https://github.com/kilroy-fr/steno-gdt).
+Der Code liegt auf GitHub: [`kilroy-fr/steno-gdt`](https://github.com/kilroy-fr/steno-gdt).
 
 ---
 

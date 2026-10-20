@@ -1,0 +1,21 @@
+# Diarisations-Service Requirements
+# ACHTUNG: torch/torchaudio kommen aus requirements-torch.txt (CPU-Index) und
+# muessen VOR dieser Datei installiert werden, sonst zieht pyannote CUDA-Wheels.
+
+fastapi~=0.141.1          # Web-Framework
+uvicorn~=0.52.3           # ASGI Server
+python-multipart~=0.0.32  # File-Upload Support
+pyannote.audio~=4.0       # Sprechersegmentierung + Speaker-Embeddings (community-1)
+
+# pyannote.audio 4 dekodiert Dateien ueber torchcodec statt torchaudio und
+# importiert es schon beim Laden der Pipeline. Benutzt wird es hier nicht — die
+# Pipeline bekommt einen fertigen Tensor (_decode() in app.py) —, aber ohne
+# passende Version bricht der Import ab. torchcodec ist an die torch-Version
+# gebunden, ohne das in den Metadaten zu deklarieren: 0.7 gehoert zu torch 2.8
+# (requirements-torch.txt), 0.8 erst zu 2.9. Von PyPI, also die CPU-Variante;
+# GPU-Dekodierung braucht es nicht.
+torchcodec~=0.7.0
+
+# Der fruehere Pin huggingface_hub<1.0 ist entfallen: er war nur noetig, weil
+# pyannote 3.4 `use_auth_token` an hf_hub_download() weiterreichte. Ab 4.0 heisst
+# der Parameter `token`.

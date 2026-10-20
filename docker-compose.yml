@@ -3,32 +3,33 @@ services:
   # ============================================================
   # Steno: Gespraeche mitschreiben, Dokumentation per GDT an T2med
   # ============================================================
-  # Nur die Web-App. Whisper, Sprechertrennung und ollama laufen schon und
-  # werden mitbenutzt — wie ki-transcribe und ki-atteste es auch tun:
-  #   diktat-whisper, diktat-diarize  -> ../ki-transcribe/docker-compose.yml
-  #   ollama                          -> eigener Container im ollama-net
-  # Deshalb kein depends_on: ein "up" hier startet, stoppt oder ersetzt
-  # keinen dieser Dienste.
+  # Bringt Whisper (faster-whisper) und Sprechertrennung (diarize) selbst mit,
+  # beide auf der NVIDIA-Karte. Von aussen kommen nur:
+  #   ollama  -> eigener Container im Netz ollama-net
+  #   Caddy   -> Reverse Proxy im Netz caddy-proxy-network (HTTPS fuers Mikrofon)
+  # Die Praxis, fuer die Steno entstanden ist, teilt Whisper und Sprechertrennung
+  # mit anderen Apps und schaltet die beiden Dienste hier deshalb ab:
+  # docker-compose.praxis.yml.
+  # Kein depends_on: ein Rebuild der Web-App soll Whisper nicht mitstoppen.
   transcribe-gdt-web:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: transcribe-gdt-web
-    # 8010 gehoert ki-transcribe (gespraech-web)
     ports:
       - "127.0.0.1:8011:8000"
     environment:
-      # Containernamen statt der Compose-Dienstnamen (faster-whisper, diarize):
-      # die Dienstnamen sind Aliase des ki-transcribe-Projekts, die Container-
-      # namen gelten in jedem Netz, in dem der Container haengt.
-      - WHISPER_HOST=diktat-whisper
+      # Dienstnamen unten; docker-compose.praxis.yml biegt sie auf die
+      # geteilten Container um.
+      - WHISPER_HOST=faster-whisper
       - WHISPER_PORT=8000
       - OLLAMA_HOST=ollama
       - OLLAMA_PORT=11434
       - OLLAMA_MODEL=gemma4:12b
-      # Kontextfenster (Untergrenze). Dieselbe wie in ki-transcribe: ollama
-      # laedt das Modell bei jedem num_ctx-Wechsel neu, ein abweichender Wert
-      # hier wuerde es zwischen beiden Apps hin- und herladen.
+      # Kontextfenster (Untergrenze). ollamas eigener Default auf einer 16-GB-
+      # Karte ist 4096 — dann wird jedes laengere Gespraech vorne abgeschnitten.
+      # Teilen sich mehrere Apps ein ollama: ueberall denselben Wert, sonst laedt
+      # ollama das Modell bei jedem Wechsel neu.
       - OLLAMA_NUM_CTX=16384
       - WHISPER_LANGUAGE=de
       - WHISPER_MEDICAL_MODEL=jimmymeister/whisper-large-v3-turbo-german-ct2
@@ -39,7 +40,7 @@ services:
       # Silero-VAD im Whisper-Server. Nur zum Abschalten da, falls VAD je sehr
       # leise Sprache wegschneidet — sonst anlassen, siehe CLAUDE.md.
       - WHISPER_VAD_FILTER=true
-      - DIARIZE_HOST=diktat-diarize
+      - DIARIZE_HOST=diarize
       - DIARIZE_PORT=8000
       # 0/0 = pyannote schaetzt die Sprecherzahl selbst (Diktat bleibt 1,
       # Begleitperson/MFA duerfen 3+ sein)
@@ -59,9 +60,10 @@ services:
       - TZ=Europe/Berlin
       # --- T2med per GDT (gdt.py, Einrichtung: T2MED-EINRICHTUNG.md) ---
       # Austauschordner im Container; der Mount unten legt fest, was dahinter liegt.
+      # Leer = ohne T2med (nur Browser-UI und Diktat).
       - GDT_DIR=/gdt
       # Arbeitsplatznummer = Endung der Austauschdateien (STNOT2MD.001 / T2MDSTNO.001)
-      - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3;004=Home
+      - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3
       - GDT_ID_PVS=T2MED
       - GDT_ID_GERAET=STENO
       - GDT_ZEICHENSATZ=2
@@ -72,12 +74,13 @@ services:
       # Zeile, 60 (GDT-2.1-Empfehlung) zerhackt die Absaetze. 990 = Formatgrenze.
       - GDT_ZEILENBREITE=990
       # Wie T2med den Austauschordner sieht - nur fuer den Transkript-Anhang,
-      # leer = kein Anhang. Beispiel: S:\_steno (Netzlaufwerk S: von sono-gdt)
+      # leer = kein Anhang. Beispiel: S:\_steno
       - GDT_PVS_PFAD=
       # Debug: je Uebergabe die Antwort des Sprachmodells und die GDT-Datei als
-      # Kopie nach ./logs/gdt-debug (T2med loescht das Original nach dem Lesen).
-      # Patientendaten! Nach dem Einrichten leer setzen und den Ordner leeren.
-      - GDT_DEBUG_DIR=/logs/gdt-debug
+      # Kopie (T2med loescht das Original nach dem Lesen). Patientendaten! Nur
+      # zum Einrichten auf /logs/gdt-debug setzen, danach wieder leer und den
+      # Ordner ./logs/gdt-debug leeren.
+      - GDT_DEBUG_DIR=
       # Zweites T2med-Geraet "Steno Psychotherapie" (T2MED-EINRICHTUNG.md).
       # Erst einkommentieren, wenn es an ALLEN Arbeitsplaetzen in T2med
       # eingerichtet ist — sonst holt niemand die Ergebnisdatei ab.
@@ -133,23 +136,113 @@ services:
       # Der Ordner, nicht die Datei: gespeichert wird per Temp-Datei + Umbenennen
       - ./daten:/daten
       - ./knopf:/knopf:ro
-      # GDT-Austauschordner, den auch T2med erreichen muss: S:\_steno auf der
-      # sono-gdt-Freigabe (Volume gdt-share unten, Zugangsdaten in .env).
-      # Zum Testen ohne T2med stattdessen "./gdt:/gdt".
-      - gdt-share:/gdt
+      # GDT-Austauschordner, den auch T2med erreichen muss. ./gdt genuegt zum
+      # Ausprobieren; fuer T2med eine Freigabe, die die Arbeitsplaetze sehen —
+      # etwa als CIFS-Volume wie in docker-compose.praxis.yml.
+      - ./gdt:/gdt
     networks:
       - diktat-network
       - ollama-network
       - caddy-proxy-network
     restart: unless-stopped
 
+  # ============================================================
+  # faster-whisper (Transkription, GPU)
+  # ============================================================
+  # Fest auf den Stand, fuer den whisper-patch/stt.py gemacht ist: der Mount
+  # legt sich ueber jede Version der Datei, ein neueres Image liefe also mit dem
+  # alten Router gegen einen fremden Rest des Pakets. Updates von Hand, Rezept
+  # in whisper-patch/README.md. Deshalb auch kein Watchtower-Label.
+  faster-whisper:
+    image: fedirz/faster-whisper-server:latest-cuda@sha256:0b64050ad0b9244745746b652473ee42a8d5454d501877a252c3e65f631ffc99
+    container_name: steno-whisper
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - WHISPER__MODEL=large-v3
+      - WHISPER__INFERENCE_DEVICE=cuda
+      - WHISPER__COMPUTE_TYPE=float16
+      # Pflicht: WHISPER_MEDICAL_MODEL und WHISPER_FAST_MODEL werden beim
+      # ersten Aufruf heruntergeladen
+      - WHISPER__ALLOW_DOWNLOADS=true
+      - TZ=Europe/Berlin
+    volumes:
+      - whisper-models:/root/.cache/huggingface
+      # Gepatchter Router: setzt condition_on_previous_text=False und zwei
+      # weitere Decoder-Optionen, an die die HTTP-Schnittstelle nicht
+      # heranreicht. Ohne das laeuft Whisper in Wiederholschleifen, aus denen
+      # es bis zum Dateiende nicht mehr herauskommt (gemessen: 9612 von 10376
+      # Woertern einer 36-min-Aufnahme). Details: whisper-patch/README.md
+      - ./whisper-patch/stt.py:/root/faster-whisper-server/faster_whisper_server/routers/stt.py:ro
+    networks:
+      - diktat-network
+    restart: unless-stopped
+
+  # ============================================================
+  # Diarisation (Sprechertrennung, GPU) – pyannote.audio
+  # ============================================================
+  # Erster Build braucht ./.hf_token (Hugging-Face-Token, das Modell ist
+  # gated) – siehe diarize/README.md. Kartenwechsel sind reine Konfiguration:
+  # TORCH_INDEX_URL waehlt das Wheel, der deploy-Block die Zuteilung,
+  # DIARIZE_DEVICE=auto erkennt CUDA bzw. Intel XPU selbst.
+  diarize:
+    build:
+      context: ./diarize
+      dockerfile: Dockerfile
+      args:
+        # NVIDIA: cu128 ist ab Blackwell Pflicht (RTX 50xx = sm_120).
+        # Intel Arc: https://download.pytorch.org/whl/xpu
+        # Ohne GPU: https://download.pytorch.org/whl/cpu (dann ~0,6x Echtzeit
+        # und deploy-Block loeschen)
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
+      secrets:
+        - hf_token
+    container_name: steno-diarize
+    environment:
+      # Muss zum Default in diarize/download_model.py passen: beim Build wird
+      # nur dieser vorgeladen, zur Laufzeit ist der Container offline.
+      - PYANNOTE_MODEL=pyannote/speaker-diarization-community-1
+      - DIARIZE_DEVICE=auto
+      # Greift nur, wenn kein Grafikgeraet gefunden wird (CPU-Rueckfall).
+      - TORCH_THREADS=8
+      - TZ=Europe/Berlin
+    # pyannote braucht nur 1–2 GB VRAM und laeuft nur waehrend einer Analyse;
+    # die Karte teilt es mit Whisper (und ggf. ollama). Intel Arc unter Docker
+    # Desktop/WSL2: siehe diarize/README.md.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - diktat-network
+    restart: unless-stopped
+
 # ============================================================
-# NETZWERKE — alle extern, angelegt von ki-transcribe bzw. ollama/Caddy
+# SECRETS
 # ============================================================
+# Hugging-Face-Token, nur zur Build-Zeit (gated pyannote-Modell).
+# Als BuildKit-Secret gemountet, landet also nicht im Image.
+secrets:
+  hf_token:
+    file: ./.hf_token
+
+# ============================================================
+# NETZWERKE
+# ============================================================
+# diktat-network verbindet Web-App, Whisper und Sprechertrennung und wird hier
+# angelegt. In der Praxis ist es das externe Netz der geteilten Dienste
+# (docker-compose.praxis.yml) — daher der Name. ollama und Caddy bringen ihre
+# Netze selbst mit.
 networks:
   diktat-network:
-    external: true
-    name: diktat-network
 
   ollama-network:
     external: true
@@ -162,15 +255,6 @@ networks:
 # ============================================================
 # VOLUMES
 # ============================================================
-# GDT-Austauschordner auf der Freigabe von sono-gdt (statt ./gdt): Unterordner
-# _steno, an den Arbeitsplaetzen S:\_steno. Der Ordner muss existieren. Der
-# Unterstrich ist noetig, sonst haelt sono-gdt ihn fuer einen Patientenordner.
-# Gemountet wird nur _steno, nicht die Ultraschallbilder.
-# Zugangsdaten nicht einchecken - in .env ablegen.
 volumes:
-  gdt-share:
-    driver: local
-    driver_opts:
-      type: cifs
-      device: //192.168.2.70/sono-gdt/_steno
-      o: "username=${GDT_SMB_USER},password=${GDT_SMB_PASSWORD},domain=${GDT_SMB_DOMAIN:?GDT_SMB_DOMAIN in .env fehlt},uid=0,gid=0,file_mode=0660,dir_mode=0770,vers=3.0"
+  # Whisper-Modelle (mehrere GB), ueberleben jedes Neuanlegen des Containers
+  whisper-models:

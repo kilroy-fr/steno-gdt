@@ -1,0 +1,50 @@
+# ============================================================
+# Praxis Rothenburg: Abweichungen von docker-compose.yml
+# ============================================================
+# Eingeschaltet ueber .env (gitignored):
+#   COMPOSE_PATH_SEPARATOR=;
+#   COMPOSE_FILE=docker-compose.yml;docker-compose.praxis.yml
+# Danach wirken alle docker-compose-Befehle in diesem Ordner wie gewohnt.
+# Pruefen: docker compose config --services  ->  nur transcribe-gdt-web
+#
+# Whisper und Sprechertrennung laufen hier nicht aus diesem Ordner, sondern
+# als diktat-whisper/diktat-diarize aus ../ki-transcribe — geteilt mit
+# gespraech-web und ki-atteste. Ein "up"/"down" hier fasst sie nicht an.
+services:
+  transcribe-gdt-web:
+    environment:
+      # Containernamen statt der Compose-Dienstnamen (faster-whisper, diarize):
+      # die Dienstnamen sind Aliase des ki-transcribe-Projekts, die Container-
+      # namen gelten in jedem Netz, in dem der Container haengt.
+      - WHISPER_HOST=diktat-whisper
+      - DIARIZE_HOST=diktat-diarize
+      - GDT_ARBEITSPLAETZE=001=Sprechzimmer 1;002=Sprechzimmer 2;003=Sprechzimmer 3;004=Home
+      # Patientendaten! Nach dem Einrichten leer setzen und ./logs/gdt-debug leeren.
+      - GDT_DEBUG_DIR=/logs/gdt-debug
+    volumes:
+      # S:\_steno auf der sono-gdt-Freigabe (Volume gdt-share unten), ersetzt ./gdt
+      - gdt-share:/gdt
+
+  # Abgeschaltet: nur mit "--profile eigene-dienste" zu starten
+  faster-whisper:
+    profiles: [eigene-dienste]
+  diarize:
+    profiles: [eigene-dienste]
+
+networks:
+  # Angelegt von ../ki-transcribe
+  diktat-network:
+    external: true
+    name: diktat-network
+
+# GDT-Austauschordner auf der Freigabe von sono-gdt: Unterordner _steno, an den
+# Arbeitsplaetzen S:\_steno. Der Ordner muss existieren. Der Unterstrich ist
+# noetig, sonst haelt sono-gdt ihn fuer einen Patientenordner. Gemountet wird
+# nur _steno, nicht die Ultraschallbilder. Zugangsdaten in .env.
+volumes:
+  gdt-share:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //192.168.2.70/sono-gdt/_steno
+      o: "username=${GDT_SMB_USER},password=${GDT_SMB_PASSWORD},domain=${GDT_SMB_DOMAIN:?GDT_SMB_DOMAIN in .env fehlt},uid=0,gid=0,file_mode=0660,dir_mode=0770,vers=3.0"
