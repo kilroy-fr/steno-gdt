@@ -26,7 +26,7 @@ import fhir
 import gdt
 import installation
 import server
-from test_fhir import fhir_order
+from test_fhir import BASE, fhir_order
 from test_gdt import fields_of, t2med_order
 
 
@@ -190,6 +190,33 @@ def test_unassigned_recording_is_assigned_via_fhir(live, fake, tmp_path, monkeyp
         steno.upload_step(api, spool, spool.entries()[0], events)
         time.sleep(0.05)
     assert len(fake.fhir_bundles()) == 1
+
+
+def test_unassigned_recording_follows_server_when_fhir_is_locked(live, fake, tmp_path, monkeypatch):
+    """Sperrt T2med den FHIR-Zugang, schickt der Server wartende Zuordnungen
+    selbst per GDT — der Knopf zieht nach, statt "ohne Patient" stehen zu lassen."""
+    api, gdt_dir = live
+    monkeypatch.setattr(server, "FHIR", fhir.Settings(api_key="geheim", hosts=("t2med.praxis",)))
+    monkeypatch.setattr(server, "_fhir_lock", "")
+    spool, events = steno.Spool(tmp_path / "spool"), queue.Queue()
+    entry = make_entry(state="bereit")
+    write_flac(spool.audio(entry))
+    spool.save(entry)
+    end = time.monotonic() + 10
+    while (current := spool.entries()[0]).state != "zuordnen":
+        assert time.monotonic() < end, current
+        steno.upload_step(api, spool, current, events)
+        time.sleep(0.05)
+    steno.upload_step(api, spool, current, events)               # wartet weiter
+    assert spool.entries()[0].state == "zuordnen"
+    fake.fhir_status = 403
+    with pytest.raises(ValueError):
+        api.fhir_context("001", {"kontextId": "kontext-123", "fhirBasisUrl": BASE})
+    while spool.entries():
+        assert time.monotonic() < end, spool.entries()
+        steno.upload_step(api, spool, spool.entries()[0], events)
+        time.sleep(0.05)
+    assert fields_of(gdt_dir / "T2MDSTNO.001")["3000"] == ["0"]
 
 
 def test_assignment_after_server_restart_reuploads_with_patient(live, tmp_path, monkeypatch):

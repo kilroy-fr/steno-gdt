@@ -62,7 +62,7 @@ from PIL import ImageTk
 import installation
 import knopf
 
-VERSION = "0.46.0"
+VERSION = "0.47.0"
 
 APP_DIR = Path(os.environ.get("APPDATA") or Path.home()) / "Steno"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Steno"
@@ -162,7 +162,8 @@ class Config:
 @dataclass
 class Entry:
     """Eine Aufnahme im Ausgang. state: aufnahme -> bereit -> hochgeladen -> (geloescht) | fehler,
-    mit FHIR ohne Patient: hochgeladen -> zuordnen -> (Klick auf "Steno" in T2med) -> hochgeladen."""
+    mit FHIR ohne Patient: hochgeladen -> zuordnen -> (Klick auf "Steno" in T2med oder
+    FHIR-Zugang gesperrt, dann per GDT) -> hochgeladen."""
     id: str
     ap: str
     order: dict | None
@@ -1240,6 +1241,14 @@ def upload_step(api: Api, spool: Spool, entry: Entry, events: queue.Queue):
             spool.save(entry)
             log.info(f"{entry.id}: fertig ohne Patient, wartet auf Zuordnung")
             events.put(("unassigned", entry))
+    elif entry.state == "zuordnen":
+        # Der Server schickt sie selbst weiter, wenn T2med den FHIR-Zugang
+        # sperrt (per GDT ohne Patient); unbekannt = Neustart, assign_entry() laedt neu hoch
+        job = api.status(entry.id)
+        if job and job["state"] != "zuordnen":
+            entry.state, entry.detail, entry.summary = "hochgeladen", "", ""
+            spool.save(entry)
+            log.info(f"{entry.id}: vom Server ohne Zuordnung weitergeschickt ({job['state']})")
 
 
 def assign_entry(api: Api, spool: Spool, entry: Entry, order: dict, events: queue.Queue):

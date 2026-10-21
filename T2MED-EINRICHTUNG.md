@@ -224,7 +224,12 @@ Grundlage ist T2meds Integrationsleitfaden: [T2med/fhir-demoapplication](https:/
 - Ein **API-Schlüssel** für Steno als Drittanbieter, von T2med. Der öffentliche Test-Schlüssel aus der
   Demoanwendung reicht nur zum Ausprobieren: Er erlaubt **100 Anfragen je Start des T2med-Servers**, danach
   antwortet T2med mit 403, bis der T2med-Server neu startet. Steno braucht je Gespräch zwei Anfragen
-  (Patient lesen, Dokumentation schreiben).
+  (Patient lesen, Dokumentation schreiben). Ist der Schlüssel gesperrt, wechselt Steno von selbst auf GDT
+  (ab Server 0.47): die Übergabe, an der es auffiel, und alles ohne Patient gehen per GDT an
+  „Ext. Aufträge“ (mit dem Patientennamen im Kommentar, falls bekannt), ein Klick auf „Steno“ meldet
+  „bitte „Messung starten“ benutzen“. Die erste FHIR-Anfrage, die nach dem Neustart wieder durchgeht
+  (meist ein Klick auf „Steno“), schaltet zurück. Dafür muss das GDT-Gerät „Steno“ an jedem Arbeitsplatz
+  eingerichtet sein.
 - Der Docker-Rechner erreicht den T2med-Server per HTTPS (Port aus der `fhirBasisUrl`, z. B. `16567`).
 - Steno-Knopf ab Version 0.31.
 

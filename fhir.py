@@ -65,6 +65,12 @@ class FhirError(Exception):
         super().__init__(message)
         self.status, self.retry, self.unclear = status, retry, unclear
 
+    @property
+    def locked(self) -> bool:
+        """T2med sperrt den API-Schluessel — der Test-Schluessel nach 100
+        Anfragen, bis der T2med-Server neu startet."""
+        return self.status == 403
+
 
 # ============================================================
 # EINSTELLUNGEN

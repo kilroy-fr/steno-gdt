@@ -29,6 +29,7 @@ def steno_fhir(fake, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "GDT", gdt.Settings(directory=str(tmp_path),
                                                     workstations={"001": "Sprechzimmer 1"}))
     monkeypatch.setattr(server, "FHIR", settings())
+    monkeypatch.setattr(server, "_fhir_lock", "")
     monkeypatch.setattr(server, "gdt_orders", gdt.OrderBook())
     monkeypatch.setattr(server, "steno_jobs", {})
     monkeypatch.setattr(server, "steno_streams", {})
@@ -311,6 +312,55 @@ def test_fhir_disabled_on_server_sends_gdt_without_patient(steno_fhir, fake, tmp
     job = wait(steno_fhir, upload(steno_fhir, order=json.dumps(fhir_order())).json()["id"])
     assert job["patid"] == "0" and not fake.fhir_requests
     assert "abgeschaltet" in " ".join(fields_of(tmp_path / "T2MDSTNO.001")["6227"])
+
+
+LOCKED = {"resourceType": "OperationOutcome",
+          "issue": [{"severity": "error", "diagnostics": "Limit erreicht"}]}
+
+
+def test_locked_api_key_switches_to_gdt(steno_fhir, fake, tmp_path):
+    """Test-Schluessel nach 100 Anfragen gesperrt (403, bis T2med neu startet):
+    die Uebergabe geht per GDT ohne Patient, der Name steht im Kommentar —
+    und bis zur naechsten gelungenen FHIR-Anfrage arbeitet Steno wie ohne FHIR."""
+    fake.fhir_status, fake.fhir_outcome = 403, LOCKED
+    job = wait(steno_fhir, upload(steno_fhir, order=json.dumps(fhir_order())).json()["id"])
+    assert (job["state"], job["file"], job["patid"]) == ("gesendet", "T2MDSTNO.001", "0")
+    note = " ".join(fields_of(tmp_path / "T2MDSTNO.001")["6227"])
+    assert "gesperrt" in note and "Müller, Hans" in note
+    assert steno_fhir.get("/steno").json()["fhir"] is False
+    (tmp_path / "T2MDSTNO.001").unlink()                           # T2med holt ab
+
+    job = wait(steno_fhir, upload(steno_fhir).json()["id"])          # ohne Patient: GDT statt zuordnen
+    assert (job["state"], job["patid"]) == ("gesendet", "0")
+    (tmp_path / "T2MDSTNO.001").unlink()
+
+    r = steno_fhir.post("/fhir/context", json=context_body())
+    assert r.status_code == 502 and "Messung starten" in r.json()["detail"]
+    fake.fhir_status, fake.fhir_outcome = 200, None                 # T2med neu gestartet
+    assert steno_fhir.post("/fhir/context", json=context_body()).status_code == 200
+    assert steno_fhir.get("/steno").json()["fhir"] is True
+    job = wait(steno_fhir, upload(steno_fhir, order=json.dumps(fhir_order())).json()["id"])
+    assert job["file"] == "FHIR" and not list(tmp_path.glob("T2MD*"))
+
+
+def test_lock_sends_waiting_assignments_via_gdt(steno_fhir, fake, tmp_path):
+    """Was auf eine Zuordnung wartet, kaeme mit gesperrtem Zugang nie an."""
+    first = upload(steno_fhir).json()["id"]
+    wait_for_state(steno_fhir, first, "zuordnen")
+    fake.fhir_status, fake.fhir_outcome = 403, LOCKED
+    assert steno_fhir.post("/fhir/context", json=context_body()).status_code == 502
+    job = wait(steno_fhir, first)
+    assert (job["state"], job["patid"]) == ("gesendet", "0")
+
+
+def test_lock_keeps_patient_of_rejected_assignment(steno_fhir, fake, tmp_path):
+    fake.fhir_status = 422
+    first = upload(steno_fhir, order=json.dumps(fhir_order())).json()["id"]
+    wait_for_state(steno_fhir, first, "zuordnen")
+    fake.fhir_status, fake.fhir_outcome = 403, LOCKED
+    steno_fhir.post("/fhir/context", json=context_body())
+    assert wait(steno_fhir, first)["patid"] == "0"
+    assert "Müller, Hans" in " ".join(fields_of(tmp_path / "T2MDSTNO.001")["6227"])
 
 
 def test_psycho_via_fhir_has_own_code_and_no_attachment(steno_fhir, fake, monkeypatch):

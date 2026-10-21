@@ -45,7 +45,9 @@ Auftrag bleibt beim Diktieren offen.
 
 **Mit FHIR** (falls auf dem Server eingerichtet, `T2MED-EINRICHTUNG.md` Abschnitt 4): statt „Messung starten“ in der
 T2med-Menüleiste auf **Steno** klicken. Die Aufnahme startet sofort, auch direkt nach dem Start des Knopfs. Neben dem
-Knopf steht kurz „T2med: Patient wird geladen…“, dann der Name.
+Knopf steht kurz „T2med: Patient wird geladen…“, dann der Name. Meldet der Knopf „… API-Schlüssel ab … bitte
+„Messung starten“ benutzen“, ist der FHIR-Zugang gesperrt (Test-Schlüssel, bis zum Neustart des T2med-Servers):
+dann wie ohne FHIR mit „Messung starten“ arbeiten, Steno schickt bis dahin alles per GDT.
 
 - Mit gedrückter Maustaste (irgendwo auf dem Knopf) lässt sich das Fenster verschieben, die Position wird gemerkt.
 - P-Therapie und S-Stunde gelten für die laufende bzw. nächste Aufnahme. Danach steht der Knopf wieder auf

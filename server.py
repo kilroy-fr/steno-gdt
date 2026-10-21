@@ -41,7 +41,7 @@ from medical_vocab import CORRECTION_TERMS, MEDICAL_GLOSSARY
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VERSION = "0.46.10"
+VERSION = "0.47.0"
 
 
 def _flag(value: str) -> bool:
@@ -2054,7 +2054,12 @@ async def _deliver_fhir(ap: str, order: gdt.Order, text: str, transcript: str, m
     if FHIR.attachment and transcript and not psycho and mode != "direkt":
         extra = _attachment_text(text, transcript, started)
     entries = fhir.build_entries(FHIR, ctx, text, mode, lines, started, psycho, extra)
-    await fhir.send(FHIR, ctx, entries, VERSION, request_id)
+    try:
+        await fhir.send(FHIR, ctx, entries, VERSION, request_id)
+    except fhir.FhirError as e:
+        _fhir_result(e)
+        raise
+    _fhir_result()
     logger.info(f"An T2med übergeben (FHIR): {order.label}, {len(text)} Zeichen, "
                 f"{', '.join(label for label, _ in entries)}")
     if GDT_DEBUG_DIR and not psycho:
@@ -2136,10 +2141,18 @@ async def fhir_context(request: Request):
         raise HTTPException(status_code=400, detail=str(e))
     device = "psy" if body.get("art") == "psycho" else ""
     try:
+        # Auch bei gesperrtem Zugang: nach einem Neustart von T2med ist dieser
+        # Klick meist die erste Anfrage, die wieder durchgeht
         patient = await fhir.read_patient(FHIR, ctx, VERSION)
     except fhir.FhirError as e:
+        _fhir_result(e)
         logger.warning(f"FHIR-Kontext an Arbeitsplatz {ap}: {e}")
-        raise HTTPException(status_code=502, detail=str(e))
+        detail = str(e)
+        if e.locked:
+            detail += (". Bis zum Neustart des T2med-Servers bitte in T2med „Messung starten“ "
+                       "benutzen (GDT).")
+        raise HTTPException(status_code=502, detail=detail)
+    _fhir_result()
     order = fhir.order_from_patient(patient, ctx, ap, time.time(), device)
     logger.info(f"FHIR-Kontext an Arbeitsplatz {ap}: {order.label}"
                 + (" (Psychotherapie)" if device else ""))
@@ -2162,7 +2175,9 @@ async def fhir_context(request: Request):
 # Dokumentation als GDT-Datei zurueck; kam er per FHIR (Drittanbieter-Knopf in
 # T2med, fhir.py), als FHIR-Transaktion in denselben Kontext. Lehnt T2med die
 # FHIR-Uebergabe ab (Token abgelaufen, Kontext verfallen), wartet sie ebenfalls
-# auf eine neue Zuordnung — verloren geht nichts.
+# auf eine neue Zuordnung — verloren geht nichts. Sperrt T2med den API-Schluessel
+# (Test-Schluessel nach 100 Anfragen), geht alles per GDT, bis FHIR wieder
+# durchkommt (_fhir_lock).
 #
 # Bewusst nur im Speicher: die Aufnahme bleibt auf dem Arbeitsplatz liegen,
 # bis der Auftrag hier "gesendet" meldet. Kennt der Server die Auftrags-ID
@@ -2227,6 +2242,7 @@ class StenoJob:
     warning: str = ""
     file: str = ""             # GDT-Datei oder "FHIR"
     patid: str = ""
+    lost_patient: str = ""     # zuordnen nach Ablehnung durch T2med: fuer wen sie war
     cancelled: bool = False
     task: asyncio.Task | None = None
 
@@ -2498,6 +2514,39 @@ def _fhir_patient(order: gdt.Order) -> str:
     return name
 
 
+# Gesperrter FHIR-Zugang: der Test-Schluessel erlaubt 100 Anfragen je
+# T2med-Serverprozess, danach antwortet T2med mit 403, bis jemand den
+# T2med-Server neu startet. Bis dahin arbeitet Steno wie ohne FHIR: ohne
+# Patient per GDT an "Ext. Aufträge" statt "zuordnen" (auch, was schon auf eine
+# Zuordnung wartet), und eine abgelehnte FHIR-Uebergabe geht per GDT ohne
+# Patient, mit dem Namen im Kommentar. Jede gelungene FHIR-Anfrage hebt die
+# Sperre auf — nach dem Neustart meist der erste Klick auf "Steno" in T2med.
+_fhir_lock = ""                 # Meldung von T2med; leer = nicht gesperrt
+
+
+def _fhir_active() -> bool:
+    return FHIR.enabled and not _fhir_lock
+
+
+def _fhir_result(error: fhir.FhirError | None = None):
+    """Nach jeder FHIR-Anfrage: gelungen (None) hebt die Sperre auf, 403 setzt sie."""
+    global _fhir_lock
+    if error is None:
+        if _fhir_lock:
+            logger.info("FHIR-Zugang wieder frei – ohne Patient wird wieder zugeordnet")
+        _fhir_lock = ""
+        return
+    if not error.locked or _fhir_lock:
+        return
+    _fhir_lock = str(error)
+    logger.warning(f"FHIR-Zugang gesperrt ({error}) – bis zur nächsten gelungenen Anfrage per GDT")
+    for job in steno_jobs.values():
+        if job.state == "zuordnen":
+            # Ein Klick auf "Steno" kaeme jetzt nicht durch: per GDT ohne Patient
+            job.state, job.detail, job.finished = "sendet", "", 0.0
+            job.task = _spawn(_steno_run(job, _steno_send))
+
+
 async def _steno_send_fhir(job: StenoJob, notes: list) -> str:
     """"" = in T2med, sonst der Grund, warum T2med ablehnt. Wirft StenoError,
     wenn unklar ist, ob T2med uebernommen hat — dann weder wiederholen noch
@@ -2628,17 +2677,28 @@ async def _steno_send(job: StenoJob):
         await asyncio.wait({prev.task}, timeout=FHIR.timeout + 2 * _STENO_SEND_INTERVAL)
     notes = [n for n in (job.mode_note, _steno_replace_note(job)) if n]
     order = job.order
-    if FHIR.enabled and not order:
+    if _fhir_active() and not order:
         _steno_unassigned(job, "Ohne Patient.")
         return
-    if FHIR.enabled and order.fhir:
+    if FHIR.enabled and order and order.fhir:
+        # Auch bei gesperrtem Zugang erst FHIR: war T2med inzwischen neu
+        # gestartet, kommt die Dokumentation so doch beim Patienten an
         reason = await _steno_send_fhir(job, notes)
-        if reason:
+        if reason and _fhir_lock:
+            notes.append(f"FHIR-Zugang gesperrt. Patient laut T2med-Kontext: {_fhir_patient(order)}.")
+            await _steno_send_gdt(job, None, notes)
+        elif reason:
             # Der Kontext taugt nicht mehr (Token abgelaufen, aelter als 4 h):
             # mit einem frischen Klick in T2med neu zuordnen
-            _steno_unassigned(job, f"T2med hat die Übergabe für {order.label} abgelehnt ({reason}).")
+            _steno_unassigned(job, f"T2med hat die Übergabe für {order.label} abgelehnt ({reason}).",
+                              _fhir_patient(order))
             return
-        job.file, job.patid = "FHIR", order.patid
+        else:
+            job.file, job.patid = "FHIR", order.patid
+    elif not order and job.lost_patient:
+        # Wartete auf eine Zuordnung, bis der FHIR-Zugang gesperrt wurde
+        notes.append(f"Von T2med per FHIR abgelehnt. Patient laut T2med-Kontext: {job.lost_patient}.")
+        await _steno_send_gdt(job, None, notes)
     elif order and order.fhir:
         notes.append(f"FHIR ist auf dem Server abgeschaltet. "
                      f"Patient laut T2med-Kontext: {_fhir_patient(order)}.")
@@ -2650,13 +2710,14 @@ async def _steno_send(job: StenoJob):
     job.state = "gesendet"
 
 
-def _steno_unassigned(job: StenoJob, why: str):
+def _steno_unassigned(job: StenoJob, why: str, patient: str = ""):
     """Mit FHIR geht nichts mehr per GDT an "Ext. Aufträge" — dort holte T2med
     nicht ab, wo das GDT-Geraet fehlt (Sprechzimmer 1, 14.10.2026), und
     zuordnen muesste man dort ohnehin von Hand. Stattdessen wartet die
     Dokumentation am Knopf: Klick auf "Steno" beim Patienten in T2med, der
-    Knopf fragt, ob sie zu diesem gehoert (POST /steno/jobs/{id}/zuordnen)."""
-    job.order = None
+    Knopf fragt, ob sie zu diesem gehoert (POST /steno/jobs/{id}/zuordnen).
+    Ausnahme: der FHIR-Zugang wird gesperrt (_fhir_result)."""
+    job.order, job.lost_patient = None, patient
     job.state = "zuordnen"
     job.detail = f"{why} In T2med beim Patienten auf „Steno“ klicken, der Knopf fragt dann nach."
     logger.info(f"Steno {job.id}: wartet auf Zuordnung – {why}")
@@ -2723,7 +2784,7 @@ async def steno_config():
         "version": VERSION, "gdt": GDT.enabled,
         "workstations": GDT.workstations if GDT.enabled else {},
         "psy_device": GDT.enabled and GDT.psy_device,
-        "fhir": FHIR.enabled,
+        "fhir": _fhir_active(),
         "bloecke": "" if STENO_BLOECKE == "aus" else STENO_BLOECKE,
         "diktat": True,
         "knopf": _knopf_release(),
