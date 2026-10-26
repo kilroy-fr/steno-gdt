@@ -1,0 +1,22 @@
+<!--?xml version="1.0" encoding="UTF-8"?-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Hintergrund -->
+  <rect width="64" height="64" fill="#ffffff"></rect>
+
+  <!-- Praxis-Kreuz -->
+  <rect x="28" y="14" width="8" height="36" fill="#984649"></rect>
+  <rect x="14" y="28" width="36" height="8" fill="#984649"></rect>
+
+  <!-- T im Arial-/Sans-Style -->
+  <path d="
+      M41 34
+      L60 34
+      L60 39
+      L53 39
+      L53 60
+      L48 60
+      L48 39
+      L41 39
+      Z
+    " fill="#555555"></path>
+</svg>

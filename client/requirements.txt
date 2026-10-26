@@ -1,0 +1,6 @@
+# Steno-Knopf (Windows-Client). Bauen: client/build.ps1
+sounddevice~=0.5.6     # Aufnahme (PortAudio im Wheel)
+soundfile~=0.14.0      # FLAC schreiben (libsndfile im Wheel)
+numpy~=2.5.3           # Pegel fuer die Stille-Erkennung, von sounddevice/soundfile ohnehin gebraucht
+requests~=2.34.2       # Server
+pillow~=11.1           # Knopf zeichnen (client/knopf.py): Verlaeufe, Kantenglaettung, Schrift im Bogen

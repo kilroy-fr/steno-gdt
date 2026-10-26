@@ -1,0 +1,7 @@
+# KI-Gesprächsanalyse Server Requirements
+
+fastapi~=0.141.1          # Web-Framework
+uvicorn~=0.52.3           # ASGI Server
+httpx~=0.28.1             # Async HTTP (Ollama Streaming + Whisper)
+python-multipart~=0.0.32  # File-Upload Support
+jinja2~=3.1.6             # HTML-Templates

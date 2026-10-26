@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Steno – Verlauf</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <style>
+    :root { --bg: #f5f6f8; --card: #fff; --text: #1d2330; --muted: #667085; --line: #dfe3ea;
+            --ok: #1e8e3e; --run: #b26a00; --err: #c62828; --accent: #2457c5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text);
+           font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
+    header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+             padding: 14px 16px; background: var(--card); border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: 20px; }
+    header a { color: var(--accent); }
+    main { max-width: 960px; margin: 0 auto; padding: 16px; }
+    .job { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+           padding: 12px 14px; margin-bottom: 12px; }
+    .head { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; }
+    .patient { font-weight: 600; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .state { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 10px; color: #fff;
+             background: var(--run); }
+    .state.gesendet { background: var(--ok); }
+    .state.fehler { background: var(--err); }
+    .state.ersetzt { background: var(--muted); }
+    .detail { margin-top: 6px; color: var(--err); }
+    .detail.info { color: var(--muted); }
+    .warning { margin-top: 6px; color: var(--run); }
+    .text { white-space: pre-wrap; margin: 10px 0 0; padding: 10px; background: var(--bg);
+            border-radius: 6px; font-size: 14px; }
+    details { margin-top: 8px; }
+    summary { cursor: pointer; color: var(--accent); }
+    button { font: inherit; font-size: 13px; padding: 3px 10px; margin-top: 8px; cursor: pointer; }
+    .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Steno – Verlauf</h1>
+    <div>
+      <select id="ap" aria-label="Arbeitsplatz">
+        <option value="">Alle Arbeitsplätze</option>
+        {% for number, name in workstations.items() %}
+        <option value="{{ number }}" {% if number == ap %}selected{% endif %}>{{ name or number }}</option>
+        {% endfor %}
+      </select>
+      &nbsp;<a href="/">Volle Oberfläche</a>
+    </div>
+  </header>
+  <main id="jobs"><div class="empty">Lade…</div></main>
+
+  {% if woerterbuch %}<script src="/static/woerterbuch.js?v={{ version }}"></script>{% endif %}
+  <script>
+    // Nachschau fuer die Auftraege des Steno-Knopfs. Gesendet wird von hier
+    // nichts: das hat der Server laengst getan; was fehlschlug, steht dabei.
+    const STATES = { wartet: "wartet", transkribiert: "transkribiert", schreibt: "schreibt",
+                     sendet: "sendet", gesendet: "an T2med", fehler: "Fehler",
+                     ersetzt: "ersetzt" };
+    const MODES = { abpro: "A/B/PRO", analyze: "Analyse", summary: "Zusammenfassung",
+                    psycho: "Psychotherapie", clean: "Bereinigung", direkt: "Direkt" };
+    const select = document.getElementById("ap");
+    const list = document.getElementById("jobs");
+
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    }
+
+    function card(j) {
+      const started = new Date(j.started).toLocaleString("de-DE",
+        { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+      const info = j.state !== "fehler";
+      return `<div class="job" data-id="${esc(j.id)}">
+        <div class="head">
+          <span class="state ${esc(j.state)}">${esc(STATES[j.state] || j.state)}</span>
+          <span class="patient">${esc(j.patient || "Ohne Patient (Ext. Aufträge)")}</span>
+          <span class="meta">${esc(started)} · ${Math.round(j.duration / 60)} min · AP ${esc(j.ap)}` +
+          (j.mode ? ` · ${esc(MODES[j.mode] || j.mode)}` : "") + `</span>
+        </div>
+        ${j.detail ? `<div class="detail ${info ? "info" : ""}">${esc(j.detail)}</div>` : ""}
+        ${j.mode_note ? `<div class="detail info">${esc(j.mode_note)}</div>` : ""}
+        ${j.warning ? `<div class="warning">⚠ ${esc(j.warning)}</div>` : ""}
+        ${j.text ? `<div class="text">${esc(j.text)}</div>
+          <button data-copy="${esc(j.id)}">Kopieren</button>` : ""}
+        ${j.transcript ? `<details data-transcript="${esc(j.id)}"><summary>Transkript</summary>
+          <div class="text">${esc(j.transcript)}</div></details>` : ""}
+      </div>`;
+    }
+
+    let jobs = [];
+    async function load() {
+      // Neu zeichnen loescht eine Markierung — nicht, solange jemand ein Wort
+      // fuers Woerterbuch markiert hat
+      if (window.Woerterbuch?.busy(list)) return;
+      try {
+        const r = await fetch(`/steno/jobs?ap=${encodeURIComponent(select.value)}`);
+        jobs = (await r.json()).jobs;
+      } catch { return; }
+      // Aufgeklappte Transkripte bleiben beim Neuzeichnen offen.
+      const open = new Set([...document.querySelectorAll("details[open]")].map((d) => d.dataset.transcript));
+      list.innerHTML = jobs.length ? jobs.map(card).join("")
+        : '<div class="empty">Noch keine Aufnahmen vom Steno-Knopf.</div>';
+      open.forEach((id) => list.querySelector(`details[data-transcript="${CSS.escape(id)}"]`)?.setAttribute("open", ""));
+    }
+
+    list.addEventListener("click", async (e) => {
+      const id = e.target.dataset?.copy;
+      if (!id) return;
+      await navigator.clipboard.writeText(jobs.find((j) => j.id === id)?.text || "");
+      e.target.textContent = "✓ kopiert";
+      setTimeout(() => { e.target.textContent = "Kopieren"; }, 1500);
+    });
+    select.addEventListener("change", () => {
+      history.replaceState(null, "", select.value ? `?ap=${select.value}` : location.pathname);
+      load();
+    });
+    window.Woerterbuch?.attach([list]);
+    load();
+    setInterval(load, 5000);
+  </script>
+</body>
+</html>
